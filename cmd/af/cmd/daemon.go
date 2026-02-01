@@ -4,34 +4,55 @@ import (
 	"fmt"
 
 	"github.com/geobrowser/aetherflow/internal/client"
+	"github.com/geobrowser/aetherflow/internal/daemon"
 	"github.com/spf13/cobra"
 )
 
 var daemonCmd = &cobra.Command{
 	Use:   "daemon",
-	Short: "Check daemon status",
-	Long: `Check if aetherd is running and display its status.
-
-To start the daemon, run 'aetherd' directly.`,
+	Short: "Manage the daemon",
+	Long:  `Start the daemon or check its status.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		// Default: show status
 		c := client.New("")
 		status, err := c.Status()
 		if err != nil {
-			fmt.Println("aetherd: not running")
-			fmt.Println("\nTo start: aetherd")
+			fmt.Println("not running")
+			fmt.Println("\nTo start: af daemon start")
 			return
 		}
 
-		fmt.Println("aetherd: running")
-		if socket, ok := status["socket"]; ok {
-			fmt.Printf("  socket: %v\n", socket)
+		fmt.Println("running")
+		if agents, ok := status["agents"]; ok {
+			fmt.Printf("  agents: %v\n", agents)
 		}
-		if count, ok := status["agent_count"]; ok {
-			fmt.Printf("  agents: %v\n", count)
+	},
+}
+
+var daemonStartCmd = &cobra.Command{
+	Use:   "start",
+	Short: "Start the daemon",
+	Long:  `Start the aetherflow daemon. Runs in foreground by default.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		d := daemon.New("")
+		if err := d.Run(); err != nil {
+			Fatal("%v", err)
 		}
+	},
+}
+
+var daemonStopCmd = &cobra.Command{
+	Use:   "stop",
+	Short: "Stop the daemon",
+	Long:  `Stop the running daemon.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		// TODO: Send shutdown signal to daemon
+		fmt.Println("Send SIGTERM to the daemon process to stop it")
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(daemonCmd)
+	daemonCmd.AddCommand(daemonStartCmd)
+	daemonCmd.AddCommand(daemonStopCmd)
 }

@@ -1,6 +1,5 @@
 # Binaries
 /af
-/aetherd
 *.exe
 *.dll
 *.so

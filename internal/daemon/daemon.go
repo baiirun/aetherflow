@@ -1,4 +1,5 @@
-package main
+// Package daemon implements the aetherflow daemon.
+package daemon
 
 import (
 	"context"
@@ -38,24 +39,19 @@ type Response struct {
 	Error   string          `json:"error,omitempty"`
 }
 
-func main() {
-	socketPath := DefaultSocketPath
-	if len(os.Args) > 1 {
-		socketPath = os.Args[1]
+// New creates a new daemon.
+func New(socketPath string) *Daemon {
+	if socketPath == "" {
+		socketPath = DefaultSocketPath
 	}
-
-	d := &Daemon{
+	return &Daemon{
 		socketPath: socketPath,
 		agents:     make(map[protocol.AgentID]*protocol.AgentInfo),
 		nameGen:    protocol.NewNameGenerator(),
 	}
-
-	if err := d.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
 }
 
+// Run starts the daemon and blocks until shutdown.
 func (d *Daemon) Run() error {
 	// Remove stale socket
 	os.Remove(d.socketPath)
@@ -66,7 +62,7 @@ func (d *Daemon) Run() error {
 	}
 	d.listener = listener
 
-	fmt.Printf("aetherd listening on %s\n", d.socketPath)
+	fmt.Printf("listening on %s\n", d.socketPath)
 
 	// Handle shutdown gracefully
 	ctx, cancel := context.WithCancel(context.Background())
@@ -77,7 +73,7 @@ func (d *Daemon) Run() error {
 
 	go func() {
 		<-sigCh
-		fmt.Println("\nShutting down...")
+		fmt.Println("\nshutting down...")
 		cancel()
 		listener.Close()
 	}()

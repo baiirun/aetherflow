@@ -10,15 +10,14 @@ Requires Go 1.21+.
 git clone https://github.com/geobrowser/aetherflow.git
 cd aetherflow
 go build -o af ./cmd/af
-go build -o aetherd ./cmd/aetherd
 ```
 
 ## Quick Start
 
 ```bash
-# Start the daemon
-aetherd
-# Output: aetherd listening on /tmp/aetherd.sock
+# Start the daemon (in a terminal)
+af daemon start
+# Output: listening on /tmp/aetherd.sock
 
 # In another terminal, register an agent
 af agent register
@@ -37,8 +36,8 @@ af agent unregister phantom_core
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                        aetherd                          │
-│                   (daemon process)                      │
+│                     af daemon start                     │
+│                    (daemon process)                     │
 │                                                         │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐     │
 │  │   Agents    │  │   Inbox/    │  │   Message   │     │
@@ -52,7 +51,8 @@ af agent unregister phantom_core
 │                         af                              │
 │                    (CLI client)                         │
 │                                                         │
-│  af daemon          Check if aetherd is running         │
+│  af daemon          Check daemon status                 │
+│  af daemon start    Start the daemon                    │
 │  af agent register  Register and get an ID              │
 │  af agent list      List all agents                     │
 │  af agent unregister <id>                               │
@@ -68,8 +68,9 @@ af agent unregister phantom_core
 
 | Command | Description |
 |---------|-------------|
-| `aetherd` | Start the daemon (listens on `/tmp/aetherd.sock`) |
 | `af daemon` | Check if daemon is running |
+| `af daemon start` | Start the daemon (foreground) |
+| `af daemon stop` | Stop the daemon |
 
 ### Agents
 
