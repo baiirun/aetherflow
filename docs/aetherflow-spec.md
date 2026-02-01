@@ -17,7 +17,7 @@ Aetherflow is an async runtime for agent work scheduling. It turns intent into r
 ## Core concepts
 - **Prog**: Source of truth for tasks, priorities, dependency graphs, and work assignments.
 - **Agent pool**: Fixed set of registered agents; avoid arbitrary spawning.
-- **Teams / tiger teams**: Small collaborative units for consensus mode.
+- **Teams / tiger teams**: Small collaborative units for brainstorming and consensus.
 - **Inbox/outbox**: Lightweight message queues for agent-to-agent and agent-to-human communication.
 - **Librarian**: Background job that curates knowledge from logs and chats.
 - **Daemon**: Communication bus for message routing and agent registry.
@@ -44,38 +44,56 @@ Messages are for coordination, not task assignment. Agents communicate peer-to-p
 - Agent notifies team about something (status, heads up)
 - Agent requests review from human
 - Agents coordinate on shared work ("I'm changing the interface")
+- Team brainstorms approach before implementation
 - Human sends guidance or answers to agents
 
 ### Envelope
-- id
-- ts
-- from (agent/team id)
-- to (agent/team id | human | company_chat | librarian)
-- lane (control | task)
-- priority (P0 | P1 | P2)
-- type (question | blocker | status | review_ready | review_feedback | done | abandoned)
-- task_id (required for lane=task; forbidden for lane=control)
-- summary (1-2 sentences)
+- id (UUIDv7 for time-ordering)
+- ts (Unix milliseconds)
+- from (agent/team address)
+- to (agent/team/human/librarian address)
+- type (status | question | blocker | proposal | agree | disagree | review_ready | review_feedback | done | abandoned)
+- task_id (optional task reference)
+- summary (message content)
 - links (optional: prog task, diff, logs)
 
-### Inbox/outbox
-- Each agent has an inbox with two lanes: control and task.
-- Control lane is drained first (priority messages).
-- Agents push to their outbox; router delivers to recipient inboxes.
-- Agents poll their inbox at natural breakpoints (after tool calls, between subtasks).
-- Push/interrupt is not possible - MCP tools cannot invoke Claude.
+### Address types
+- `agent:<id>` - specific agent (e.g., `agent:ghost_wolf`)
+- `team:<id>` - team inbox (e.g., `team:alpha`)
+- `human` - human operator
+- `librarian` - knowledge capture system
 
-### Message routing
-- Outbox is source of truth for pending messages
-- Router polls outboxes and delivers to recipient inboxes based on `to` field
-- Inbox is ephemeral (rebuilt on restart from pending outbox messages)
-- Librarian filters for `to=librarian`
-- Company chat filters for `to=company_chat`
+### Inbox model
+- Each agent has an inbox; each team has a shared inbox
+- Messages accumulate (not removed on read)
+- Agents poll with `--since <timestamp>` to get only new messages
+- Agent tracks last seen timestamp in its own context
+- Inbox is ephemeral (not persisted; rebuilt from outbox on restart)
 
-### Tiger team chat
-- Treated as a team inbox/outbox with `to=team:<id>`.
-- Agents in a team can message each other to coordinate.
-- No designated scribe needed - any agent can communicate externally.
+### Outbox model
+- Agents push messages to their outbox
+- Outbox is persisted (JSONL)
+- Router polls outboxes and delivers to recipient inboxes
+
+### Polling convention
+Agents should check their inbox:
+1. Before starting work on a team task
+2. After sending a message, check for responses
+3. Before making major decisions, check for new input
+
+This is a prompting convention, not enforced by the system.
+
+## Team brainstorming
+
+Teams can brainstorm before implementation:
+
+1. Agents join a team and poll the team inbox
+2. Agents discuss approach via messages (proposal, agree, disagree)
+3. Team converges on a plan
+4. One agent becomes the driver and implements (or work is partitioned)
+5. Non-drivers can review
+
+To avoid conflicts, use a single driver when there's risk of overlapping edits.
 
 ## Task source of truth
 - Tasks live in prog with priorities and dependency graphs.
@@ -121,9 +139,8 @@ Use a structured `prog log` entry with a `status_snapshot` prefix for clean hand
 - Focus on autonomy: blocker rate, rework rate, repeated mistakes, handoff quality.
 
 ## Open questions
-- Reliability semantics (at-least-once vs exactly-once, dedupe, replay)
-- Ordering guarantees (per sender, per task)
-- Message ack and timeout behavior
+- How does brainstorming end? Timeout? Explicit "let's go"? Quorum?
+- Context window limits for agents with different model sizes
 - Knowledge capture design across logs, librarian, and prog learn
 
 
@@ -190,10 +207,8 @@ aetherflow agent register [name] [--label X] [--capacity N]
 aetherflow agent list
 aetherflow agent unregister <agent-id>
 
-aetherflow message send <to> <summary> [--lane control|task] [--priority P0|P1|P2] [--type X] [--task ID]
-aetherflow message receive [--lane X] [--wait] [--limit N]
-aetherflow message peek [--lane X] [--limit N]
-aetherflow message ack <message-id>
+aetherflow message send <to> <summary> [--type X] [--task ID]
+aetherflow message peek <inbox> [--since <timestamp>] [--limit N]
 ```
 
 ## Typical agent workflow
@@ -212,11 +227,34 @@ aetherflow message ack <message-id>
    $ prog log ts-abc123 "Implemented feature X"
 
 5. Poll inbox periodically for messages
-   $ af message peek
+   $ af message peek agent:ghost_wolf --since 1706812800000
 
 6. If blocked, send message to human
    $ af message send human "Blocked on API credentials" --type blocker --task ts-abc123
 
 7. Complete task
    $ prog done ts-abc123
+```
+
+## Team brainstorming workflow
+
+```
+1. Agents register and join team
+   $ af agent register
+   (agent gets ID: ghost_wolf)
+
+2. Poll team inbox for discussion
+   $ af message peek team:alpha --since 0
+
+3. Propose approach
+   $ af message send team:alpha "I think we should use JWT for auth" --type proposal
+
+4. Check for responses
+   $ af message peek team:alpha --since 1706812800000
+
+5. Agree or disagree
+   $ af message send team:alpha "Agree, JWT is simpler for v1" --type agree
+
+6. One agent becomes driver and implements
+   $ prog start ts-auth-epic
 ```

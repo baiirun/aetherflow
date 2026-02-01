@@ -10,14 +10,12 @@ import (
 
 func makeMsg(id string, to protocol.Address) *protocol.Message {
 	return &protocol.Message{
-		ID:       id,
-		TS:       1000,
-		From:     protocol.Address{Type: "agent", ID: "test_agent"},
-		To:       to,
-		Lane:     protocol.LaneControl,
-		Priority: protocol.PriorityP1,
-		Type:     protocol.TypeStatus,
-		Summary:  "Message " + id,
+		ID:      id,
+		TS:      1000,
+		From:    protocol.Address{Type: "agent", ID: "test_agent"},
+		To:      to,
+		Type:    protocol.TypeStatus,
+		Summary: "Message " + id,
 	}
 }
 
@@ -28,27 +26,27 @@ func TestOutbox_PushPop(t *testing.T) {
 	}
 
 	agentID := protocol.AgentID("test_agent")
-	overseer := protocol.Address{Type: "overseer"}
+	human := protocol.Address{Type: "human"}
 
 	// Push messages
-	store.Push(agentID, makeMsg("msg-1", overseer))
-	store.Push(agentID, makeMsg("msg-2", overseer))
+	store.Push(agentID, makeMsg("msg-1", human))
+	store.Push(agentID, makeMsg("msg-2", human))
 
-	// Pop for overseer
-	msg := store.Pop(overseer)
+	// Pop for human
+	msg := store.Pop(human)
 	if msg == nil || msg.ID != "msg-1" {
-		t.Errorf("Pop(overseer) = %v, want msg-1", msg)
+		t.Errorf("Pop(human) = %v, want msg-1", msg)
 	}
 
-	msg = store.Pop(overseer)
+	msg = store.Pop(human)
 	if msg == nil || msg.ID != "msg-2" {
-		t.Errorf("Pop(overseer) = %v, want msg-2", msg)
+		t.Errorf("Pop(human) = %v, want msg-2", msg)
 	}
 
 	// Empty
-	msg = store.Pop(overseer)
+	msg = store.Pop(human)
 	if msg != nil {
-		t.Errorf("Pop(overseer) = %v, want nil", msg)
+		t.Errorf("Pop(human) = %v, want nil", msg)
 	}
 }
 
@@ -59,12 +57,12 @@ func TestOutbox_PopFiltersDestination(t *testing.T) {
 	}
 
 	agentID := protocol.AgentID("test_agent")
-	overseer := protocol.Address{Type: "overseer"}
+	human := protocol.Address{Type: "human"}
 	librarian := protocol.Address{Type: "librarian"}
 
-	store.Push(agentID, makeMsg("msg-1", overseer))
+	store.Push(agentID, makeMsg("msg-1", human))
 	store.Push(agentID, makeMsg("msg-2", librarian))
-	store.Push(agentID, makeMsg("msg-3", overseer))
+	store.Push(agentID, makeMsg("msg-3", human))
 
 	// Pop for librarian
 	msg := store.Pop(librarian)
@@ -78,7 +76,7 @@ func TestOutbox_PopFiltersDestination(t *testing.T) {
 		t.Errorf("Pop(librarian) = %v, want nil", msg)
 	}
 
-	// Overseer messages still there
+	// Human messages still there
 	if store.Depth(agentID) != 2 {
 		t.Errorf("Depth = %d, want 2", store.Depth(agentID))
 	}
@@ -92,19 +90,19 @@ func TestOutbox_PopFrom(t *testing.T) {
 
 	agent1 := protocol.AgentID("agent_1")
 	agent2 := protocol.AgentID("agent_2")
-	overseer := protocol.Address{Type: "overseer"}
+	human := protocol.Address{Type: "human"}
 
-	store.Push(agent1, makeMsg("msg-1", overseer))
-	store.Push(agent2, makeMsg("msg-2", overseer))
+	store.Push(agent1, makeMsg("msg-1", human))
+	store.Push(agent2, makeMsg("msg-2", human))
 
 	// Pop from specific agent
-	msg := store.PopFrom(agent1, overseer)
+	msg := store.PopFrom(agent1, human)
 	if msg == nil || msg.ID != "msg-1" {
 		t.Errorf("PopFrom(agent1) = %v, want msg-1", msg)
 	}
 
 	// agent2's message still there
-	msg = store.PopFrom(agent2, overseer)
+	msg = store.PopFrom(agent2, human)
 	if msg == nil || msg.ID != "msg-2" {
 		t.Errorf("PopFrom(agent2) = %v, want msg-2", msg)
 	}
@@ -117,23 +115,23 @@ func TestOutbox_Peek(t *testing.T) {
 	}
 
 	agentID := protocol.AgentID("test_agent")
-	overseer := protocol.Address{Type: "overseer"}
+	human := protocol.Address{Type: "human"}
 	librarian := protocol.Address{Type: "librarian"}
 
-	store.Push(agentID, makeMsg("msg-1", overseer))
+	store.Push(agentID, makeMsg("msg-1", human))
 	store.Push(agentID, makeMsg("msg-2", librarian))
-	store.Push(agentID, makeMsg("msg-3", overseer))
+	store.Push(agentID, makeMsg("msg-3", human))
 
-	// Peek for overseer
-	msgs := store.Peek(overseer, 0)
+	// Peek for human
+	msgs := store.Peek(human, 0)
 	if len(msgs) != 2 {
-		t.Fatalf("Peek(overseer) len = %d, want 2", len(msgs))
+		t.Fatalf("Peek(human) len = %d, want 2", len(msgs))
 	}
 
 	// With limit
-	msgs = store.Peek(overseer, 1)
+	msgs = store.Peek(human, 1)
 	if len(msgs) != 1 {
-		t.Fatalf("Peek(overseer, 1) len = %d, want 1", len(msgs))
+		t.Fatalf("Peek(human, 1) len = %d, want 1", len(msgs))
 	}
 
 	// Peek doesn't remove
@@ -149,10 +147,10 @@ func TestOutbox_PeekFrom(t *testing.T) {
 	}
 
 	agentID := protocol.AgentID("test_agent")
-	overseer := protocol.Address{Type: "overseer"}
+	human := protocol.Address{Type: "human"}
 
-	store.Push(agentID, makeMsg("msg-1", overseer))
-	store.Push(agentID, makeMsg("msg-2", overseer))
+	store.Push(agentID, makeMsg("msg-1", human))
+	store.Push(agentID, makeMsg("msg-2", human))
 
 	msgs := store.PeekFrom(agentID, 0)
 	if len(msgs) != 2 {
@@ -172,9 +170,9 @@ func TestOutbox_Get(t *testing.T) {
 	}
 
 	agentID := protocol.AgentID("test_agent")
-	overseer := protocol.Address{Type: "overseer"}
+	human := protocol.Address{Type: "human"}
 
-	store.Push(agentID, makeMsg("msg-1", overseer))
+	store.Push(agentID, makeMsg("msg-1", human))
 
 	msg := store.Get("msg-1")
 	if msg == nil || msg.ID != "msg-1" {
@@ -194,12 +192,12 @@ func TestOutbox_QueueCap(t *testing.T) {
 	}
 
 	agentID := protocol.AgentID("test_agent")
-	overseer := protocol.Address{Type: "overseer"}
+	human := protocol.Address{Type: "human"}
 
-	store.Push(agentID, makeMsg("msg-1", overseer))
-	store.Push(agentID, makeMsg("msg-2", overseer))
+	store.Push(agentID, makeMsg("msg-1", human))
+	store.Push(agentID, makeMsg("msg-2", human))
 
-	if err := store.Push(agentID, makeMsg("msg-3", overseer)); err != ErrQueueFull {
+	if err := store.Push(agentID, makeMsg("msg-3", human)); err != ErrQueueFull {
 		t.Errorf("Push(msg-3) = %v, want ErrQueueFull", err)
 	}
 }
@@ -211,10 +209,10 @@ func TestOutbox_DeleteAgent(t *testing.T) {
 	}
 
 	agentID := protocol.AgentID("test_agent")
-	overseer := protocol.Address{Type: "overseer"}
+	human := protocol.Address{Type: "human"}
 
-	store.Push(agentID, makeMsg("msg-1", overseer))
-	store.Push(agentID, makeMsg("msg-2", overseer))
+	store.Push(agentID, makeMsg("msg-1", human))
+	store.Push(agentID, makeMsg("msg-2", human))
 
 	store.DeleteAgent(agentID)
 
@@ -241,8 +239,8 @@ func TestOutbox_ValidationError(t *testing.T) {
 		ID:   "bad-1",
 		TS:   1000,
 		From: protocol.Address{Type: "agent", ID: "test"},
-		To:   protocol.Address{Type: "overseer"},
-		Lane: protocol.LaneControl,
+		To:   protocol.Address{Type: "human"},
+		Type: protocol.TypeStatus,
 	}
 
 	if err := store.Push(agentID, badMsg); err == nil {
@@ -255,7 +253,7 @@ func TestOutbox_Persistence(t *testing.T) {
 	storePath := filepath.Join(dir, "outbox")
 
 	agentID := protocol.AgentID("test_agent")
-	overseer := protocol.Address{Type: "overseer"}
+	human := protocol.Address{Type: "human"}
 
 	// Create store and push messages
 	store1, err := New(Config{StorePath: storePath})
@@ -263,11 +261,11 @@ func TestOutbox_Persistence(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	store1.Push(agentID, makeMsg("msg-1", overseer))
-	store1.Push(agentID, makeMsg("msg-2", overseer))
+	store1.Push(agentID, makeMsg("msg-1", human))
+	store1.Push(agentID, makeMsg("msg-2", human))
 
 	// Pop one message
-	msg := store1.Pop(overseer)
+	msg := store1.Pop(human)
 	if msg.ID != "msg-1" {
 		t.Fatalf("Pop() = %s, want msg-1", msg.ID)
 	}
@@ -283,7 +281,7 @@ func TestOutbox_Persistence(t *testing.T) {
 		t.Errorf("Depth after replay = %d, want 1", store2.Depth(agentID))
 	}
 
-	msg = store2.Pop(overseer)
+	msg = store2.Pop(human)
 	if msg == nil || msg.ID != "msg-2" {
 		t.Errorf("Pop() = %v, want msg-2", msg)
 	}
@@ -294,7 +292,7 @@ func TestOutbox_PersistenceOrdering(t *testing.T) {
 	storePath := filepath.Join(dir, "outbox")
 
 	agentID := protocol.AgentID("test_agent")
-	overseer := protocol.Address{Type: "overseer"}
+	human := protocol.Address{Type: "human"}
 
 	// Create store with messages at different timestamps
 	store1, err := New(Config{StorePath: storePath})
@@ -302,11 +300,11 @@ func TestOutbox_PersistenceOrdering(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	msg1 := makeMsg("msg-1", overseer)
+	msg1 := makeMsg("msg-1", human)
 	msg1.TS = 1000
-	msg2 := makeMsg("msg-2", overseer)
+	msg2 := makeMsg("msg-2", human)
 	msg2.TS = 2000
-	msg3 := makeMsg("msg-3", overseer)
+	msg3 := makeMsg("msg-3", human)
 	msg3.TS = 1500
 
 	store1.Push(agentID, msg1)
@@ -338,9 +336,9 @@ func TestOutbox_EmptyAgentReturnsNil(t *testing.T) {
 	}
 
 	agentID := protocol.AgentID("nonexistent")
-	overseer := protocol.Address{Type: "overseer"}
+	human := protocol.Address{Type: "human"}
 
-	if msg := store.PopFrom(agentID, overseer); msg != nil {
+	if msg := store.PopFrom(agentID, human); msg != nil {
 		t.Errorf("PopFrom(nonexistent) = %v, want nil", msg)
 	}
 
@@ -360,10 +358,10 @@ func TestOutbox_WildcardFilter(t *testing.T) {
 	}
 
 	agentID := protocol.AgentID("test_agent")
-	overseer := protocol.Address{Type: "overseer"}
+	human := protocol.Address{Type: "human"}
 	librarian := protocol.Address{Type: "librarian"}
 
-	store.Push(agentID, makeMsg("msg-1", overseer))
+	store.Push(agentID, makeMsg("msg-1", human))
 	store.Push(agentID, makeMsg("msg-2", librarian))
 
 	// Empty filter matches all
@@ -383,9 +381,9 @@ func TestOutbox_DeleteAgentWithPersistence(t *testing.T) {
 	}
 
 	agentID := protocol.AgentID("test_agent")
-	overseer := protocol.Address{Type: "overseer"}
+	human := protocol.Address{Type: "human"}
 
-	store.Push(agentID, makeMsg("msg-1", overseer))
+	store.Push(agentID, makeMsg("msg-1", human))
 
 	// Delete should remove log file
 	store.DeleteAgent(agentID)

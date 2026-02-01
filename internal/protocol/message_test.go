@@ -12,9 +12,8 @@ func TestParseAddress(t *testing.T) {
 		wantErr bool
 	}{
 		// Singleton addresses
-		{"overseer", Address{Type: "overseer"}, false},
+		{"human", Address{Type: "human"}, false},
 		{"librarian", Address{Type: "librarian"}, false},
-		{"company_chat", Address{Type: "company_chat"}, false},
 
 		// Agent addresses
 		{"agent:ghost_wolf", Address{Type: "agent", ID: "ghost_wolf"}, false},
@@ -52,7 +51,7 @@ func TestAddressString(t *testing.T) {
 		addr Address
 		want string
 	}{
-		{Address{Type: "overseer"}, "overseer"},
+		{Address{Type: "human"}, "human"},
 		{Address{Type: "librarian"}, "librarian"},
 		{Address{Type: "agent", ID: "ghost_wolf"}, "agent:ghost_wolf"},
 		{Address{Type: "team", ID: "frontend"}, "team:frontend"},
@@ -69,9 +68,9 @@ func TestAddressString(t *testing.T) {
 
 func TestNewMessage(t *testing.T) {
 	from := Address{Type: "agent", ID: "ghost_wolf"}
-	to := Address{Type: "overseer"}
+	to := Address{Type: "team", ID: "alpha"}
 
-	msg := NewMessage(from, to, LaneTask, PriorityP1, TypeStatus, "Working on feature X")
+	msg := NewMessage(from, to, TypeStatus, "Working on feature X")
 
 	if msg.ID == "" {
 		t.Error("Message ID should not be empty")
@@ -85,12 +84,6 @@ func TestNewMessage(t *testing.T) {
 	if msg.To != to {
 		t.Errorf("Message.To = %v, want %v", msg.To, to)
 	}
-	if msg.Lane != LaneTask {
-		t.Errorf("Message.Lane = %v, want %v", msg.Lane, LaneTask)
-	}
-	if msg.Priority != PriorityP1 {
-		t.Errorf("Message.Priority = %v, want %v", msg.Priority, PriorityP1)
-	}
 	if msg.Type != TypeStatus {
 		t.Errorf("Message.Type = %v, want %v", msg.Type, TypeStatus)
 	}
@@ -99,28 +92,25 @@ func TestNewMessage(t *testing.T) {
 	}
 }
 
-func TestMessageValidate(t *testing.T) {
-	validTaskMsg := &Message{
-		ID:       "msg-123",
-		TS:       1234567890,
-		From:     Address{Type: "agent", ID: "ghost_wolf"},
-		To:       Address{Type: "overseer"},
-		Lane:     LaneTask,
-		Priority: PriorityP1,
-		Type:     TypeStatus,
-		TaskID:   "ts-abc123",
-		Summary:  "Progress update",
-	}
+func TestMessageWithTaskID(t *testing.T) {
+	from := Address{Type: "agent", ID: "ghost_wolf"}
+	to := Address{Type: "human"}
 
-	validControlMsg := &Message{
-		ID:       "msg-456",
-		TS:       1234567890,
-		From:     Address{Type: "overseer"},
-		To:       Address{Type: "agent", ID: "ghost_wolf"},
-		Lane:     LaneControl,
-		Priority: PriorityP0,
-		Type:     TypeAssign,
-		Summary:  "New task assigned",
+	msg := NewMessage(from, to, TypeBlocker, "Blocked on API credentials").WithTaskID("ts-123")
+
+	if msg.TaskID != "ts-123" {
+		t.Errorf("Message.TaskID = %q, want %q", msg.TaskID, "ts-123")
+	}
+}
+
+func TestMessageValidate(t *testing.T) {
+	validMsg := &Message{
+		ID:      "msg-123",
+		TS:      1234567890,
+		From:    Address{Type: "agent", ID: "ghost_wolf"},
+		To:      Address{Type: "team", ID: "alpha"},
+		Type:    TypeStatus,
+		Summary: "Progress update",
 	}
 
 	tests := []struct {
@@ -128,16 +118,13 @@ func TestMessageValidate(t *testing.T) {
 		modify  func(*Message)
 		wantErr bool
 	}{
-		{"valid task message", func(m *Message) { *m = *validTaskMsg }, false},
-		{"valid control message", func(m *Message) { *m = *validControlMsg }, false},
-		{"missing ID", func(m *Message) { *m = *validTaskMsg; m.ID = "" }, true},
-		{"missing timestamp", func(m *Message) { *m = *validTaskMsg; m.TS = 0 }, true},
-		{"missing from", func(m *Message) { *m = *validTaskMsg; m.From = Address{} }, true},
-		{"missing to", func(m *Message) { *m = *validTaskMsg; m.To = Address{} }, true},
-		{"invalid lane", func(m *Message) { *m = *validTaskMsg; m.Lane = "invalid" }, true},
-		{"missing summary", func(m *Message) { *m = *validTaskMsg; m.Summary = "" }, true},
-		{"task lane without task_id", func(m *Message) { *m = *validTaskMsg; m.TaskID = "" }, true},
-		{"control lane with task_id", func(m *Message) { *m = *validControlMsg; m.TaskID = "ts-123" }, true},
+		{"valid message", func(m *Message) { *m = *validMsg }, false},
+		{"missing ID", func(m *Message) { *m = *validMsg; m.ID = "" }, true},
+		{"missing timestamp", func(m *Message) { *m = *validMsg; m.TS = 0 }, true},
+		{"missing from", func(m *Message) { *m = *validMsg; m.From = Address{} }, true},
+		{"missing to", func(m *Message) { *m = *validMsg; m.To = Address{} }, true},
+		{"missing summary", func(m *Message) { *m = *validMsg; m.Summary = "" }, true},
+		{"with task ID", func(m *Message) { *m = *validMsg; m.TaskID = "ts-123" }, false},
 	}
 
 	for _, tt := range tests {
@@ -154,15 +141,13 @@ func TestMessageValidate(t *testing.T) {
 
 func TestMessageJSON(t *testing.T) {
 	original := &Message{
-		ID:       "msg-123",
-		TS:       1234567890000,
-		From:     Address{Type: "agent", ID: "ghost_wolf"},
-		To:       Address{Type: "overseer"},
-		Lane:     LaneTask,
-		Priority: PriorityP1,
-		Type:     TypeStatus,
-		TaskID:   "ts-abc123",
-		Summary:  "Working on feature X",
+		ID:      "msg-123",
+		TS:      1234567890000,
+		From:    Address{Type: "agent", ID: "ghost_wolf"},
+		To:      Address{Type: "team", ID: "alpha"},
+		Type:    TypeStatus,
+		TaskID:  "ts-abc123",
+		Summary: "Working on feature X",
 		Links: []Link{
 			{Type: "diff", URL: "https://github.com/org/repo/pull/123"},
 		},
@@ -193,12 +178,6 @@ func TestMessageJSON(t *testing.T) {
 	if decoded.To != original.To {
 		t.Errorf("To = %v, want %v", decoded.To, original.To)
 	}
-	if decoded.Lane != original.Lane {
-		t.Errorf("Lane = %v, want %v", decoded.Lane, original.Lane)
-	}
-	if decoded.Priority != original.Priority {
-		t.Errorf("Priority = %v, want %v", decoded.Priority, original.Priority)
-	}
 	if decoded.Type != original.Type {
 		t.Errorf("Type = %v, want %v", decoded.Type, original.Type)
 	}
@@ -216,9 +195,10 @@ func TestMessageJSON(t *testing.T) {
 func TestMessageTypes(t *testing.T) {
 	// Verify all message types are distinct
 	types := []MessageType{
-		TypeAssign, TypeAck, TypeDone, TypeAbandoned,
 		TypeStatus, TypeQuestion, TypeBlocker,
+		TypeProposal, TypeAgree, TypeDisagree,
 		TypeReviewReady, TypeReviewFeedback,
+		TypeDone, TypeAbandoned,
 	}
 
 	seen := make(map[MessageType]bool)
@@ -230,28 +210,5 @@ func TestMessageTypes(t *testing.T) {
 		if mt == "" {
 			t.Error("Empty message type found")
 		}
-	}
-}
-
-func TestPriorities(t *testing.T) {
-	// Verify all priorities are distinct
-	priorities := []Priority{PriorityP0, PriorityP1, PriorityP2}
-
-	seen := make(map[Priority]bool)
-	for _, p := range priorities {
-		if seen[p] {
-			t.Errorf("Duplicate priority: %s", p)
-		}
-		seen[p] = true
-	}
-}
-
-func TestLanes(t *testing.T) {
-	// Verify lanes are distinct
-	if LaneControl == LaneTask {
-		t.Error("LaneControl and LaneTask should be different")
-	}
-	if LaneControl == "" || LaneTask == "" {
-		t.Error("Lanes should not be empty")
 	}
 }
