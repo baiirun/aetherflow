@@ -15,11 +15,11 @@ go build -o af ./cmd/af
 ## Quick Start
 
 ```bash
-# Start the daemon (in a terminal)
-af daemon start
-# Output: listening on /tmp/aetherd.sock
+# Start the daemon in background
+af daemon start -d
+# Output: daemon started (pid 12345)
 
-# In another terminal, register an agent
+# Register an agent
 af agent register
 # Output: phantom_core
 
@@ -28,8 +28,8 @@ af agent list
 # ID            STATE  TASK
 # phantom_core  idle   -
 
-# Unregister when done
-af agent unregister phantom_core
+# Stop the daemon
+af daemon stop
 ```
 
 ## Architecture
@@ -69,8 +69,9 @@ af agent unregister phantom_core
 | Command | Description |
 |---------|-------------|
 | `af daemon` | Check if daemon is running |
-| `af daemon start` | Start the daemon (foreground) |
-| `af daemon stop` | Stop the daemon |
+| `af daemon start` | Start the daemon (foreground, Ctrl+C to stop) |
+| `af daemon start -d` | Start the daemon (background) |
+| `af daemon stop` | Stop the background daemon |
 
 ### Agents
 

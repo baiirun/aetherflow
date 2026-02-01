@@ -24,6 +24,7 @@ type Daemon struct {
 	agents     map[protocol.AgentID]*protocol.AgentInfo
 	nameGen    *protocol.NameGenerator
 	mu         sync.RWMutex
+	shutdown   chan struct{}
 }
 
 // Request is the JSON-RPC style request envelope.
@@ -48,6 +49,7 @@ func New(socketPath string) *Daemon {
 		socketPath: socketPath,
 		agents:     make(map[protocol.AgentID]*protocol.AgentInfo),
 		nameGen:    protocol.NewNameGenerator(),
+		shutdown:   make(chan struct{}),
 	}
 }
 
@@ -72,7 +74,10 @@ func (d *Daemon) Run() error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		<-sigCh
+		select {
+		case <-sigCh:
+		case <-d.shutdown:
+		}
 		fmt.Println("\nshutting down...")
 		cancel()
 		listener.Close()
@@ -123,9 +128,20 @@ func (d *Daemon) handleRequest(req *Request) *Response {
 		return d.handleListAgents()
 	case "status":
 		return d.handleStatus()
+	case "shutdown":
+		return d.handleShutdown()
 	default:
 		return &Response{Success: false, Error: fmt.Sprintf("unknown method: %s", req.Method)}
 	}
+}
+
+func (d *Daemon) handleShutdown() *Response {
+	// Signal shutdown in background so we can send response first
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(d.shutdown)
+	}()
+	return &Response{Success: true}
 }
 
 func (d *Daemon) handleRegister() *Response {

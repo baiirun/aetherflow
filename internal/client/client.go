@@ -99,3 +99,8 @@ func (c *Client) ListAgents() ([]*protocol.AgentInfo, error) {
 	}
 	return agents, nil
 }
+
+// Shutdown stops the daemon.
+func (c *Client) Shutdown() error {
+	return c.call("shutdown", nil, nil)
+}
