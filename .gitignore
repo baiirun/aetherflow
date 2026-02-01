@@ -1,5 +1,6 @@
 # Binaries
-/aetherflow
+/af
+/aetherd
 *.exe
 *.dll
 *.so

@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/geobrowser/aetherflow/cmd/aetherflow/cmd"
+	"github.com/geobrowser/aetherflow/cmd/af/cmd"
 )
 
 func main() {

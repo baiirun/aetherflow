@@ -8,13 +8,15 @@ import (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "aetherflow",
-	Short: "Async runtime for agent work scheduling",
-	Long: `Aetherflow is an async runtime for agent work scheduling.
+	Use:   "af",
+	Short: "Aetherflow CLI - async runtime for agent work scheduling",
+	Long: `af is the CLI for aetherflow, an async runtime for agent work scheduling.
 
 It turns intent into reliable, high-quality work across non-deterministic
 agents by combining a central task system with lightweight messaging and
-clear state transitions.`,
+clear state transitions.
+
+The daemon (aetherd) must be running for most commands to work.`,
 }
 
 // Execute runs the root command.
