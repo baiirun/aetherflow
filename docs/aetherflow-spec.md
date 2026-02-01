@@ -6,81 +6,101 @@ Aetherflow is an async runtime for agent work scheduling. It turns intent into r
 ## Goals
 - Stable throughput over raw utilization
 - High quality output with explicit objective and subjective gates
-- Clear control-plane semantics (preemption, rebalancing)
 - Low coordination overhead through lean messaging
 - Fast, repeatable handoffs across agents and teams
 
 ## Non-goals (for v1)
-- Fully autonomous code generation without oversight
-- Task decomposition and planning fully handled inside the orchestrator
+- Fully autonomous code generation without human oversight
+- Task decomposition and planning fully handled by the system
 - Heavy metrics dashboards or optimization engines
 
 ## Core concepts
-- **Prog**: Source of truth for tasks, priorities, and dependency graphs.
-- **Overseer**: Schedules work by delegating task IDs to agent/team inboxes.
+- **Prog**: Source of truth for tasks, priorities, dependency graphs, and work assignments.
 - **Agent pool**: Fixed set of registered agents; avoid arbitrary spawning.
 - **Teams / tiger teams**: Small collaborative units for consensus mode.
-- **Inbox/outbox**: Lightweight message queues for control and task messages.
+- **Inbox/outbox**: Lightweight message queues for agent-to-agent and agent-to-human communication.
 - **Librarian**: Background job that curates knowledge from logs and chats.
+- **Daemon**: Communication bus for message routing and agent registry.
 
 ## Scheduling model
-- Overseer pulls from prog and delegates work to agents/teams.
-- Admission control and backpressure are handled at the overseer.
-- Keep per-agent queue caps small to avoid thrash.
-- Rebalancing is done by overseer when idle or blocked time accumulates.
 
-## Messaging protocol (slim)
-Messages contain minimal metadata. All task detail lives in prog.
+Agents are autonomous and self-serve from prog:
+
+1. Agent checks `prog ready` to see available work
+2. Agent claims a task with `prog start <id>`
+3. Agent works, logs progress with `prog log`
+4. Agent completes with `prog done` or raises blockers
+
+No central overseer delegates work. Prog is the coordination mechanism - it tracks who is working on what, preventing conflicts. Agents pull work when they have capacity.
+
+Backpressure is natural: if all tasks are claimed, new agents wait. If an agent is blocked, the task remains assigned until resolved or abandoned.
+
+## Messaging protocol
+
+Messages are for coordination, not task assignment. Agents communicate peer-to-peer.
+
+### Use cases
+- Agent asks human for help (blocker, question)
+- Agent notifies team about something (status, heads up)
+- Agent requests review from human
+- Agents coordinate on shared work ("I'm changing the interface")
+- Human sends guidance or answers to agents
 
 ### Envelope
 - id
 - ts
 - from (agent/team id)
-- to (overseer | agent/team id | company_chat | librarian)
+- to (agent/team id | human | company_chat | librarian)
 - lane (control | task)
 - priority (P0 | P1 | P2)
-- type (assign | ack | question | blocker | status | review_ready | review_feedback | done | abandoned)
+- type (question | blocker | status | review_ready | review_feedback | done | abandoned)
 - task_id (required for lane=task; forbidden for lane=control)
 - summary (1-2 sentences)
 - links (optional: prog task, diff, logs)
 
 ### Inbox/outbox
-- Agents/teams have two inbox lanes: control and task.
-- Control lane is always drained first.
-- Outbox can mirror lanes, but default is a single outbox filtered by `to`.
-  - Overseer filters for `to=overseer`.
-  - Librarian filters for `to=librarian`.
-  - Optional company chat filters for `to=company_chat`.
-- Overseer handles overload by deferring new assignments, prioritizing P0 control, and rebalancing work.
+- Each agent has an inbox with two lanes: control and task.
+- Control lane is drained first (priority messages).
+- Agents push to their outbox; router delivers to recipient inboxes.
+- Agents poll their inbox at natural breakpoints (after tool calls, between subtasks).
+- Push/interrupt is not possible - MCP tools cannot invoke Claude.
+
+### Message routing
+- Outbox is source of truth for pending messages
+- Router polls outboxes and delivers to recipient inboxes based on `to` field
+- Inbox is ephemeral (rebuilt on restart from pending outbox messages)
+- Librarian filters for `to=librarian`
+- Company chat filters for `to=company_chat`
 
 ### Tiger team chat
 - Treated as a team inbox/outbox with `to=team:<id>`.
-- One designated scribe/driver is responsible for task-linked messages to overseer.
+- Agents in a team can message each other to coordinate.
+- No designated scribe needed - any agent can communicate externally.
 
 ## Task source of truth
 - Tasks live in prog with priorities and dependency graphs.
-- Overseer reads from prog and delegates to agent/team inboxes.
-- Messaging protocol only includes the task identifier; agent/team reads full task details from prog at start.
+- Agents claim work directly from prog.
+- Messaging protocol only includes the task identifier; agent reads full task details from prog at start.
+- Prog tracks assignments - prevents two agents from claiming the same task.
 
 ## Agent state machine (initial)
 This should be tuned in practice; keep heuristics lightweight and adjust with real usage.
 
 ### States
-idle -> queued -> active -> (question | blocked | ready_for_review) -> review -> done
+idle -> active -> (question | blocked | ready_for_review) -> done
 fallback: active -> abandoned (if task is invalidated or re-scoped)
 
 ### Transitions + heuristics
-- queued -> active: agent accepts task and loads details from prog
+- idle -> active: agent claims task from prog (`prog start`)
 - active -> question: ambiguity that doesn't block progress; include options + default choice
 - active -> blocked: missing dependency, unclear requirement, or external approval needed; include minimal question + proposed next step
 - active -> ready_for_review: task checklist complete; tests pass (or explicitly skipped with reason); no open questions; diff scoped to task; required artifacts attached (notes/logs)
-- ready_for_review -> review: overseer/auditor begins review
-- review -> done: review passes; changes merged or task closed in prog
-- review -> active: review requests changes; include specific action list
+- ready_for_review -> done: review passes; changes merged or task closed in prog
+- ready_for_review -> active: review requests changes; include specific action list
 - any -> abandoned: task invalidated; record reason + link to replacement task if any
 
 ## Status snapshot (handoff)
-Use a structured `prog log` entry with a `status_snapshot` prefix so the overseer can parse it.
+Use a structured `prog log` entry with a `status_snapshot` prefix for clean handoffs.
 
 ### Prompting fields
 - state (active | blocked | question | ready_for_review)
@@ -103,7 +123,7 @@ Use a structured `prog log` entry with a `status_snapshot` prefix so the oversee
 ## Open questions
 - Reliability semantics (at-least-once vs exactly-once, dedupe, replay)
 - Ordering guarantees (per sender, per task)
-- Control message ack and timeout behavior
+- Message ack and timeout behavior
 - Knowledge capture design across logs, librarian, and prog learn
 
 
@@ -111,6 +131,13 @@ Use a structured `prog log` entry with a `status_snapshot` prefix so the oversee
 - CLI daemon first for portability, scripting, and easy local deployment.
 - MCP adapter is a later transport layer that can wrap the CLI or share the same inbox/outbox storage.
 - Keep daemon logic independent of transport so swapping CLI/MCP is low-friction.
+
+### Daemon responsibilities
+- Agent registry (track who's alive)
+- Message routing (outbox → inbox delivery)
+- Liveness detection (heartbeats, lease expiry)
+
+The daemon is a communication bus, not a scheduler. Work assignment happens through prog.
 
 ## Agent registration protocol
 
@@ -146,10 +173,10 @@ Agent                           Daemon
 ### Liveness
 - Lease-based with heartbeats (default 30s interval)
 - Lease expires if no heartbeat received within 3x interval
-- Expired agents are marked stale; pending messages requeued to overseer
+- Expired agents are marked stale; their claimed tasks may be released back to prog
 
 ### Unregistration
-- Explicit unregister sends pending messages back to overseer
+- Explicit unregister releases any claimed tasks back to prog
 - Or agent just stops heartbeating and lease expires naturally
 
 ## CLI commands
@@ -167,4 +194,29 @@ aetherflow message send <to> <summary> [--lane control|task] [--priority P0|P1|P
 aetherflow message receive [--lane X] [--wait] [--limit N]
 aetherflow message peek [--lane X] [--limit N]
 aetherflow message ack <message-id>
+```
+
+## Typical agent workflow
+
+```
+1. Register with daemon
+   $ af agent register
+
+2. Check for available work
+   $ prog ready --project myproject
+
+3. Claim a task
+   $ prog start ts-abc123
+
+4. Work on task, log progress
+   $ prog log ts-abc123 "Implemented feature X"
+
+5. Poll inbox periodically for messages
+   $ af message peek
+
+6. If blocked, send message to human
+   $ af message send human "Blocked on API credentials" --type blocker --task ts-abc123
+
+7. Complete task
+   $ prog done ts-abc123
 ```
