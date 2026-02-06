@@ -31,6 +31,7 @@ Read the task description and DoD. Understand what "done" looks like before writ
 - Read relevant learnings provided in your context
 - Read any handoff notes from a previous agent
 - If this is a continuation, check what was already done and what didn't work
+- **Set up your branch.** Your branch name is derived from your task ID — e.g. `af/ts-1450cd-poll-loop`. Check if a branch with your task ID prefix already exists (`git branch --list "af/<task-id>*"`). If it does, check it out — a previous agent started work there. If not, create it from the default branch.
 
 ### feedback loop
 
