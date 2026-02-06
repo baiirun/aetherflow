@@ -23,5 +23,8 @@ coverage.html
 .DS_Store
 Thumbs.db
 
+# Runtime / test data
+.aetherflow/
+
 # Build
 /dist/
