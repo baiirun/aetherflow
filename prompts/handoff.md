@@ -4,9 +4,11 @@ Used at: context compaction, session end, blocked/escalation, task yield, task c
 
 Write a summary for the next agent picking up this work.
 
-Persist using both commands:
-1. `prog desc <task-id> "<full summary>"` — update the task description with current truth (this is what the next agent reads first)
-2. `prog log <task-id> "Handoff: <one-line summary>"` — append to the audit trail for history
+Persist the handoff to the task log — do NOT overwrite the task description:
+
+    prog log <task-id> "Handoff: <full summary>"
+
+The task description (`prog desc`) is the original specification. Overwriting it destroys context that future agents need. The log is append-only and the next agent reads it via `prog show`.
 
 Focus on what would be helpful for continuing, including:
 

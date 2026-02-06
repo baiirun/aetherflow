@@ -57,20 +57,17 @@ export const CompactionHandoffPlugin: Plugin = async ({ client, directory }) => 
       console.info(`${PREFIX} rewriting compaction for task ${taskId} (role: ${role})`)
 
       // Replace the compaction prompt with the handoff format.
-      // The prompt instructs the agent to use `prog desc` (current truth)
-      // plus `prog log` (audit trail) — matching the design in swarm-feedback-loops.md.
+      // Handoff goes to prog log (append-only), NOT prog desc (original spec).
+      // We learned the hard way that prog desc overwrites the task specification
+      // and destroys context future agents need.
       if (handoffPrompt) {
         output.prompt = `${handoffPrompt}
 
 Task ID: ${taskId}
 
-After generating the summary, persist it so the daemon and future agents can see your progress:
+After generating the summary, persist it to the task log (do NOT overwrite the task description):
 
-1. Update the task description with current truth:
-   prog desc ${taskId} "<your full handoff summary>"
-
-2. Also append to the audit log:
-   prog log ${taskId} "Compaction: <one-line summary of current state>"`
+    prog log ${taskId} "Compaction handoff: <your full summary of what was done, what's next, and what didn't work>"`
       }
 
       // Inject structured context that survives compaction.
@@ -86,8 +83,7 @@ After generating the summary, persist it so the daemon and future agents can see
 
 ## Key Commands
 - Read your task: \`prog show ${taskId}\`
-- Update task description: \`prog desc ${taskId} "text"\`
-- Log progress: \`prog log ${taskId} "message"\`
+- Log progress / handoff: \`prog log ${taskId} "message"\`
 - Complete task: \`prog done ${taskId}\`
 - Yield when stuck: \`prog block ${taskId} "reason"\`
 - Create out-of-scope task: \`prog add "title" -p <project>\`

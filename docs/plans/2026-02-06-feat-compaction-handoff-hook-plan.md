@@ -18,7 +18,7 @@ When an opencode session compacts, replace the default compaction prompt with ae
 - [x] Fetches messages via SDK `client.session.messages()` and parses task ID via regex
 - [x] Regex matches all ID formats: `ts-`, `ep-`, etc. (2+ letter prefix + 4-12 hex chars, case-insensitive)
 - [x] Role detected dynamically from prompt heading (`# Worker` / `# Planner`)
-- [x] Compaction prompt instructs agent to persist via `prog desc` (current truth) + `prog log` (audit trail)
+- [x] Compaction prompt instructs agent to persist handoff via `prog log` (append-only — do NOT overwrite task description)
 - [x] If no task ID is found (running outside aetherflow), the hook does nothing with debug log
 - [x] Local plugin auto-discovered from `.opencode/plugins/` — no `opencode.json` registration needed
 - [x] Logging at all decision branches (warn, debug, info)
@@ -43,8 +43,8 @@ Local plugins in `.opencode/plugins/` are auto-discovered by opencode. The `"plu
 ### Cross-boundary contract
 The `Task: {{task_id}}` format in `prompts/worker.md` line 8 and `prompts/planner.md` line 8 is machine-parsed by the plugin regex. Both prompt files now have a comment marking this as a contract: `<!-- Machine-parsed by .opencode/plugins/compaction-handoff.ts — do not change this format -->`.
 
-### prog desc + prog log
-The handoff prompt and compaction instructions use `prog desc` for current truth (what the next agent reads first) and `prog log` for the audit trail. This aligns with `swarm-feedback-loops.md:219-225`.
+### Handoff goes to prog log, not prog desc
+Handoffs go to `prog log` (append-only). The task description (`prog desc`) is the original specification written by the planner — agents must not overwrite it. We learned this from a real agent run where `prog desc` destroyed the original task context.
 
 ### Compressed protocol in context
 Post-compaction agents need to know HOW to work, not just WHAT they're working on. The context block includes a compressed version of the worker protocol (state machine, stuck detection, checkpoint discipline).

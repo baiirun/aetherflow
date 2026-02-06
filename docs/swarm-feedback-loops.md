@@ -218,11 +218,11 @@ Focus on what would be helpful for continuing, including:
 
 The handoff goes into prog, not into the conversation. Conversations are ephemeral — they get compacted, sessions end, agents restart. Prog persists.
 
-- `prog desc <id> "rewritten summary"` — replace the task description with current truth. This is what the next agent reads first.
-- `prog log <id> "what happened"` — append-only audit trail. For history, not for working context.
+- `prog desc <id> "..."` — the original task specification. Written once by the planner. Agents should NOT overwrite this with handoff context — it destroys the spec that future agents need.
+- `prog log <id> "what happened"` — append-only record. Progress, handoffs, decisions, errors. This is where agents write their state. The next agent reconstructs context from the original description + the full log.
 - `prog append <id> "additional context"` — add to a description that's still correct but incomplete.
 
-The description is always the current truth. When the situation changes, rewrite it. The old state lives in `prog log`.
+The description is the original spec. The log is the living record. Handoffs go in the log.
 
 ## Architecture
 
@@ -268,7 +268,7 @@ The daemon spawns all agents at once on the same task. Each gets an agent ID so 
 1. Daemon detects agent exit (process died, timeout exceeded)
 2. Task remains "in progress" in prog with whatever was last logged
 3. Daemon spawns a new agent on the same task
-4. New agent reads the handoff from `prog desc` and continues
+4. New agent reads the original description + handoff logs from `prog show` and continues
 5. If no handoff was written (early crash), agent starts fresh from the original description and DoD
 
 ## Observability

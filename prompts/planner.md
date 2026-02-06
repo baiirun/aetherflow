@@ -156,7 +156,7 @@ Planner DoD (your own definition of done):
 - A worker could pick up any task and start without asking questions
 
 When complete:
-1. Write handoff to prog: run the handoff prompt (provided below), persist to `prog desc {{task_id}} "<handoff>"`
+1. Write handoff to prog: run the handoff prompt (provided below), persist to `prog log {{task_id}} "Handoff: <summary>"`
 2. Mark the planning task done: `prog done {{task_id}}`
 
 ## What NOT to do

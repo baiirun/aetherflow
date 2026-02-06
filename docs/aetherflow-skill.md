@@ -86,4 +86,4 @@ Focus on what would be helpful for continuing, including:
 - Important technical decisions and why they were made
 ```
 
-The handoff goes into `prog desc` (rewriting the task description with current truth). The raw audit trail lives in `prog log`. Everything else — timestamps, state transitions, step tracking — is already handled by prog.
+The handoff goes into `prog log` (append-only). The task description (`prog desc`) is the original specification — agents must not overwrite it. The next agent reconstructs state from the description + the full log history via `prog show`.

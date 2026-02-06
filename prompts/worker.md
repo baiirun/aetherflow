@@ -58,9 +58,10 @@ You CANNOT read files outside this project (the sandbox blocks it). Everything y
 **DO NOT SKIP THIS STEP.** Before writing any code, establish how you'll verify your work.
 
 - If the DoD includes a verification command -> run it now to see the current state (it should fail — that's your red-to-green signal)
-- If not -> create one: a test, a curl command, a script, whatever gives you fast signal
+- If not -> create one: a test, a curl command, a smoke test, whatever gives you fast signal
 - You need a way to check your work repeatedly during implementation
 - Write the test or verification command NOW, before implementing. This is the most important step — everything else is easier with fast feedback.
+- If you write programmatic tests, use the project's test framework (`go test`, `bun test`, `vitest`, `pytest`, etc.) and put them where tests live in this project. Do not hand-roll test harnesses or drop one-off scripts at the repo root — they won't run in CI and become orphan files.
 
 ### implement
 
