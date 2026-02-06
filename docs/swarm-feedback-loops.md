@@ -348,39 +348,54 @@ The plugin writes a heartbeat. The daemon watches it.
 - `af pause` — freeze the pool
 - `af logs <agent>` — tail the agent's session
 
-## Implementation via opencode plugin
+## How agents get their prompts
+
+### MVP: daemon renders, `opencode run` delivers
+
+The daemon reads the role prompt template (`prompts/worker.md` or `prompts/planner.md`),
+replaces `{{task_id}}` with the actual task ID, and passes the rendered prompt as
+the first message to `opencode run "<rendered prompt>"`.
+
+No plugin. No env vars. No `system.transform` hook.
+
+The agent self-serves everything else (project name, description, DoD, learnings)
+via `prog show <task_id>` during its orient step. See `prompts/README.md` for the
+assembly flow diagram.
+
+Implementation details: `docs/plans/2026-02-06-feat-prompt-rendering-and-agent-spawn-plan.md`
+
+### Future: opencode plugin for advanced hooks
+
+When we need capabilities beyond what `opencode run` provides, we'll add a plugin:
 
 | Hook | Purpose |
 |------|---------|
-| `experimental.chat.system.transform` | Inject role constraints, task context from prog, DoD |
 | `experimental.session.compacting` | Replace compaction prompt with aetherflow's handoff prompt |
 | `tool.execute.after` | Write tool calls to agent activity log (observability) |
 | `session.idle` | Write handoff to prog, mark task done/blocked |
 | `event` | Heartbeat, status updates |
 | `tool` (custom) | `claim_task`, `yield_task`, `send_message` tools for the agent |
 
-The plugin reads `AETHERFLOW_TASK_ID` and `AETHERFLOW_ROLE` env vars set by the daemon at spawn time.
+These are tracked in epic `ep-ca386e` and are not needed for MVP.
 
 ## System prompt design
 
 ### How prompts are assembled
 
-The opencode plugin builds the full prompt at spawn time via `system.transform`. The prompt has three layers:
+The agent's prompt has three layers:
 
 ```
 [opencode's default system prompt — already present, not ours to modify]
-[aetherflow role prompt — static template per role]
-[aetherflow task context — dynamic, assembled per-task by the plugin]
+[aetherflow role prompt — from opencode run, the rendered template]
+[agent-fetched context — prog show, prog context, etc. during orient]
 ```
 
-The role prompt is the static template we design here. The task context is dynamic:
-- Task description and DoD from prog
-- Relevant learnings from `prog context <task-id>` (top 5 by relevance × confidence)
-- Feature matrix rows relevant to this task
-- Project constraints (from AGENTS.md or `.aetherflow/config`)
-- Handoff notes from previous agent (if this is a continuation)
+Layers 1 and 2 are present before the first tool call. Layer 3 is fetched
+by the agent as its first action.
 
-The role prompt should never duplicate what's in the task context. It defines the protocol and constraints; the plugin provides the specifics.
+The role prompt defines the protocol and constraints. The agent fetches task
+specifics at runtime — this keeps prompts static and avoids the daemon needing
+to call prog for every spawn.
 
 ### Three sections per prompt
 

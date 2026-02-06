@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -41,12 +42,27 @@ func newFakeProcessWithError(pid int, err error) (*fakeProcess, func()) {
 	return p, func() { close(p.waitCh) }
 }
 
+// testPromptDir creates a temp directory with a worker.md template for testing.
+// Only worker.md is created because InferRole() always returns RoleWorker (MVP).
+// Add planner.md here when planner role inference is implemented.
+func testPromptDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	content := "# Worker\n\nTask: {{task_id}}\n"
+	if err := os.WriteFile(filepath.Join(dir, "worker.md"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // testPool creates a pool with sensible test defaults and the given fakes.
-func testPool(runner CommandRunner, starter ProcessStarter) *Pool {
+func testPool(t *testing.T, runner CommandRunner, starter ProcessStarter) *Pool {
+	t.Helper()
 	cfg := Config{
-		Project:  "testproject",
-		PoolSize: 2,
-		SpawnCmd: "fake-agent",
+		Project:   "testproject",
+		PoolSize:  2,
+		SpawnCmd:  "fake-agent",
+		PromptDir: testPromptDir(t),
 	}
 	cfg.ApplyDefaults()
 
@@ -78,13 +94,13 @@ func TestPoolScheduleSpawnsAgent(t *testing.T) {
 	proc, release := newFakeProcess(1234)
 	defer release()
 
-	var spawnedEnv []string
-	starter := func(ctx context.Context, spawnCmd string, env []string) (Process, error) {
-		spawnedEnv = env
+	var spawnedPrompt string
+	starter := func(ctx context.Context, spawnCmd string, prompt string) (Process, error) {
+		spawnedPrompt = prompt
 		return proc, nil
 	}
 
-	pool := testPool(progRunner(testTaskMeta), starter)
+	pool := testPool(t, progRunner(testTaskMeta), starter)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -110,16 +126,12 @@ func TestPoolScheduleSpawnsAgent(t *testing.T) {
 		t.Errorf("PID = %d, want %d", agents[0].PID, 1234)
 	}
 
-	// Verify env vars were passed.
-	envMap := envToMap(spawnedEnv)
-	if envMap["AETHERFLOW_TASK_ID"] != "ts-abc" {
-		t.Errorf("AETHERFLOW_TASK_ID = %q, want %q", envMap["AETHERFLOW_TASK_ID"], "ts-abc")
+	// Verify the rendered prompt contains the task ID (not the template variable).
+	if !strings.Contains(spawnedPrompt, "ts-abc") {
+		t.Errorf("prompt should contain task ID, got: %q", spawnedPrompt)
 	}
-	if envMap["AETHERFLOW_ROLE"] != "worker" {
-		t.Errorf("AETHERFLOW_ROLE = %q, want %q", envMap["AETHERFLOW_ROLE"], "worker")
-	}
-	if envMap["AETHERFLOW_PROJECT"] != "testproject" {
-		t.Errorf("AETHERFLOW_PROJECT = %q, want %q", envMap["AETHERFLOW_PROJECT"], "testproject")
+	if strings.Contains(spawnedPrompt, "{{task_id}}") {
+		t.Error("prompt should not contain unreplaced {{task_id}}")
 	}
 }
 
@@ -128,12 +140,12 @@ func TestPoolSkipsAlreadyRunning(t *testing.T) {
 	defer release()
 
 	var spawnCount atomic.Int32
-	starter := func(ctx context.Context, spawnCmd string, env []string) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string) (Process, error) {
 		spawnCount.Add(1)
 		return proc, nil
 	}
 
-	pool := testPool(progRunner(testTaskMeta), starter)
+	pool := testPool(t, progRunner(testTaskMeta), starter)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -160,17 +172,11 @@ func TestPoolSkipsAlreadyRunning(t *testing.T) {
 }
 
 func TestPoolRespectsPoolSize(t *testing.T) {
-	var mu sync.Mutex
-	procs := make(map[string]*fakeProcess)
-	releases := make(map[string]func())
+	var spawnCount atomic.Int32
 
-	starter := func(ctx context.Context, spawnCmd string, env []string) (Process, error) {
-		taskID := envValue(env, "AETHERFLOW_TASK_ID")
-		proc, release := newFakeProcess(100)
-		mu.Lock()
-		procs[taskID] = proc
-		releases[taskID] = release
-		mu.Unlock()
+	starter := func(ctx context.Context, spawnCmd string, prompt string) (Process, error) {
+		spawnCount.Add(1)
+		proc, _ := newFakeProcess(100)
 		return proc, nil
 	}
 
@@ -186,7 +192,7 @@ func TestPoolRespectsPoolSize(t *testing.T) {
 		return nil, fmt.Errorf("unexpected: %v", args)
 	}
 
-	pool := testPool(runner, starter) // pool size = 2
+	pool := testPool(t, runner, starter) // pool size = 2
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -215,11 +221,11 @@ func TestPoolRespectsPoolSize(t *testing.T) {
 func TestPoolReapsExitedProcess(t *testing.T) {
 	proc, release := newFakeProcess(1234)
 
-	starter := func(ctx context.Context, spawnCmd string, env []string) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string) (Process, error) {
 		return proc, nil
 	}
 
-	pool := testPool(progRunner(testTaskMeta), starter)
+	pool := testPool(t, progRunner(testTaskMeta), starter)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -246,11 +252,11 @@ func TestPoolReapsExitedProcess(t *testing.T) {
 func TestPoolReapsProcessWithError(t *testing.T) {
 	proc, release := newFakeProcessWithError(1234, fmt.Errorf("exit status 1"))
 
-	starter := func(ctx context.Context, spawnCmd string, env []string) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string) (Process, error) {
 		return proc, nil
 	}
 
-	pool := testPool(progRunner(testTaskMeta), starter)
+	pool := testPool(t, progRunner(testTaskMeta), starter)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -275,11 +281,11 @@ func TestPoolSaveAndLoadState(t *testing.T) {
 	proc, release := newFakeProcess(1234)
 	defer release()
 
-	starter := func(ctx context.Context, spawnCmd string, env []string) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string) (Process, error) {
 		return proc, nil
 	}
 
-	pool := testPool(progRunner(testTaskMeta), starter)
+	pool := testPool(t, progRunner(testTaskMeta), starter)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -343,11 +349,11 @@ func TestPoolStatus(t *testing.T) {
 	proc, release := newFakeProcess(1234)
 	defer release()
 
-	starter := func(ctx context.Context, spawnCmd string, env []string) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string) (Process, error) {
 		return proc, nil
 	}
 
-	pool := testPool(progRunner(testTaskMeta), starter)
+	pool := testPool(t, progRunner(testTaskMeta), starter)
 
 	// Initially empty.
 	if got := pool.Status(); len(got) != 0 {
@@ -384,13 +390,13 @@ func TestPoolProgStartFailure(t *testing.T) {
 	}
 
 	var spawned atomic.Int32
-	starter := func(ctx context.Context, spawnCmd string, env []string) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string) (Process, error) {
 		spawned.Add(1)
 		proc, _ := newFakeProcess(1)
 		return proc, nil
 	}
 
-	pool := testPool(runner, starter)
+	pool := testPool(t, runner, starter)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -419,7 +425,7 @@ func TestCrashRespawnsAgent(t *testing.T) {
 	procs := make([]*fakeProcess, 0)
 	releases := make([]func(), 0)
 
-	starter := func(ctx context.Context, spawnCmd string, env []string) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string) (Process, error) {
 		spawnCount.Add(1)
 		proc, release := newFakeProcess(int(spawnCount.Load()) * 100)
 		mu.Lock()
@@ -434,6 +440,7 @@ func TestCrashRespawnsAgent(t *testing.T) {
 		PoolSize:   2,
 		SpawnCmd:   "fake-agent",
 		MaxRetries: 3,
+		PromptDir:  testPromptDir(t),
 	}
 	cfg.ApplyDefaults()
 	pool := NewPool(cfg, progRunner(testTaskMeta), starter, slog.Default())
@@ -484,7 +491,7 @@ func TestCrashMaxRetriesExhausted(t *testing.T) {
 	procs := make([]*fakeProcess, 0)
 	releases := make([]func(), 0)
 
-	starter := func(ctx context.Context, spawnCmd string, env []string) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string) (Process, error) {
 		spawnCount.Add(1)
 		proc, release := newFakeProcessWithError(int(spawnCount.Load())*100, fmt.Errorf("exit status 1"))
 		mu.Lock()
@@ -499,6 +506,7 @@ func TestCrashMaxRetriesExhausted(t *testing.T) {
 		PoolSize:   2,
 		SpawnCmd:   "fake-agent",
 		MaxRetries: 2, // Allow 2 respawn attempts.
+		PromptDir:  testPromptDir(t),
 	}
 	cfg.ApplyDefaults()
 	pool := NewPool(cfg, progRunner(testTaskMeta), starter, slog.Default())
@@ -557,7 +565,7 @@ func TestCrashCleanExitNoRespawn(t *testing.T) {
 	var spawnCount atomic.Int32
 	proc, release := newFakeProcess(1234) // Clean exit (no error).
 
-	starter := func(ctx context.Context, spawnCmd string, env []string) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string) (Process, error) {
 		spawnCount.Add(1)
 		return proc, nil
 	}
@@ -567,6 +575,7 @@ func TestCrashCleanExitNoRespawn(t *testing.T) {
 		PoolSize:   2,
 		SpawnCmd:   "fake-agent",
 		MaxRetries: 3,
+		PromptDir:  testPromptDir(t),
 	}
 	cfg.ApplyDefaults()
 	pool := NewPool(cfg, progRunner(testTaskMeta), starter, slog.Default())
@@ -604,7 +613,7 @@ func TestCrashRetryCountResetsOnSuccess(t *testing.T) {
 	procs := make([]*fakeProcess, 0)
 	releases := make([]func(), 0)
 
-	starter := func(ctx context.Context, spawnCmd string, env []string) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string) (Process, error) {
 		spawnCount.Add(1)
 		proc, release := newFakeProcess(int(spawnCount.Load()) * 100)
 		mu.Lock()
@@ -619,6 +628,7 @@ func TestCrashRetryCountResetsOnSuccess(t *testing.T) {
 		PoolSize:   2,
 		SpawnCmd:   "fake-agent",
 		MaxRetries: 2,
+		PromptDir:  testPromptDir(t),
 	}
 	cfg.ApplyDefaults()
 	pool := NewPool(cfg, progRunner(testTaskMeta), starter, slog.Default())
@@ -671,34 +681,4 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("timed out waiting for condition")
-}
-
-// envToMap converts a slice of "KEY=VALUE" strings to a map.
-func envToMap(env []string) map[string]string {
-	m := make(map[string]string, len(env))
-	for _, e := range env {
-		k, v, _ := cutString(e, "=")
-		m[k] = v
-	}
-	return m
-}
-
-// envValue extracts a value from a "KEY=VALUE" env slice.
-func envValue(env []string, key string) string {
-	for _, e := range env {
-		k, v, _ := cutString(e, "=")
-		if k == key {
-			return v
-		}
-	}
-	return ""
-}
-
-func cutString(s, sep string) (before, after string, found bool) {
-	for i := range s {
-		if i+len(sep) <= len(s) && s[i:i+len(sep)] == sep {
-			return s[:i], s[i+len(sep):], true
-		}
-	}
-	return s, "", false
 }

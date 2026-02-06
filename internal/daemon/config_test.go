@@ -3,9 +3,20 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+// testConfigPromptDir creates a temp directory with worker.md for config validation tests.
+func testConfigPromptDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "worker.md"), []byte("# Worker\nTask: {{task_id}}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
 
 func TestConfigApplyDefaults(t *testing.T) {
 	var cfg Config
@@ -26,6 +37,9 @@ func TestConfigApplyDefaults(t *testing.T) {
 	if cfg.MaxRetries != DefaultMaxRetries {
 		t.Errorf("MaxRetries = %d, want %d", cfg.MaxRetries, DefaultMaxRetries)
 	}
+	if cfg.PromptDir != DefaultPromptDir {
+		t.Errorf("PromptDir = %q, want %q", cfg.PromptDir, DefaultPromptDir)
+	}
 	if cfg.Logger == nil {
 		t.Error("Logger should not be nil after ApplyDefaults")
 	}
@@ -38,6 +52,7 @@ func TestConfigApplyDefaultsPreservesExisting(t *testing.T) {
 		PoolSize:     5,
 		SpawnCmd:     "custom-cmd",
 		MaxRetries:   10,
+		PromptDir:    "/custom/prompts",
 	}
 	cfg.ApplyDefaults()
 
@@ -56,9 +71,14 @@ func TestConfigApplyDefaultsPreservesExisting(t *testing.T) {
 	if cfg.MaxRetries != 10 {
 		t.Errorf("MaxRetries = %d, want %d", cfg.MaxRetries, 10)
 	}
+	if cfg.PromptDir != "/custom/prompts" {
+		t.Errorf("PromptDir = %q, want %q", cfg.PromptDir, "/custom/prompts")
+	}
 }
 
 func TestConfigValidate(t *testing.T) {
+	promptDir := testConfigPromptDir(t)
+
 	tests := []struct {
 		name    string
 		cfg     Config
@@ -95,6 +115,11 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: "max-retries must be non-negative",
 		},
 		{
+			name:    "missing prompt dir",
+			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", PromptDir: "/nonexistent/prompts"},
+			wantErr: "prompt-dir",
+		},
+		{
 			name: "valid config",
 			cfg: Config{
 				Project:      "test",
@@ -102,6 +127,7 @@ func TestConfigValidate(t *testing.T) {
 				PoolSize:     3,
 				SpawnCmd:     "opencode run",
 				MaxRetries:   3,
+				PromptDir:    promptDir,
 			},
 			wantErr: "",
 		},
@@ -113,6 +139,7 @@ func TestConfigValidate(t *testing.T) {
 				PoolSize:     1,
 				SpawnCmd:     "cmd",
 				MaxRetries:   0,
+				PromptDir:    promptDir,
 			},
 			wantErr: "",
 		},
@@ -130,7 +157,7 @@ func TestConfigValidate(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
-			if got := err.Error(); !contains(got, tt.wantErr) {
+			if got := err.Error(); !strings.Contains(got, tt.wantErr) {
 				t.Errorf("error = %q, want to contain %q", got, tt.wantErr)
 			}
 		})
@@ -138,8 +165,11 @@ func TestConfigValidate(t *testing.T) {
 }
 
 func TestConfigValidateAfterDefaults(t *testing.T) {
-	// A config with just Project set should be valid after defaults.
-	cfg := Config{Project: "myproject"}
+	// A config with just Project and PromptDir set should be valid after defaults.
+	cfg := Config{
+		Project:   "myproject",
+		PromptDir: testConfigPromptDir(t),
+	}
 	cfg.ApplyDefaults()
 
 	if err := cfg.Validate(); err != nil {
@@ -157,6 +187,7 @@ poll_interval: 30s
 pool_size: 5
 spawn_cmd: custom-agent
 max_retries: 7
+prompt_dir: /custom/prompts
 `
 	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
 		t.Fatal(err)
@@ -184,6 +215,9 @@ max_retries: 7
 	}
 	if cfg.MaxRetries != 7 {
 		t.Errorf("MaxRetries = %d, want %d", cfg.MaxRetries, 7)
+	}
+	if cfg.PromptDir != "/custom/prompts" {
+		t.Errorf("PromptDir = %q, want %q", cfg.PromptDir, "/custom/prompts")
 	}
 }
 
@@ -260,18 +294,4 @@ func TestLoadConfigFileEmpty(t *testing.T) {
 	if cfg.Project != "preserved" {
 		t.Errorf("Project = %q, want %q (empty file should not clear values)", cfg.Project, "preserved")
 	}
-}
-
-// contains checks if s contains substr.
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

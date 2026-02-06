@@ -3,6 +3,7 @@ package protocol
 import (
 	"fmt"
 	"math/rand"
+	"sync"
 	"time"
 )
 
@@ -118,7 +119,9 @@ func (id AgentID) String() string {
 }
 
 // NameGenerator handles unique name generation with collision detection.
+// All methods are safe for concurrent use.
 type NameGenerator struct {
+	mu   sync.Mutex
 	used map[string]bool
 }
 
@@ -131,6 +134,9 @@ func NewNameGenerator() *NameGenerator {
 
 // Generate creates a unique agent ID, retrying on collision.
 func (g *NameGenerator) Generate() AgentID {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
 	for attempts := 0; attempts < 1000; attempts++ {
 		name := GenerateAgentName()
 		if !g.used[name] {
@@ -146,10 +152,14 @@ func (g *NameGenerator) Generate() AgentID {
 
 // Release marks an agent ID as available for reuse.
 func (g *NameGenerator) Release(id AgentID) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	delete(g.used, string(id))
 }
 
 // IsUsed checks if an agent ID is currently in use.
 func (g *NameGenerator) IsUsed(id AgentID) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	return g.used[string(id)]
 }

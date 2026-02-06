@@ -77,7 +77,7 @@ The daemon's job:
 
 1. **Poll** — calls `prog ready -p <project>` on an interval
 2. **Infer role** — determines planner vs worker from task metadata
-3. **Spawn** — launches opencode sessions with `AETHERFLOW_TASK_ID` and `AETHERFLOW_ROLE` env vars
+3. **Spawn** — renders the role prompt with the task ID and launches `opencode run` with it as the first message
 4. **Monitor** — detects crashed agents, respawns on the same task
 
 The daemon doesn't orchestrate or use an LLM for scheduling. Role inference is deterministic: has DoD? worker. No DoD? planner.

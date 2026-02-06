@@ -44,8 +44,9 @@ type Process interface {
 }
 
 // ProcessStarter spawns a long-running agent process.
+// The prompt is the rendered role prompt passed as the message argument to the spawn command.
 // This is the seam for testing — swap with a fake that returns immediately.
-type ProcessStarter func(ctx context.Context, spawnCmd string, env []string) (Process, error)
+type ProcessStarter func(ctx context.Context, spawnCmd string, prompt string) (Process, error)
 
 // execProcess wraps *exec.Cmd to implement Process.
 type execProcess struct {
@@ -56,14 +57,17 @@ func (p *execProcess) Wait() error { return p.cmd.Wait() }
 func (p *execProcess) PID() int    { return p.cmd.Process.Pid }
 
 // ExecProcessStarter spawns a real OS process.
-func ExecProcessStarter(ctx context.Context, spawnCmd string, env []string) (Process, error) {
+// The prompt is appended as the final argument to the spawn command,
+// e.g. "opencode run" becomes ["opencode", "run", "<prompt>"].
+// The process inherits the parent's environment — no custom env vars.
+func ExecProcessStarter(ctx context.Context, spawnCmd string, prompt string) (Process, error) {
 	parts := strings.Fields(spawnCmd)
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("empty spawn command")
 	}
 
+	parts = append(parts, prompt)
 	cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
-	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -157,18 +161,12 @@ func (p *Pool) schedule(ctx context.Context, tasks []Task) {
 }
 
 // spawn claims a task in prog and launches an agent process.
+//
+// The sequence is: prep (fetch metadata, render prompt) → claim → spawn.
+// All fallible prep happens before claiming so a failure doesn't orphan
+// the task in "in_progress" state with no agent.
 func (p *Pool) spawn(ctx context.Context, task Task) {
-	// Claim the task in prog.
-	_, err := p.runner(ctx, "prog", "start", task.ID, "-p", p.config.Project)
-	if err != nil {
-		p.log.Error("failed to claim task",
-			"task_id", task.ID,
-			"error", err,
-		)
-		return
-	}
-
-	// Infer role (MVP: always worker).
+	// Prep: fetch metadata and infer role before claiming.
 	meta, err := FetchTaskMeta(ctx, task.ID, p.config.Project, p.runner)
 	if err != nil {
 		p.log.Error("failed to fetch task metadata",
@@ -179,16 +177,32 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 	}
 	role := InferRole(meta)
 
-	// Generate agent name and build env.
-	agentID := p.names.Generate()
-	env := []string{
-		"AETHERFLOW_TASK_ID=" + task.ID,
-		"AETHERFLOW_ROLE=" + string(role),
-		"AETHERFLOW_AGENT_ID=" + agentID.String(),
-		"AETHERFLOW_PROJECT=" + p.config.Project,
+	// Prep: render the role prompt with the task ID baked in.
+	prompt, err := RenderPrompt(p.config.PromptDir, role, task.ID)
+	if err != nil {
+		p.log.Error("failed to render prompt",
+			"task_id", task.ID,
+			"role", role,
+			"error", err,
+		)
+		return
 	}
 
-	proc, err := p.starter(ctx, p.config.SpawnCmd, env)
+	// Claim the task in prog. This is the point of no return — after this,
+	// the task is in_progress and we must either spawn an agent or leave it
+	// for manual recovery.
+	_, err = p.runner(ctx, "prog", "start", task.ID, "-p", p.config.Project)
+	if err != nil {
+		p.log.Error("failed to claim task",
+			"task_id", task.ID,
+			"error", err,
+		)
+		return
+	}
+
+	agentID := p.names.Generate()
+
+	proc, err := p.starter(ctx, p.config.SpawnCmd, prompt)
 	if err != nil {
 		p.log.Error("failed to spawn agent",
 			"task_id", task.ID,
@@ -302,15 +316,21 @@ func (p *Pool) respawn(taskID string, role Role) {
 		return
 	}
 
-	agentID := p.names.Generate()
-	env := []string{
-		"AETHERFLOW_TASK_ID=" + taskID,
-		"AETHERFLOW_ROLE=" + string(role),
-		"AETHERFLOW_AGENT_ID=" + agentID.String(),
-		"AETHERFLOW_PROJECT=" + p.config.Project,
+	// Re-render the prompt from disk. This intentionally re-reads the template
+	// so prompt changes take effect on respawn without daemon restart.
+	prompt, err := RenderPrompt(p.config.PromptDir, role, taskID)
+	if err != nil {
+		p.log.Error("failed to render prompt for respawn",
+			"task_id", taskID,
+			"role", role,
+			"error", err,
+		)
+		return
 	}
 
-	proc, err := p.starter(p.ctx, p.config.SpawnCmd, env)
+	agentID := p.names.Generate()
+
+	proc, err := p.starter(p.ctx, p.config.SpawnCmd, prompt)
 	if err != nil {
 		p.log.Error("failed to respawn agent",
 			"task_id", taskID,
@@ -369,9 +389,8 @@ type PoolState struct {
 
 // SaveState writes the pool state to a file.
 func (p *Pool) SaveState(path string) error {
-	p.mu.RLock()
+	// Status() handles its own locking — don't double-lock.
 	state := PoolState{Agents: p.Status()}
-	p.mu.RUnlock()
 
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {

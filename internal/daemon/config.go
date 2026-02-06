@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -13,6 +14,7 @@ const (
 	DefaultPoolSize   = 3
 	DefaultSpawnCmd   = "opencode run"
 	DefaultMaxRetries = 3
+	DefaultPromptDir  = "prompts"
 )
 
 // Config holds daemon configuration.
@@ -39,6 +41,9 @@ type Config struct {
 
 	// MaxRetries is the maximum number of crash respawns per task.
 	MaxRetries int `yaml:"max_retries"`
+
+	// PromptDir is the path to the directory containing role prompt templates.
+	PromptDir string `yaml:"prompt_dir"`
 
 	// Runner is the command execution function. Not configurable via file/flags.
 	Runner CommandRunner `yaml:"-"`
@@ -67,6 +72,9 @@ func (c *Config) ApplyDefaults() {
 	if c.MaxRetries == 0 {
 		c.MaxRetries = DefaultMaxRetries
 	}
+	if c.PromptDir == "" {
+		c.PromptDir = DefaultPromptDir
+	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()
 	}
@@ -90,6 +98,20 @@ func (c *Config) Validate() error {
 	if c.MaxRetries < 0 {
 		return fmt.Errorf("max-retries must be non-negative, got %d", c.MaxRetries)
 	}
+
+	// Resolve PromptDir to absolute path so detached daemons don't depend on cwd.
+	if !filepath.IsAbs(c.PromptDir) {
+		abs, err := filepath.Abs(c.PromptDir)
+		if err != nil {
+			return fmt.Errorf("resolving prompt-dir %q: %w", c.PromptDir, err)
+		}
+		c.PromptDir = abs
+	}
+	// Verify the directory exists and contains at least worker.md.
+	if _, err := os.Stat(filepath.Join(c.PromptDir, "worker.md")); err != nil {
+		return fmt.Errorf("prompt-dir %q must contain worker.md: %w", c.PromptDir, err)
+	}
+
 	return nil
 }
 
@@ -135,5 +157,8 @@ func mergeConfig(src, dst *Config) {
 	}
 	if dst.MaxRetries == 0 {
 		dst.MaxRetries = src.MaxRetries
+	}
+	if dst.PromptDir == "" {
+		dst.PromptDir = src.PromptDir
 	}
 }

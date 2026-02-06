@@ -60,7 +60,15 @@ The `ProcessStarter` interface changes to accept a prompt string alongside the s
 
 The prompts reference `<project>` in a few places (for `prog add` and `prog context` commands). The agent reads the project from `prog show` output during orient. No env var or template var needed.
 
-## Acceptance Criteria
+## Completed (ts-7862fe)
+
+- [x] `RenderPrompt()` in `prompt.go` -- reads template, replaces `{{task_id}}`
+- [x] `TestRenderPrompt` -- verifies template replacement
+- [x] `TestRenderPromptMissingFile` -- verifies error on missing prompt file
+- [x] Prompt templates updated -- `{{task_id}}` is the only template var, no env var references
+- [x] `prompts/README.md` -- documents the assembly flow
+
+## Acceptance Criteria (ts-35f378)
 
 - [ ] `ProcessStarter` takes `(ctx, spawnCmd, prompt)` -- no env parameter
 - [ ] `ExecProcessStarter` passes the rendered prompt as an argument to the spawn command
@@ -69,13 +77,10 @@ The prompts reference `<project>` in a few places (for `prog add` and `prog cont
 - [ ] No `AETHERFLOW_*` env vars are set on spawned processes
 - [ ] Config has a `PromptDir` field with a sensible default
 - [ ] Existing pool tests updated for new `ProcessStarter` signature
-- [ ] New test: `TestRenderPrompt` verifies template replacement
-- [ ] New test: `TestRenderPromptMissingFile` verifies error on missing prompt file
 - [ ] `go test ./internal/daemon/... -race -count=1` passes
 
 ## Dependencies & Risks
 
-- `RenderPrompt()` already exists and has no tests -- adding tests here
 - Changing `ProcessStarter` signature breaks all existing test fakes -- straightforward mechanical update (remove env param, add prompt param)
 - Removing env vars: existing pool tests assert on env vars passed to the starter. Those assertions get deleted.
 - The rendered prompt may be long (worker.md is ~126 lines). `opencode run` should handle long message arguments -- Go's `exec.Command` passes args directly (no shell), so no length limit beyond OS arg max (~256KB on most systems, prompt is ~4KB)
