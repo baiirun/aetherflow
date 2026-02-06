@@ -398,6 +398,7 @@ Each role prompt has three sections:
 - **Self-detection of stuck.** (Anthropic) Agents are time-blind. The prompt includes: "3 similar attempts with the same failure = stop, log, yield."
 - **Feature matrix is explicit.** Both roles interact with it. Planners add rows. Workers update coverage. This is in the prompt, not hidden in the plugin.
 - **What didn't work is the most valuable handoff.** (All posts) Emphasized in the exit section.
+- **Documentation compounds understanding.** Every task should leave the codebase more understandable than it found it. Code comments explain WHY, not what. Descriptions capture design decisions and tradeoffs. ASCII diagrams make structure visible. Tests read as behavioral specifications. This is how a swarm builds institutional knowledge — not through a knowledge base, but through the codebase itself.
 
 ### Planner prompt design
 

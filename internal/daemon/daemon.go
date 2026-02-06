@@ -11,22 +11,27 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 )
 
-const DefaultSocketPath = "/tmp/aetherd.sock"
+const (
+	DefaultSocketPath   = "/tmp/aetherd.sock"
+	DefaultPollInterval = 10 * time.Second
+)
 
 // Daemon holds the daemon state.
 type Daemon struct {
-	socketPath string
-	listener   net.Listener
-	mu         sync.RWMutex
-	shutdown   chan struct{}
+	config   Config
+	listener net.Listener
+	poller   *Poller
+	pool     *Pool
+	shutdown chan struct{}
+	log      *slog.Logger
 }
 
 // Request is the JSON-RPC style request envelope.
@@ -42,29 +47,40 @@ type Response struct {
 	Error   string          `json:"error,omitempty"`
 }
 
-// New creates a new daemon.
-func New(socketPath string) *Daemon {
-	if socketPath == "" {
-		socketPath = DefaultSocketPath
+// New creates a new daemon with the given config.
+// Call cfg.ApplyDefaults() and cfg.Validate() before passing to New.
+func New(cfg Config) *Daemon {
+	cfg.ApplyDefaults()
+	log := cfg.Logger
+
+	var poller *Poller
+	var pool *Pool
+	if cfg.Project != "" {
+		poller = NewPoller(cfg.Project, cfg.PollInterval, cfg.Runner, log)
+		pool = NewPool(cfg, cfg.Runner, cfg.Starter, log)
 	}
+
 	return &Daemon{
-		socketPath: socketPath,
-		shutdown:   make(chan struct{}),
+		config:   cfg,
+		poller:   poller,
+		pool:     pool,
+		shutdown: make(chan struct{}),
+		log:      log,
 	}
 }
 
 // Run starts the daemon and blocks until shutdown.
 func (d *Daemon) Run() error {
 	// Remove stale socket
-	os.Remove(d.socketPath)
+	os.Remove(d.config.SocketPath)
 
-	listener, err := net.Listen("unix", d.socketPath)
+	listener, err := net.Listen("unix", d.config.SocketPath)
 	if err != nil {
-		return fmt.Errorf("failed to listen on %s: %w", d.socketPath, err)
+		return fmt.Errorf("failed to listen on %s: %w", d.config.SocketPath, err)
 	}
 	d.listener = listener
 
-	fmt.Printf("listening on %s\n", d.socketPath)
+	d.log.Info("daemon started", "socket", d.config.SocketPath)
 
 	// Handle shutdown gracefully
 	ctx, cancel := context.WithCancel(context.Background())
@@ -78,10 +94,16 @@ func (d *Daemon) Run() error {
 		case <-sigCh:
 		case <-d.shutdown:
 		}
-		fmt.Println("\nshutting down...")
+		d.log.Info("shutting down")
 		cancel()
 		listener.Close()
 	}()
+
+	// Start poll loop and pool if a project is configured.
+	if d.poller != nil && d.pool != nil {
+		taskCh := d.poller.Start(ctx)
+		go d.pool.Run(ctx, taskCh)
+	}
 
 	// Accept connections
 	for {
@@ -91,7 +113,7 @@ func (d *Daemon) Run() error {
 			case <-ctx.Done():
 				return nil
 			default:
-				fmt.Fprintf(os.Stderr, "accept error: %v\n", err)
+				d.log.Error("accept error", "error", err)
 				continue
 			}
 		}
@@ -139,11 +161,16 @@ func (d *Daemon) handleShutdown() *Response {
 }
 
 func (d *Daemon) handleStatus() *Response {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
 	status := map[string]any{
-		"socket": d.socketPath,
+		"socket":    d.config.SocketPath,
+		"project":   d.config.Project,
+		"pool_size": d.config.PoolSize,
+	}
+
+	if d.pool != nil {
+		agents := d.pool.Status()
+		status["agents"] = agents
+		status["agents_running"] = len(agents)
 	}
 
 	result, _ := json.Marshal(status)
