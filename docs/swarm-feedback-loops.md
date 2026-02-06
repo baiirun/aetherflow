@@ -488,19 +488,17 @@ If failures are in code you changed → go to `fix`. If pre-existing (exist on m
 - No findings → go to `land`
 
 `land`: Final exit check.
-1. Run full verification one more time
-2. Run affected-area re-verification: which other features share files you modified? Run their verification commands. If you broke them, fix and re-verify.
-3. Update feature matrix: for each behavior in your DoD, set coverage status and verification command
-4. Log learnings: did you discover anything that would help future agents? `prog learn`
-5. Mark used learnings as helpful/harmful: `prog mark`
-6. Write handoff to prog
-7. Mark task done: `prog done`
+1. Run full verification one more time (DoD verification + full test suite + lint + build)
+2. Update feature matrix: for each behavior in your DoD, set coverage status and verification command
+3. Log learnings: did you discover anything that would help future agents? `prog learn`
+4. Write handoff to prog
+5. Mark task done: `prog done`
 
 **EXIT**
 
 Worker DoD (your own definition of done):
 - All DoD criteria from the task are satisfied
-- Tests pass — yours and affected-area
+- Full test suite passes
 - Review is clean — no P1s, no in-scope P2/P3s remaining
 - Feature matrix coverage is updated for your behaviors
 - Learnings logged if any
@@ -592,21 +590,12 @@ Not all learnings are equal. Categorizing helps search:
 
 4. **Synthesis**: A recurring task in prog triggers a synthesis agent that cleans up, merges, and promotes learnings.
 
-### What prog needs for this
+### What prog already supports
 
-New commands:
-- `prog learn "insight" --tags "x,y,z" --type gotcha|pattern|workaround|decision|anti-pattern` — store a learning
-- `prog context <task-id>` — return learnings relevant to this task (by tags, files, domain)
-- `prog mark <learning-id> --helpful|--harmful` — feedback on a learning
-- `prog learnings [--tag x] [--type y] [--min-confidence 0.5]` — list/filter learnings
-- `prog synthesize` — trigger a synthesis pass (or the daemon schedules it)
+- `prog learn "insight" --tags "x,y,z"` — store a learning (exists)
+- `prog context <task-id>` — return learnings relevant to this task (exists)
 
-### Open design questions (compounding)
-
-- What's the right granularity for tags? Too broad (e.g. "backend") and everything matches. Too narrow (e.g. "inbox-polling-race-condition") and nothing matches.
-- How do learnings relate to `docs/solutions/` (the compound-docs skill)? Are they the same system or complementary? Learnings might be the raw material that gets promoted into solutions docs during synthesis.
-- Should the synthesis agent have write access to code (to update AGENTS.md, project docs) or just to prog?
-- How do we handle learning conflicts between projects when prog manages multiple repos?
+Confidence decay, learning feedback (`prog mark`), and periodic synthesis are future work. Start simple — capture learnings, retrieve them — and add curation when we see the need.
 
 ## Regression detection — the feature matrix
 
@@ -644,17 +633,9 @@ The "not covered" rows are the known gaps. When a regression hits an uncovered a
 
 ### Three layers of regression defense
 
-**Layer 1: Affected-area re-verification (per-task, automatic)**
+**Layer 1: Full test suite at exit (per-task, automatic)**
 
-When Agent B finishes, the exit check includes:
-
-1. Which files did B modify?
-2. Which other completed features have behaviors verified by tests that touch those files?
-3. Run those tests.
-
-This is targeted — it doesn't run the entire matrix, just the rows whose verification commands touch files B changed. It catches the most common regression: two features sharing code.
-
-This requires tracking which files each task modified. The handoff prompt already asks for this ("which files are being modified"). We formalize it: workers log modified files to prog, and `prog overlap <task-id>` returns other tasks that share file overlap.
+Every worker runs the full test suite as part of the exit check (`land` state). This is the baseline — it catches regressions that have test coverage, regardless of which files were touched.
 
 **Layer 2: Full matrix validation (periodic, scheduled)**
 
@@ -690,14 +671,9 @@ For emergent behavior: when a regression is discovered that wasn't in the matrix
 
 For performance: add benchmark rows to the matrix with thresholds. "API response < 200ms for 10k rows." The periodic validation runs them.
 
-### What prog needs for this
+### Where the matrix lives
 
-- `prog matrix add <feature> <behavior> [--verification "cmd"] [--coverage covered|not-covered]` — add a row
-- `prog matrix list [--feature x] [--coverage not-covered] [--stale-days 14]` — query the matrix
-- `prog matrix validate` — run all verification commands, report results
-- `prog matrix update <row-id> --coverage covered --verification "cmd"` — update coverage
-- `prog overlap <task-id>` — return tasks with file overlap (for layer 1 re-verification)
-- Workers log modified files: `prog log <task-id> --files "path/a.go,path/b.go"` or a dedicated `prog files <task-id> "path/a.go" "path/b.go"`
+TBD. Could be a project-level file (e.g. `MATRIX.md`) that agents read/write directly, or a prog data structure, or both. The format matters less than the discipline of maintaining it. Start with a markdown file and see if it needs to be structured data.
 
 ### Relationship to DoD
 
@@ -741,8 +717,6 @@ The matrix is a poor man's invariant checker. It's not exhaustive (only checks w
 - How do we handle tasks where the DoD genuinely can't be concrete upfront (exploratory work, research, design)?
 - What signals indicate a task needs multiple agents vs one?
 - How does "DoD was insufficient" feedback from review subagents flow back? New task in prog to refine the plan?
-- What's the right format for the feature matrix? Markdown table in a doc? Structured data in prog? Both (prog as source of truth, rendered to markdown for humans)?
-- How does the matrix scale? At 500 behaviors, full validation takes a long time. Partition by module? Prioritize by risk?
 - Should the matrix track negative behaviors too? ("System does NOT send email on draft save" — preventing regressions where something starts happening that shouldn't)
 
 ## Sources

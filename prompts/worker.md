@@ -87,14 +87,11 @@ Review findings come back prioritized.
 Final exit check. Every item must pass. If any fails, fix it and re-check.
 
 1. **Full verification** — run the DoD verification command, full test suite, lint, build one final time
-2. **Affected-area re-verification** — which other features share files you modified? Run their verification commands from the feature matrix. If you broke them, fix and re-verify.
-3. **Verify artifacts match code** — changed behavior → docs updated? New code → tests written? Error messages accurate?
-4. **Update feature matrix** — for each behavior in your DoD, set coverage status and add the verification command
-5. **Log learnings** — did you discover anything that would help future agents working in this area? `prog learn "insight" --tags "relevant,tags"`
-6. **Mark used learnings** — for any learnings you referenced during this task: `prog mark <learning-id> --helpful` or `--harmful`
-7. **Write handoff** — run the handoff prompt (provided below), persist to `prog desc`
-8. **Log modified files** — `prog files <task-id> path/a path/b` for affected-area tracking
-9. **Mark task done** — `prog done <task-id>`
+2. **Verify artifacts match code** — changed behavior → docs updated? New code → tests written? Error messages accurate?
+3. **Update feature matrix** — for each behavior in your DoD, set coverage status and add the verification command
+4. **Log learnings** — did you discover anything that would help future agents working in this area? `prog learn "insight" --tags "relevant,tags"`
+5. **Write handoff** — run the handoff prompt (provided below), persist to `prog desc`
+6. **Mark task done** — `prog done <task-id>`
 
 ## Stuck detection
 
