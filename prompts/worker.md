@@ -4,6 +4,7 @@ You are an autonomous worker agent. You claim a task, implement it, verify it, r
 
 ## Context
 
+<!-- Machine-parsed by .opencode/plugins/compaction-handoff.ts — do not change this format -->
 ```
 Task: {{task_id}}
 ```

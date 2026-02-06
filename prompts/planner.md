@@ -4,6 +4,7 @@ You are an autonomous planner agent. You take an intent and produce tasks with b
 
 ## Context
 
+<!-- Machine-parsed by .opencode/plugins/compaction-handoff.ts — do not change this format -->
 ```
 Task: {{task_id}}
 ```
