@@ -1,4 +1,10 @@
 // Package daemon implements the aetherflow daemon.
+//
+// The daemon is a process supervisor that:
+//   - Reads task queue from prog
+//   - Spawns opencode sessions as worker/planner agents
+//   - Manages the agent pool (concurrency limit, stuck detection)
+//   - Exposes a Unix socket for status queries and intervention
 package daemon
 
 import (
@@ -11,8 +17,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/geobrowser/aetherflow/internal/protocol"
 )
 
 const DefaultSocketPath = "/tmp/aetherd.sock"
@@ -21,8 +25,6 @@ const DefaultSocketPath = "/tmp/aetherd.sock"
 type Daemon struct {
 	socketPath string
 	listener   net.Listener
-	agents     map[protocol.AgentID]*protocol.AgentInfo
-	nameGen    *protocol.NameGenerator
 	mu         sync.RWMutex
 	shutdown   chan struct{}
 }
@@ -47,8 +49,6 @@ func New(socketPath string) *Daemon {
 	}
 	return &Daemon{
 		socketPath: socketPath,
-		agents:     make(map[protocol.AgentID]*protocol.AgentInfo),
-		nameGen:    protocol.NewNameGenerator(),
 		shutdown:   make(chan struct{}),
 	}
 }
@@ -120,12 +120,6 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 
 func (d *Daemon) handleRequest(req *Request) *Response {
 	switch req.Method {
-	case "register":
-		return d.handleRegister()
-	case "unregister":
-		return d.handleUnregister(req.Params)
-	case "list_agents":
-		return d.handleListAgents()
 	case "status":
 		return d.handleStatus()
 	case "shutdown":
@@ -144,69 +138,11 @@ func (d *Daemon) handleShutdown() *Response {
 	return &Response{Success: true}
 }
 
-func (d *Daemon) handleRegister() *Response {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	agentID := d.nameGen.Generate()
-
-	info := &protocol.AgentInfo{
-		ID:           agentID,
-		State:        protocol.StateIdle,
-		RegisteredAt: time.Now().UnixMilli(),
-	}
-	d.agents[agentID] = info
-
-	resp := protocol.RegistrationResponse{AgentID: agentID}
-	result, _ := json.Marshal(resp)
-
-	fmt.Printf("+ %s\n", agentID)
-	return &Response{Success: true, Result: result}
-}
-
-type unregisterParams struct {
-	AgentID protocol.AgentID `json:"agent_id"`
-}
-
-func (d *Daemon) handleUnregister(params json.RawMessage) *Response {
-	var p unregisterParams
-	if err := json.Unmarshal(params, &p); err != nil {
-		return &Response{Success: false, Error: fmt.Sprintf("invalid params: %v", err)}
-	}
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	if _, ok := d.agents[p.AgentID]; !ok {
-		return &Response{Success: false, Error: fmt.Sprintf("agent not found: %s", p.AgentID)}
-	}
-
-	delete(d.agents, p.AgentID)
-	d.nameGen.Release(p.AgentID)
-
-	fmt.Printf("- %s\n", p.AgentID)
-	return &Response{Success: true}
-}
-
-func (d *Daemon) handleListAgents() *Response {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	agents := make([]*protocol.AgentInfo, 0, len(d.agents))
-	for _, info := range d.agents {
-		agents = append(agents, info)
-	}
-
-	result, _ := json.Marshal(agents)
-	return &Response{Success: true, Result: result}
-}
-
 func (d *Daemon) handleStatus() *Response {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
 	status := map[string]any{
-		"agents": len(d.agents),
 		"socket": d.socketPath,
 	}
 

@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-
-	"github.com/geobrowser/aetherflow/internal/protocol"
 )
 
 const DefaultSocketPath = "/tmp/aetherd.sock"
@@ -74,30 +72,6 @@ func (c *Client) Status() (map[string]any, error) {
 		return nil, err
 	}
 	return result, nil
-}
-
-// Register registers a new agent with the daemon.
-func (c *Client) Register() (*protocol.RegistrationResponse, error) {
-	var resp protocol.RegistrationResponse
-	if err := c.call("register", nil, &resp); err != nil {
-		return nil, err
-	}
-	return &resp, nil
-}
-
-// Unregister removes an agent from the daemon.
-func (c *Client) Unregister(agentID protocol.AgentID) error {
-	params := map[string]any{"agent_id": agentID}
-	return c.call("unregister", params, nil)
-}
-
-// ListAgents returns all registered agents.
-func (c *Client) ListAgents() ([]*protocol.AgentInfo, error) {
-	var agents []*protocol.AgentInfo
-	if err := c.call("list_agents", nil, &agents); err != nil {
-		return nil, err
-	}
-	return agents, nil
 }
 
 // Shutdown stops the daemon.

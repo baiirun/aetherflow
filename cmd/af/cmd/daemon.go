@@ -26,8 +26,8 @@ var daemonCmd = &cobra.Command{
 		}
 
 		fmt.Println("running")
-		if agents, ok := status["agents"]; ok {
-			fmt.Printf("  agents: %v\n", agents)
+		for k, v := range status {
+			fmt.Printf("  %s: %v\n", k, v)
 		}
 	},
 }
