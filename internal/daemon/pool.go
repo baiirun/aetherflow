@@ -46,9 +46,11 @@ type Process interface {
 
 // ProcessStarter spawns a long-running agent process.
 // The prompt is the rendered role prompt passed as the message argument to the spawn command.
+// agentID is set as the AETHERFLOW_AGENT_ID environment variable on the spawned process
+// so plugins inside the agent session can identify which agent they belong to.
 // stdout receives the process's standard output (typically a log file for JSONL capture).
 // This is the seam for testing — swap with a fake that returns immediately.
-type ProcessStarter func(ctx context.Context, spawnCmd string, prompt string, stdout io.Writer) (Process, error)
+type ProcessStarter func(ctx context.Context, spawnCmd string, prompt string, agentID string, stdout io.Writer) (Process, error)
 
 // execProcess wraps *exec.Cmd to implement Process.
 type execProcess struct {
@@ -61,9 +63,10 @@ func (p *execProcess) PID() int    { return p.cmd.Process.Pid }
 // ExecProcessStarter spawns a real OS process.
 // The prompt is appended as the final argument to the spawn command,
 // e.g. "opencode run --format json" becomes ["opencode", "run", "--format", "json", "<prompt>"].
+// agentID is exposed as the AETHERFLOW_AGENT_ID environment variable so plugins
+// running inside the agent session can identify which agent they belong to.
 // stdout receives the process's standard output (typically a JSONL log file).
-// The process inherits the parent's environment — no custom env vars.
-func ExecProcessStarter(ctx context.Context, spawnCmd string, prompt string, stdout io.Writer) (Process, error) {
+func ExecProcessStarter(ctx context.Context, spawnCmd string, prompt string, agentID string, stdout io.Writer) (Process, error) {
 	parts := strings.Fields(spawnCmd)
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("empty spawn command")
@@ -71,6 +74,7 @@ func ExecProcessStarter(ctx context.Context, spawnCmd string, prompt string, std
 
 	parts = append(parts, prompt)
 	cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
+	cmd.Env = append(os.Environ(), "AETHERFLOW_AGENT_ID="+agentID)
 	cmd.Stdout = stdout
 	cmd.Stderr = os.Stderr
 
@@ -242,7 +246,7 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 
 	agentID := p.names.Generate()
 
-	proc, err := p.starter(ctx, p.config.SpawnCmd, prompt, logFile)
+	proc, err := p.starter(ctx, p.config.SpawnCmd, prompt, string(agentID), logFile)
 	if err != nil {
 		logFile.Close()
 		p.log.Error("failed to spawn agent",
@@ -392,7 +396,7 @@ func (p *Pool) respawn(taskID string, role Role) {
 
 	agentID := p.names.Generate()
 
-	proc, err := p.starter(p.ctx, p.config.SpawnCmd, prompt, logFile)
+	proc, err := p.starter(p.ctx, p.config.SpawnCmd, prompt, string(agentID), logFile)
 	if err != nil {
 		logFile.Close()
 		p.log.Error("failed to respawn agent",

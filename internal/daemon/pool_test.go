@@ -98,7 +98,7 @@ func TestPoolScheduleSpawnsAgent(t *testing.T) {
 	defer release()
 
 	var spawnedPrompt string
-	starter := func(ctx context.Context, spawnCmd string, prompt string, _ io.Writer) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
 		spawnedPrompt = prompt
 		return proc, nil
 	}
@@ -143,7 +143,7 @@ func TestPoolSkipsAlreadyRunning(t *testing.T) {
 	defer release()
 
 	var spawnCount atomic.Int32
-	starter := func(ctx context.Context, spawnCmd string, prompt string, _ io.Writer) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
 		spawnCount.Add(1)
 		return proc, nil
 	}
@@ -177,7 +177,7 @@ func TestPoolSkipsAlreadyRunning(t *testing.T) {
 func TestPoolRespectsPoolSize(t *testing.T) {
 	var spawnCount atomic.Int32
 
-	starter := func(ctx context.Context, spawnCmd string, prompt string, _ io.Writer) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
 		spawnCount.Add(1)
 		proc, _ := newFakeProcess(100)
 		return proc, nil
@@ -224,7 +224,7 @@ func TestPoolRespectsPoolSize(t *testing.T) {
 func TestPoolReapsExitedProcess(t *testing.T) {
 	proc, release := newFakeProcess(1234)
 
-	starter := func(ctx context.Context, spawnCmd string, prompt string, _ io.Writer) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
 		return proc, nil
 	}
 
@@ -255,7 +255,7 @@ func TestPoolReapsExitedProcess(t *testing.T) {
 func TestPoolReapsProcessWithError(t *testing.T) {
 	proc, release := newFakeProcessWithError(1234, fmt.Errorf("exit status 1"))
 
-	starter := func(ctx context.Context, spawnCmd string, prompt string, _ io.Writer) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
 		return proc, nil
 	}
 
@@ -284,7 +284,7 @@ func TestPoolSaveAndLoadState(t *testing.T) {
 	proc, release := newFakeProcess(1234)
 	defer release()
 
-	starter := func(ctx context.Context, spawnCmd string, prompt string, _ io.Writer) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
 		return proc, nil
 	}
 
@@ -352,7 +352,7 @@ func TestPoolStatus(t *testing.T) {
 	proc, release := newFakeProcess(1234)
 	defer release()
 
-	starter := func(ctx context.Context, spawnCmd string, prompt string, _ io.Writer) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
 		return proc, nil
 	}
 
@@ -393,7 +393,7 @@ func TestPoolProgStartFailure(t *testing.T) {
 	}
 
 	var spawned atomic.Int32
-	starter := func(ctx context.Context, spawnCmd string, prompt string, _ io.Writer) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
 		spawned.Add(1)
 		proc, _ := newFakeProcess(1)
 		return proc, nil
@@ -428,7 +428,7 @@ func TestCrashRespawnsAgent(t *testing.T) {
 	procs := make([]*fakeProcess, 0)
 	releases := make([]func(), 0)
 
-	starter := func(ctx context.Context, spawnCmd string, prompt string, _ io.Writer) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
 		spawnCount.Add(1)
 		proc, release := newFakeProcess(int(spawnCount.Load()) * 100)
 		mu.Lock()
@@ -494,7 +494,7 @@ func TestCrashMaxRetriesExhausted(t *testing.T) {
 	procs := make([]*fakeProcess, 0)
 	releases := make([]func(), 0)
 
-	starter := func(ctx context.Context, spawnCmd string, prompt string, _ io.Writer) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
 		spawnCount.Add(1)
 		proc, release := newFakeProcessWithError(int(spawnCount.Load())*100, fmt.Errorf("exit status 1"))
 		mu.Lock()
@@ -568,7 +568,7 @@ func TestCrashCleanExitNoRespawn(t *testing.T) {
 	var spawnCount atomic.Int32
 	proc, release := newFakeProcess(1234) // Clean exit (no error).
 
-	starter := func(ctx context.Context, spawnCmd string, prompt string, _ io.Writer) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
 		spawnCount.Add(1)
 		return proc, nil
 	}
@@ -616,7 +616,7 @@ func TestCrashRetryCountResetsOnSuccess(t *testing.T) {
 	procs := make([]*fakeProcess, 0)
 	releases := make([]func(), 0)
 
-	starter := func(ctx context.Context, spawnCmd string, prompt string, _ io.Writer) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
 		spawnCount.Add(1)
 		proc, release := newFakeProcess(int(spawnCount.Load()) * 100)
 		mu.Lock()
@@ -674,7 +674,7 @@ func TestCrashRetryCountResetsOnSuccess(t *testing.T) {
 // --- stdout capture tests ---
 
 func TestSpawnWritesToLogFile(t *testing.T) {
-	starter := func(ctx context.Context, spawnCmd string, prompt string, stdout io.Writer) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, stdout io.Writer) (Process, error) {
 		// Simulate the process writing to stdout (like opencode --format json).
 		stdout.Write([]byte(`{"event":"tool_use"}`))
 		stdout.Write([]byte("\n"))
@@ -756,7 +756,7 @@ func TestReapClosesLogFileOnCrash(t *testing.T) {
 	proc, release := newFakeProcessWithError(1234, fmt.Errorf("exit status 1"))
 
 	// Use a starter for the respawn path.
-	starter := func(ctx context.Context, spawnCmd string, prompt string, _ io.Writer) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
 		p, _ := newFakeProcess(5678)
 		return p, nil
 	}
@@ -798,7 +798,7 @@ func TestReapClosesLogFileOnCrash(t *testing.T) {
 
 func TestSpawnClosesFileOnStarterFailure(t *testing.T) {
 	var attempted atomic.Bool
-	starter := func(ctx context.Context, spawnCmd string, prompt string, _ io.Writer) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
 		attempted.Store(true)
 		return nil, fmt.Errorf("spawn failed")
 	}
@@ -836,7 +836,7 @@ func TestRespawnAppendsToSameFile(t *testing.T) {
 	procs := make([]*fakeProcess, 0)
 	releases := make([]func(), 0)
 
-	starter := func(ctx context.Context, spawnCmd string, prompt string, stdout io.Writer) (Process, error) {
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, stdout io.Writer) (Process, error) {
 		n := spawnCount.Add(1)
 		// Each spawn writes a unique marker to stdout.
 		fmt.Fprintf(stdout, `{"spawn":%d}`+"\n", n)
@@ -896,6 +896,68 @@ func TestRespawnAppendsToSameFile(t *testing.T) {
 	}
 	if !strings.Contains(content, `{"spawn":2}`) {
 		t.Errorf("log file missing spawn 2 marker, got: %q", content)
+	}
+}
+
+// --- AETHERFLOW_AGENT_ID env var tests ---
+
+func TestExecProcessStarterSetsAgentIDEnv(t *testing.T) {
+	// Spawn a real process that prints the AETHERFLOW_AGENT_ID env var to stdout.
+	// We use "sh -c" as the spawnCmd so the prompt becomes the shell script.
+	var buf strings.Builder
+	proc, err := ExecProcessStarter(
+		context.Background(),
+		"sh -c",                        // spawnCmd
+		"printenv AETHERFLOW_AGENT_ID", // prompt (becomes the shell command)
+		"steel_gloom",                  // agentID
+		&buf,                           // stdout
+	)
+	if err != nil {
+		t.Fatalf("ExecProcessStarter: %v", err)
+	}
+	if err := proc.Wait(); err != nil {
+		t.Fatalf("process exited with error: %v", err)
+	}
+
+	got := strings.TrimSpace(buf.String())
+	if got != "steel_gloom" {
+		t.Errorf("AETHERFLOW_AGENT_ID = %q, want %q", got, "steel_gloom")
+	}
+}
+
+func TestSpawnPassesAgentIDToStarter(t *testing.T) {
+	proc, release := newFakeProcess(1234)
+	defer release()
+
+	var gotAgentID string
+	starter := func(ctx context.Context, spawnCmd string, prompt string, agentID string, _ io.Writer) (Process, error) {
+		gotAgentID = agentID
+		return proc, nil
+	}
+
+	pool := testPool(t, progRunner(testTaskMeta), starter)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	taskCh := make(chan []Task, 1)
+	taskCh <- []Task{{ID: "ts-abc", Priority: 1, Title: "Do it"}}
+
+	go pool.Run(ctx, taskCh)
+
+	waitFor(t, func() bool {
+		return len(pool.Status()) == 1
+	})
+
+	// The agent ID should be non-empty (generated by NameGenerator).
+	if gotAgentID == "" {
+		t.Error("agentID passed to starter was empty, want non-empty name")
+	}
+
+	// Verify the agent ID in the pool matches what was passed to the starter.
+	agents := pool.Status()
+	if string(agents[0].ID) != gotAgentID {
+		t.Errorf("agent ID mismatch: pool has %q, starter got %q", agents[0].ID, gotAgentID)
 	}
 }
 
