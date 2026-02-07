@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/geobrowser/aetherflow/internal/term"
 	"github.com/spf13/cobra"
 )
 
@@ -26,6 +27,16 @@ func Execute() error {
 
 func init() {
 	rootCmd.PersistentFlags().StringP("config", "c", "", "config file (default is $HOME/.aetherflow.yaml)")
+	rootCmd.PersistentFlags().Bool("no-color", false, "Disable colored output")
+
+	// Wire --no-color to the term package. OnInitialize runs before any
+	// PreRun hooks and doesn't participate in Cobra's override chain, so
+	// subcommands can freely set their own PersistentPreRun without breaking this.
+	cobra.OnInitialize(func() {
+		if noColor, _ := rootCmd.Flags().GetBool("no-color"); noColor {
+			term.Disable(true)
+		}
+	})
 }
 
 // Fatal prints an error and exits.

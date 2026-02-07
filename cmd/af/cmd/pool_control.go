@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/geobrowser/aetherflow/internal/client"
+	"github.com/geobrowser/aetherflow/internal/term"
 	"github.com/spf13/cobra"
 )
 
@@ -72,7 +73,18 @@ free slots and crashed agents will be respawned.`,
 }
 
 func printPoolModeResult(result *client.PoolModeResult) {
-	fmt.Printf("pool %s (%d agents running)\n", result.Mode, result.Running)
+	var modeStr string
+	switch result.Mode {
+	case "active":
+		modeStr = term.Green(result.Mode)
+	case "draining":
+		modeStr = term.Yellow(result.Mode)
+	case "paused":
+		modeStr = term.Red(result.Mode)
+	default:
+		modeStr = result.Mode
+	}
+	fmt.Printf("pool %s %s\n", modeStr, term.Dimf("(%d agents running)", result.Running))
 }
 
 func init() {

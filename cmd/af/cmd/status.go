@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/geobrowser/aetherflow/internal/client"
+	"github.com/geobrowser/aetherflow/internal/term"
 	"github.com/spf13/cobra"
 )
 
@@ -128,7 +129,9 @@ func runStatusWatch(c *client.Client, args []string, interval time.Duration, cmd
 }
 
 // clearScreen moves the cursor to the top-left and clears the terminal.
-// Uses ANSI escape sequences rather than shelling out to `clear`.
+// Uses raw ANSI escape sequences intentionally — cursor control is needed
+// even when --no-color is set, since watch mode requires screen clearing
+// regardless of color preference.
 func clearScreen() {
 	fmt.Print("\x1b[H\x1b[2J")
 }
@@ -151,20 +154,44 @@ func runStatusAgent(c *client.Client, agentName string, asJSON bool, cmd *cobra.
 	printAgentDetail(detail)
 }
 
+// Column widths for the agent table in printStatus.
+// PadRight uses these to pad visible content before wrapping in color,
+// so ANSI codes don't throw off alignment.
+const (
+	colID     = 14
+	colTask   = 10
+	colUptime = 6
+	colRole   = 8
+	// 2 indent + colID + 1 space + colTask + 1 space + colUptime + 2 spaces + colRole + 1 space.
+	agentRowPrefix = 2 + colID + 1 + colTask + 1 + colUptime + 2 + colRole + 1
+)
+
 func printStatus(s *client.FullStatus) {
 	active := len(s.Agents)
 	idle := s.PoolSize - active
 
-	fmt.Printf("Pool: %d/%d active", active, s.PoolSize)
+	// Pool header: "Pool: 2/3 active" with utilization color.
+	utilization := term.Greenf("%d/%d active", active, s.PoolSize)
+	if active == 0 {
+		utilization = term.Dimf("%d/%d active", active, s.PoolSize)
+	}
+	fmt.Printf("%s %s", term.Bold("Pool:"), utilization)
+
 	if s.PoolMode != "" && s.PoolMode != "active" {
-		fmt.Printf("  [%s]", s.PoolMode)
+		fmt.Printf("  %s", term.Yellowf("[%s]", s.PoolMode))
 	}
 	if s.Project != "" {
-		fmt.Printf("  (%s)", s.Project)
+		fmt.Printf("  %s", term.Dimf("(%s)", s.Project))
 	}
 	fmt.Println()
 
 	if active > 0 {
+		width := term.Width(100)
+		summaryMax := width - agentRowPrefix
+		if summaryMax < 20 {
+			summaryMax = 20
+		}
+
 		fmt.Println()
 		for _, a := range s.Agents {
 			uptime := formatUptime(a.SpawnTime)
@@ -172,41 +199,43 @@ func printStatus(s *client.FullStatus) {
 			if summary == "" {
 				summary = a.TaskTitle
 			}
-			summary = stripANSI(summary)
-			summary = truncate(summary, 50)
+			summary = truncate(stripANSI(summary), summaryMax)
 
-			fmt.Printf("  %-14s %-10s %6s  %-8s %s\n",
-				a.ID,
-				a.TaskID,
-				uptime,
-				a.Role,
-				quote(summary),
+			fmt.Printf("  %s %s %s  %s %s\n",
+				term.PadRight(a.ID, colID, term.Cyan),
+				term.PadRight(a.TaskID, colTask, term.Blue),
+				term.PadLeft(uptime, colUptime, term.Green),
+				term.PadRight(a.Role, colRole, term.Magenta),
+				term.Dim(quote(summary)),
 			)
 		}
 	}
 
 	if idle > 0 {
-		fmt.Printf("  + %d idle\n", idle)
+		fmt.Printf("  %s\n", term.Dimf("+ %d idle", idle))
 	}
 
 	fmt.Println()
 
 	if len(s.Queue) > 0 {
-		fmt.Printf("Queue: %d pending\n", len(s.Queue))
+		fmt.Printf("%s %s\n", term.Bold("Queue:"), term.Yellowf("%d pending", len(s.Queue)))
 		for _, t := range s.Queue {
-			title := stripANSI(t.Title)
-			title = truncate(title, 40)
-			fmt.Printf("  %-10s P%d  %s\n", t.ID, t.Priority, quote(title))
+			title := truncate(stripANSI(t.Title), 40)
+			fmt.Printf("  %s %s  %s\n",
+				term.PadRight(t.ID, colTask, term.Blue),
+				term.Yellowf("P%d", t.Priority),
+				term.Yellow(quote(title)),
+			)
 		}
 	} else {
-		fmt.Println("Queue: empty")
+		fmt.Printf("%s %s\n", term.Bold("Queue:"), term.Dim("empty"))
 	}
 
 	if len(s.Errors) > 0 {
 		fmt.Println()
-		fmt.Printf("Warnings: %d\n", len(s.Errors))
+		fmt.Printf("%s %s\n", term.Bold("Warnings:"), term.Redf("%d", len(s.Errors)))
 		for _, e := range s.Errors {
-			fmt.Printf("  ! %s\n", e)
+			fmt.Printf("  %s %s\n", term.Red("!"), stripANSI(e))
 		}
 	}
 }
@@ -280,50 +309,56 @@ func stripANSI(s string) string {
 func printAgentDetail(d *client.AgentDetail) {
 	uptime := formatUptime(d.SpawnTime)
 
-	fmt.Printf("Agent: %s\n", d.ID)
-	fmt.Printf("  Task:    %s", d.TaskID)
+	fmt.Printf("%s %s\n", term.Bold("Agent:"), term.Cyan(d.ID))
+	fmt.Printf("  %s %s", term.Bold("Task:"), term.Blue(d.TaskID))
 	if d.TaskTitle != "" {
-		fmt.Printf("  %s", quote(stripANSI(d.TaskTitle)))
+		fmt.Printf("  %s", term.Dim(quote(stripANSI(d.TaskTitle))))
 	}
 	fmt.Println()
-	fmt.Printf("  Role:    %s\n", d.Role)
-	fmt.Printf("  PID:     %d\n", d.PID)
-	fmt.Printf("  Uptime:  %s\n", uptime)
+	fmt.Printf("  %s %s\n", term.Bold("Role:"), term.Magenta(d.Role))
+	fmt.Printf("  %s %d\n", term.Bold("PID:"), d.PID)
+	fmt.Printf("  %s %s\n", term.Bold("Uptime:"), term.Green(uptime))
 
 	if d.LastLog != "" {
-		fmt.Printf("  Activity: %s\n", quote(stripANSI(truncate(d.LastLog, 70))))
+		fmt.Printf("  %s %s\n", term.Bold("Activity:"), term.Dim(quote(truncate(stripANSI(d.LastLog), 70))))
 	}
 
 	fmt.Println()
 
 	if len(d.ToolCalls) == 0 {
-		fmt.Println("Tool calls: none")
+		fmt.Printf("%s %s\n", term.Bold("Tool calls:"), term.Dim("none"))
 	} else {
-		fmt.Printf("Tool calls: %d recent\n", len(d.ToolCalls))
+		fmt.Printf("%s %d recent\n", term.Bold("Tool calls:"), len(d.ToolCalls))
 		fmt.Println()
 		for _, tc := range d.ToolCalls {
 			relTime := formatRelativeTime(tc.Timestamp)
-			input := stripANSI(truncate(tc.Input, 60))
+			input := truncate(stripANSI(tc.Input), 60)
 
 			dur := ""
 			if tc.DurationMs > 0 {
-				dur = fmt.Sprintf(" (%dms)", tc.DurationMs)
+				dur = term.Dimf(" (%dms)", tc.DurationMs)
 			}
 
 			title := ""
 			if tc.Title != "" {
-				title = " " + stripANSI(tc.Title)
+				title = " " + term.Dim(stripANSI(tc.Title))
 			}
 
-			fmt.Printf("  %6s  %-10s%s %s%s\n", relTime, tc.Tool, title, input, dur)
+			fmt.Printf("  %s  %s%s %s%s\n",
+				term.PadLeft(relTime, 6, term.Dim),
+				term.PadRight(tc.Tool, 10, term.Cyan),
+				title,
+				input,
+				dur,
+			)
 		}
 	}
 
 	if len(d.Errors) > 0 {
 		fmt.Println()
-		fmt.Printf("Warnings: %d\n", len(d.Errors))
+		fmt.Printf("%s %s\n", term.Bold("Warnings:"), term.Redf("%d", len(d.Errors)))
 		for _, e := range d.Errors {
-			fmt.Printf("  ! %s\n", e)
+			fmt.Printf("  %s %s\n", term.Red("!"), stripANSI(e))
 		}
 	}
 }
