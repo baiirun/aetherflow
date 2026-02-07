@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"regexp"
+	"syscall"
 	"time"
 
 	"github.com/geobrowser/aetherflow/internal/client"
@@ -23,35 +25,112 @@ With an agent name, shows detailed agent info:
   Task details, uptime, last prog log, and recent tool call history
   parsed from the agent's JSONL log.
 
+Use -w/--watch for continuous monitoring (refreshes every 2s by default).
+
 Requires a running daemon.`,
 	Args: cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		socketPath, _ := cmd.Flags().GetString("socket")
 		asJSON, _ := cmd.Flags().GetBool("json")
+		watch, _ := cmd.Flags().GetBool("watch")
+		interval, _ := cmd.Flags().GetDuration("interval")
 
 		c := client.New(socketPath)
 
-		if len(args) == 1 {
-			runStatusAgent(c, args[0], asJSON, cmd)
+		if !watch {
+			runStatusOnce(c, args, asJSON, cmd)
 			return
 		}
 
-		status, err := c.StatusFull()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			fmt.Fprintf(os.Stderr, "\nIs the daemon running? Start it with: af daemon start --project <name>\n")
+		// Watch mode: re-render on interval until interrupted.
+		if asJSON {
+			fmt.Fprintf(os.Stderr, "error: --watch and --json cannot be combined\n")
 			os.Exit(1)
 		}
 
-		if asJSON {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			enc.Encode(status)
-			return
+		runStatusWatch(c, args, interval, cmd)
+	},
+}
+
+// runStatusOnce fetches and prints status a single time.
+func runStatusOnce(c *client.Client, args []string, asJSON bool, cmd *cobra.Command) {
+	if len(args) == 1 {
+		runStatusAgent(c, args[0], asJSON, cmd)
+		return
+	}
+
+	status, err := c.StatusFull()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "\nIs the daemon running? Start it with: af daemon start --project <name>\n")
+		os.Exit(1)
+	}
+
+	if asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(status)
+		return
+	}
+
+	printStatus(status)
+}
+
+const minWatchInterval = 500 * time.Millisecond
+
+// runStatusWatch polls the daemon on an interval, clearing the screen between renders.
+// It exits cleanly on SIGINT or SIGTERM (Ctrl+C or process manager stop).
+func runStatusWatch(c *client.Client, args []string, interval time.Duration, cmd *cobra.Command) {
+	if interval < minWatchInterval {
+		fmt.Fprintf(os.Stderr, "error: --interval must be at least %s\n", minWatchInterval)
+		os.Exit(1)
+	}
+
+	// Read flags once — they don't change between ticks.
+	limit, _ := cmd.Flags().GetInt("limit")
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	// Render immediately, then on each tick.
+	for {
+		clearScreen()
+
+		if len(args) == 1 {
+			detail, err := c.StatusAgent(args[0], limit)
+			if err != nil {
+				fmt.Printf("error: %v\n", err)
+			} else {
+				printAgentDetail(detail)
+			}
+		} else {
+			status, err := c.StatusFull()
+			if err != nil {
+				fmt.Printf("error: %v\n", err)
+			} else {
+				printStatus(status)
+			}
 		}
 
-		printStatus(status)
-	},
+		fmt.Printf("\nRefreshing every %s. Press Ctrl+C to exit.", interval)
+
+		select {
+		case <-sigCh:
+			fmt.Println() // clean line after ^C
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// clearScreen moves the cursor to the top-left and clears the terminal.
+// Uses ANSI escape sequences rather than shelling out to `clear`.
+func clearScreen() {
+	fmt.Print("\x1b[H\x1b[2J")
 }
 
 func runStatusAgent(c *client.Client, agentName string, asJSON bool, cmd *cobra.Command) {
@@ -277,4 +356,6 @@ func init() {
 	statusCmd.Flags().String("socket", "", "Unix socket path (default: /tmp/aetherd.sock)")
 	statusCmd.Flags().Bool("json", false, "Output raw JSON")
 	statusCmd.Flags().Int("limit", 20, "Max tool calls to show in agent detail view")
+	statusCmd.Flags().BoolP("watch", "w", false, "Continuously refresh the display")
+	statusCmd.Flags().Duration("interval", 2*time.Second, "Refresh interval for watch mode")
 }

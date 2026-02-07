@@ -108,6 +108,30 @@ func TestFormatRelativeTime(t *testing.T) {
 	}
 }
 
+func TestStatusFlagsRegistered(t *testing.T) {
+	// Verify watch-related flags are registered on the status command.
+	f := statusCmd.Flags()
+
+	if f.Lookup("watch") == nil {
+		t.Error("--watch flag not registered")
+	}
+	if f.ShorthandLookup("w") == nil {
+		t.Error("-w shorthand not registered")
+	}
+	if f.Lookup("interval") == nil {
+		t.Error("--interval flag not registered")
+	}
+
+	// Default interval should be 2s.
+	interval, err := f.GetDuration("interval")
+	if err != nil {
+		t.Fatalf("GetDuration(interval): %v", err)
+	}
+	if interval != 2*time.Second {
+		t.Errorf("default interval = %v, want 2s", interval)
+	}
+}
+
 func TestStripANSI(t *testing.T) {
 	tests := []struct {
 		name  string
