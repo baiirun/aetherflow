@@ -13,9 +13,9 @@ import (
 
 // Task represents a ready task from prog.
 type Task struct {
-	ID       string
-	Priority int
-	Title    string
+	ID       string `json:"id"`
+	Priority int    `json:"priority"`
+	Title    string `json:"title"`
 }
 
 // CommandRunner executes a command and returns its combined output.

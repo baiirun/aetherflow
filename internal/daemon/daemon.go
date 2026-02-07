@@ -117,11 +117,11 @@ func (d *Daemon) Run() error {
 				continue
 			}
 		}
-		go d.handleConnection(conn)
+		go d.handleConnection(ctx, conn)
 	}
 }
 
-func (d *Daemon) handleConnection(conn net.Conn) {
+func (d *Daemon) handleConnection(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
 	decoder := json.NewDecoder(conn)
@@ -133,17 +133,17 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 			return // Connection closed or invalid JSON
 		}
 
-		resp := d.handleRequest(&req)
+		resp := d.handleRequest(ctx, &req)
 		if err := encoder.Encode(resp); err != nil {
 			return
 		}
 	}
 }
 
-func (d *Daemon) handleRequest(req *Request) *Response {
+func (d *Daemon) handleRequest(ctx context.Context, req *Request) *Response {
 	switch req.Method {
-	case "status":
-		return d.handleStatus()
+	case "status.full":
+		return d.handleStatusFull(ctx)
 	case "shutdown":
 		return d.handleShutdown()
 	default:
@@ -160,19 +160,20 @@ func (d *Daemon) handleShutdown() *Response {
 	return &Response{Success: true}
 }
 
-func (d *Daemon) handleStatus() *Response {
-	status := map[string]any{
-		"socket":    d.config.SocketPath,
-		"project":   d.config.Project,
-		"pool_size": d.config.PoolSize,
-	}
+func (d *Daemon) handleStatusFull(ctx context.Context) *Response {
+	start := time.Now()
+	status := BuildFullStatus(ctx, d.pool, d.config, d.config.Runner)
 
-	if d.pool != nil {
-		agents := d.pool.Status()
-		status["agents"] = agents
-		status["agents_running"] = len(agents)
-	}
+	d.log.Info("status.full",
+		"agents", len(status.Agents),
+		"queue", len(status.Queue),
+		"errors", len(status.Errors),
+		"duration", time.Since(start),
+	)
 
-	result, _ := json.Marshal(status)
+	result, err := json.Marshal(status)
+	if err != nil {
+		return &Response{Success: false, Error: fmt.Sprintf("marshal error: %v", err)}
+	}
 	return &Response{Success: true, Result: result}
 }

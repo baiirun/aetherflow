@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"time"
 )
 
 const DefaultSocketPath = "/tmp/aetherd.sock"
@@ -65,13 +66,40 @@ func (c *Client) call(method string, params any, result any) error {
 	return nil
 }
 
-// Status returns the daemon status.
-func (c *Client) Status() (map[string]any, error) {
-	var result map[string]any
-	if err := c.call("status", nil, &result); err != nil {
+// FullStatus is the enriched swarm status returned by the status.full RPC.
+type FullStatus struct {
+	PoolSize int           `json:"pool_size"`
+	Project  string        `json:"project"`
+	Agents   []AgentStatus `json:"agents"`
+	Queue    []Task        `json:"queue"`
+	Errors   []string      `json:"errors,omitempty"`
+}
+
+// AgentStatus is a single agent's enriched status.
+type AgentStatus struct {
+	ID        string    `json:"id"`
+	TaskID    string    `json:"task_id"`
+	Role      string    `json:"role"`
+	PID       int       `json:"pid"`
+	SpawnTime time.Time `json:"spawn_time"`
+	TaskTitle string    `json:"task_title"`
+	LastLog   string    `json:"last_log,omitempty"`
+}
+
+// Task is a pending task from the queue.
+type Task struct {
+	ID       string `json:"id"`
+	Priority int    `json:"priority"`
+	Title    string `json:"title"`
+}
+
+// StatusFull returns the enriched swarm status with task metadata from prog.
+func (c *Client) StatusFull() (*FullStatus, error) {
+	var result FullStatus
+	if err := c.call("status.full", nil, &result); err != nil {
 		return nil, err
 	}
-	return result, nil
+	return &result, nil
 }
 
 // Shutdown stops the daemon.

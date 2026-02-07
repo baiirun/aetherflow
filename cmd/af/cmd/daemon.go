@@ -18,17 +18,14 @@ var daemonCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		// Default: show status
 		c := client.New("")
-		status, err := c.Status()
+		status, err := c.StatusFull()
 		if err != nil {
 			fmt.Println("not running")
 			fmt.Println("\nTo start: af daemon start --project <name>")
 			return
 		}
 
-		fmt.Println("running")
-		for k, v := range status {
-			fmt.Printf("  %s: %v\n", k, v)
-		}
+		fmt.Printf("running (pool: %d, project: %s)\n", status.PoolSize, status.Project)
 	},
 }
 
