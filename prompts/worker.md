@@ -37,8 +37,16 @@ Read the task with `prog show {{task_id}}`. Understand the description (why/cont
 
 - Check for relevant learnings: `prog context -p <project> --summary` or query specific concepts
 - Read any handoff notes from a previous agent (they'll be in the task description or prog logs: `prog show {{task_id}}` includes logs)
-- If this is a continuation (branch exists, commits present, prog logs exist), check what was already done and what didn't work. Do NOT redo completed work.
-- **Set up your branch.** Your branch name is derived from your task ID -- e.g. `af/ts-1450cd-poll-loop`. Check if a branch with your task ID prefix already exists (`git branch --list "af/{{task_id}}*"`). If it does, check it out -- a previous agent started work there. If not, create it from the default branch.
+- If this is a continuation (worktree exists, commits present, prog logs exist), check what was already done and what didn't work. Do NOT redo completed work.
+- **Set up your worktree.** Each agent works in an isolated git worktree so concurrent agents don't clobber each other's files. Your worktree path is `.aetherflow/worktrees/{{task_id}}`.
+  1. Check if the worktree already exists (a previous agent may have started work): `ls .aetherflow/worktrees/{{task_id}}`
+  2. If it exists, it's yours — a previous agent crashed or was respawned. Check the branch state inside it.
+  3. If it doesn't exist, create it:
+     ```bash
+     git worktree add .aetherflow/worktrees/{{task_id}} -b af/{{task_id}} origin/main
+     ```
+  4. **All your work happens inside the worktree.** Use absolute paths for file tools (read, edit, write, glob, grep) and set `workdir` for bash commands. Your working directory is the absolute path to `.aetherflow/worktrees/{{task_id}}`.
+  5. Verify you're on the right branch: run `git branch --show-current` inside the worktree.
 - **Fill knowledge gaps before coding.** If the task mentions a technology, API, pattern, or concept you're not confident about, resolve it NOW. Do not start implementing with partial understanding.
 
 **Research checklist** (use when the task references something unfamiliar):
@@ -49,7 +57,7 @@ Read the task with `prog show {{task_id}}`. Understand the description (why/cont
 4. **Context7** — you have access to the Context7 MCP tool. Use it to look up documentation for libraries and frameworks mentioned in the task (e.g. `resolve-library-id` then `query-docs`)
 5. **Web fetch** — you can fetch URLs directly. If the task links to docs or you know the docs URL for a library, fetch it
 
-You CANNOT read files outside this project (the sandbox blocks it). Everything you need should be in the task description, the project, or discoverable via Context7/web fetch. If the task references external files you can't access, that's a gap in the task — yield it.
+You are launched in the project root but work inside your worktree. You CAN read files in the project root (for reference, docs, config) using absolute paths, but all edits and new files go in your worktree. If the task references external files outside the project you can't access, that's a gap in the task — yield it.
 
 **Confidence gate:** After orient, you should be able to answer: "What exactly am I building, where does it go, and how will I verify it works?" If you can't answer all three, either research more or yield the task. Do NOT proceed to implement with a guess.
 
@@ -113,10 +121,11 @@ Review findings come back prioritized.
 
 Final verification, then compound knowledge, then ship.
 
-1. **Final verification** -- run the DoD verification command, full test suite, lint, build one final time. If anything fails, fix it and re-verify.
+1. **Final verification** -- run the DoD verification command, full test suite, lint, build one final time (all inside your worktree). If anything fails, fix it and re-verify.
 2. **Compound** -- load `skill: compound-auto`. It will guide you through documentation enrichment, feature matrix updates, learnings, and handoff.
-3. **Create PR** -- `git push -u origin HEAD` then create a PR with a clear title and description summarizing the change.
-4. **Mark task done** -- `prog done {{task_id}}`
+3. **Create PR** -- from inside your worktree: `git push -u origin HEAD` then create a PR with a clear title and description summarizing the change.
+4. **Clean up worktree** -- after the PR is created, remove your worktree: `git worktree remove .aetherflow/worktrees/{{task_id}}`
+5. **Mark task done** -- `prog done {{task_id}}`
 
 ## Stuck detection
 
