@@ -123,6 +123,110 @@ func BuildFullStatus(ctx context.Context, pool *Pool, cfg Config, runner Command
 	return status
 }
 
+// AgentDetail is the response for the status.agent RPC method.
+// It provides a detailed view of a single agent with tool call history.
+type AgentDetail struct {
+	AgentStatus
+	ToolCalls []ToolCall `json:"tool_calls"`
+	Errors    []string   `json:"errors,omitempty"`
+}
+
+// StatusAgentParams are the parameters for the status.agent RPC method.
+type StatusAgentParams struct {
+	AgentName string `json:"agent_name"`
+	Limit     int    `json:"limit,omitempty"` // max tool calls to return; 0 = default (20)
+}
+
+const defaultToolCallLimit = 20
+
+// BuildAgentDetail assembles detailed status for a single agent.
+// It fetches task metadata from prog and parses tool calls from the JSONL log.
+func BuildAgentDetail(ctx context.Context, pool *Pool, cfg Config, runner CommandRunner, params StatusAgentParams) (*AgentDetail, error) {
+	if pool == nil {
+		return nil, fmt.Errorf("no pool configured")
+	}
+
+	// Find the agent in the pool by name.
+	agents := pool.Status()
+	var agent *Agent
+	for i := range agents {
+		if string(agents[i].ID) == params.AgentName {
+			agent = &agents[i]
+			break
+		}
+	}
+	if agent == nil {
+		return nil, fmt.Errorf("agent %q not found in pool", params.AgentName)
+	}
+
+	detail := &AgentDetail{
+		AgentStatus: AgentStatus{
+			ID:        string(agent.ID),
+			TaskID:    agent.TaskID,
+			Role:      string(agent.Role),
+			PID:       agent.PID,
+			SpawnTime: agent.SpawnTime,
+		},
+	}
+
+	limit := params.Limit
+	if limit <= 0 {
+		limit = defaultToolCallLimit
+	}
+
+	// Fetch task metadata and tool calls concurrently.
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var errors []string
+
+	// Fetch task title + last log from prog.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+
+		title, lastLog, err := fetchTaskSummary(callCtx, agent.TaskID, cfg.Project, runner)
+		if err != nil {
+			mu.Lock()
+			errors = append(errors, fmt.Sprintf("prog show %s: %v", agent.TaskID, err))
+			mu.Unlock()
+			return
+		}
+		detail.TaskTitle = title
+		detail.LastLog = lastLog
+	}()
+
+	// Parse tool calls from JSONL log.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		parseCtx, parseCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer parseCancel()
+
+		path := logFilePath(cfg.LogDir, agent.TaskID)
+		calls, skipped, err := ParseToolCalls(parseCtx, path, limit)
+		if err != nil {
+			mu.Lock()
+			errors = append(errors, fmt.Sprintf("parsing log %s: %v", path, err))
+			mu.Unlock()
+			return
+		}
+		if skipped > 0 {
+			mu.Lock()
+			errors = append(errors, fmt.Sprintf("skipped %d malformed lines in %s", skipped, path))
+			mu.Unlock()
+		}
+		detail.ToolCalls = calls
+	}()
+
+	wg.Wait()
+
+	detail.Errors = errors
+
+	return detail, nil
+}
+
 // fetchTaskSummary calls prog show --json and extracts the title and last log message.
 func fetchTaskSummary(ctx context.Context, taskID, project string, runner CommandRunner) (title, lastLog string, err error) {
 	args := []string{"show", taskID, "--json"}

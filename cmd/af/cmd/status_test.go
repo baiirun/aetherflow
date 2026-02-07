@@ -85,6 +85,29 @@ func TestQuote(t *testing.T) {
 	}
 }
 
+func TestFormatRelativeTime(t *testing.T) {
+	tests := []struct {
+		name string
+		t    time.Time
+		want string
+	}{
+		{"seconds ago", time.Now().Add(-15 * time.Second), "15s ago"},
+		{"minutes ago", time.Now().Add(-5 * time.Minute), "5m ago"},
+		{"hours ago", time.Now().Add(-2 * time.Hour), "2h ago"},
+		{"hours and minutes", time.Now().Add(-1*time.Hour - 30*time.Minute), "1h30m"},
+		{"zero time", time.Time{}, "?"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatRelativeTime(tt.t)
+			if got != tt.want {
+				t.Errorf("formatRelativeTime() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStripANSI(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -97,6 +120,13 @@ func TestStripANSI(t *testing.T) {
 		{"clear screen", "\x1b[2Jhello", "hello"},
 		{"window title", "\x1b]0;evil title\x07normal", "normal"},
 		{"mixed", "before\x1b[1mbolded\x1b[0mafter", "beforeboldedafter"},
+		{"carriage return", "overwrite\rvisible", "overwritevisible"},
+		{"backspace", "typo\x08fixed", "typofixed"},
+		{"delete char", "test\x7fmore", "testmore"},
+		{"DCS sequence", "\x1bPq#0;2;0;0;0#1;2;100;100;0\x1b\\done", "done"},
+		{"null byte", "before\x00after", "beforeafter"},
+		{"preserves tabs", "col1\tcol2", "col1\tcol2"},
+		{"preserves newlines", "line1\nline2", "line1\nline2"},
 	}
 
 	for _, tt := range tests {

@@ -93,6 +93,39 @@ type Task struct {
 	Title    string `json:"title"`
 }
 
+// ToolCall is a single tool invocation from the agent's JSONL log.
+type ToolCall struct {
+	Timestamp  time.Time `json:"timestamp"`
+	Tool       string    `json:"tool"`
+	Title      string    `json:"title,omitempty"`
+	Input      string    `json:"input"`
+	Status     string    `json:"status"`
+	DurationMs int       `json:"duration_ms,omitempty"`
+}
+
+// AgentDetail is the detailed view of a single agent with tool call history.
+type AgentDetail struct {
+	AgentStatus
+	ToolCalls []ToolCall `json:"tool_calls"`
+	Errors    []string   `json:"errors,omitempty"`
+}
+
+// StatusAgentParams are the parameters for the status.agent RPC.
+type StatusAgentParams struct {
+	AgentName string `json:"agent_name"`
+	Limit     int    `json:"limit,omitempty"`
+}
+
+// StatusAgent returns detailed status for a single agent including tool call history.
+func (c *Client) StatusAgent(agentName string, limit int) (*AgentDetail, error) {
+	params := StatusAgentParams{AgentName: agentName, Limit: limit}
+	var result AgentDetail
+	if err := c.call("status.agent", params, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // StatusFull returns the enriched swarm status with task metadata from prog.
 func (c *Client) StatusFull() (*FullStatus, error) {
 	var result FullStatus

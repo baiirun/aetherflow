@@ -144,6 +144,8 @@ func (d *Daemon) handleRequest(ctx context.Context, req *Request) *Response {
 	switch req.Method {
 	case "status.full":
 		return d.handleStatusFull(ctx)
+	case "status.agent":
+		return d.handleStatusAgent(ctx, req.Params)
 	case "shutdown":
 		return d.handleShutdown()
 	default:
@@ -158,6 +160,41 @@ func (d *Daemon) handleShutdown() *Response {
 		close(d.shutdown)
 	}()
 	return &Response{Success: true}
+}
+
+func (d *Daemon) handleStatusAgent(ctx context.Context, rawParams json.RawMessage) *Response {
+	var params StatusAgentParams
+	if len(rawParams) > 0 {
+		if err := json.Unmarshal(rawParams, &params); err != nil {
+			return &Response{Success: false, Error: fmt.Sprintf("invalid params: %v", err)}
+		}
+	}
+	if params.AgentName == "" {
+		return &Response{Success: false, Error: "agent_name is required"}
+	}
+
+	start := time.Now()
+	detail, err := BuildAgentDetail(ctx, d.pool, d.config, d.config.Runner, params)
+	if err != nil {
+		return &Response{Success: false, Error: err.Error()}
+	}
+
+	d.log.Info("status.agent",
+		"agent", params.AgentName,
+		"tool_calls", len(detail.ToolCalls),
+		"errors", len(detail.Errors),
+		"duration", time.Since(start),
+	)
+
+	for _, e := range detail.Errors {
+		d.log.Warn("status.agent.partial_error", "agent", params.AgentName, "error", e)
+	}
+
+	result, err := json.Marshal(detail)
+	if err != nil {
+		return &Response{Success: false, Error: fmt.Sprintf("marshal error: %v", err)}
+	}
+	return &Response{Success: true, Result: result}
 }
 
 func (d *Daemon) handleStatusFull(ctx context.Context) *Response {
