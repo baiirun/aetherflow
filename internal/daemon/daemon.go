@@ -51,6 +51,16 @@ type Response struct {
 // Call cfg.ApplyDefaults() and cfg.Validate() before passing to New.
 func New(cfg Config) *Daemon {
 	cfg.ApplyDefaults()
+
+	// Default Runner and Starter to real implementations so all consumers
+	// (pool, poller, status handlers) use the same runner without nil checks.
+	if cfg.Runner == nil {
+		cfg.Runner = ExecCommandRunner
+	}
+	if cfg.Starter == nil {
+		cfg.Starter = ExecProcessStarter
+	}
+
 	log := cfg.Logger
 
 	var poller *Poller
