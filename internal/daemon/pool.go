@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -45,8 +46,9 @@ type Process interface {
 
 // ProcessStarter spawns a long-running agent process.
 // The prompt is the rendered role prompt passed as the message argument to the spawn command.
+// stdout receives the process's standard output (typically a log file for JSONL capture).
 // This is the seam for testing — swap with a fake that returns immediately.
-type ProcessStarter func(ctx context.Context, spawnCmd string, prompt string) (Process, error)
+type ProcessStarter func(ctx context.Context, spawnCmd string, prompt string, stdout io.Writer) (Process, error)
 
 // execProcess wraps *exec.Cmd to implement Process.
 type execProcess struct {
@@ -58,9 +60,10 @@ func (p *execProcess) PID() int    { return p.cmd.Process.Pid }
 
 // ExecProcessStarter spawns a real OS process.
 // The prompt is appended as the final argument to the spawn command,
-// e.g. "opencode run" becomes ["opencode", "run", "<prompt>"].
+// e.g. "opencode run --format json" becomes ["opencode", "run", "--format", "json", "<prompt>"].
+// stdout receives the process's standard output (typically a JSONL log file).
 // The process inherits the parent's environment — no custom env vars.
-func ExecProcessStarter(ctx context.Context, spawnCmd string, prompt string) (Process, error) {
+func ExecProcessStarter(ctx context.Context, spawnCmd string, prompt string, stdout io.Writer) (Process, error) {
 	parts := strings.Fields(spawnCmd)
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("empty spawn command")
@@ -68,7 +71,7 @@ func ExecProcessStarter(ctx context.Context, spawnCmd string, prompt string) (Pr
 
 	parts = append(parts, prompt)
 	cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
@@ -78,6 +81,29 @@ func ExecProcessStarter(ctx context.Context, spawnCmd string, prompt string) (Pr
 	return &execProcess{cmd: cmd}, nil
 }
 
+// logFilePath returns the path for a task's JSONL log file.
+// taskID is sanitized with filepath.Base to prevent path traversal.
+func logFilePath(logDir, taskID string) string {
+	return filepath.Join(logDir, filepath.Base(taskID)+".jsonl")
+}
+
+// openLogFile creates the log directory if needed and opens the log file for appending.
+// Log files are owner-only (0600) since agent stdout may contain sensitive data.
+//
+// Note: writes are not fsynced — a daemon crash may lose buffered JSONL lines.
+// This is acceptable for observability data; the agent process is unaffected.
+func openLogFile(logDir, taskID string) (*os.File, error) {
+	if err := os.MkdirAll(logDir, 0700); err != nil {
+		return nil, fmt.Errorf("creating log directory %s: %w", logDir, err)
+	}
+	path := logFilePath(logDir, taskID)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("opening log file %s: %w", path, err)
+	}
+	return f, nil
+}
+
 // Pool manages a fixed number of agent slots.
 type Pool struct {
 	mu      sync.RWMutex
@@ -85,6 +111,7 @@ type Pool struct {
 	retries map[string]int    // crash count per task ID
 	names   *protocol.NameGenerator
 	config  Config
+	logDir  string // absolute path to JSONL log directory
 	runner  CommandRunner
 	starter ProcessStarter
 	log     *slog.Logger
@@ -105,6 +132,7 @@ func NewPool(cfg Config, runner CommandRunner, starter ProcessStarter, log *slog
 		retries: make(map[string]int),
 		names:   protocol.NewNameGenerator(),
 		config:  cfg,
+		logDir:  cfg.LogDir,
 		runner:  runner,
 		starter: starter,
 		log:     log,
@@ -162,7 +190,7 @@ func (p *Pool) schedule(ctx context.Context, tasks []Task) {
 
 // spawn claims a task in prog and launches an agent process.
 //
-// The sequence is: prep (fetch metadata, render prompt) → claim → spawn.
+// The sequence is: prep (fetch metadata, render prompt, open log) → claim → spawn.
 // All fallible prep happens before claiming so a failure doesn't orphan
 // the task in "in_progress" state with no agent.
 func (p *Pool) spawn(ctx context.Context, task Task) {
@@ -188,11 +216,23 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 		return
 	}
 
+	// Prep: open log file before claiming task. If this fails, the task stays
+	// in the queue rather than being orphaned in in_progress with no agent.
+	logFile, err := openLogFile(p.logDir, task.ID)
+	if err != nil {
+		p.log.Error("failed to open log file",
+			"task_id", task.ID,
+			"error", err,
+		)
+		return
+	}
+
 	// Claim the task in prog. This is the point of no return — after this,
 	// the task is in_progress and we must either spawn an agent or leave it
 	// for manual recovery.
 	_, err = p.runner(ctx, "prog", "start", task.ID, "-p", p.config.Project)
 	if err != nil {
+		logFile.Close()
 		p.log.Error("failed to claim task",
 			"task_id", task.ID,
 			"error", err,
@@ -202,8 +242,9 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 
 	agentID := p.names.Generate()
 
-	proc, err := p.starter(ctx, p.config.SpawnCmd, prompt)
+	proc, err := p.starter(ctx, p.config.SpawnCmd, prompt, logFile)
 	if err != nil {
+		logFile.Close()
 		p.log.Error("failed to spawn agent",
 			"task_id", task.ID,
 			"agent_id", agentID,
@@ -234,12 +275,20 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 	)
 
 	// Wait for process exit in background.
-	go p.reap(agent, proc)
+	go p.reap(agent, proc, logFile)
 }
 
 // reap waits for a process to exit, frees the slot, and respawns on crash.
-func (p *Pool) reap(agent *Agent, proc Process) {
+// cleanup is closed after the process exits (typically the log file).
+func (p *Pool) reap(agent *Agent, proc Process, cleanup io.Closer) {
 	err := proc.Wait()
+	if closeErr := cleanup.Close(); closeErr != nil {
+		p.log.Warn("failed to close log file",
+			"agent_id", agent.ID,
+			"task_id", agent.TaskID,
+			"error", closeErr,
+		)
+	}
 
 	exitCode := 0
 	if err != nil {
@@ -307,6 +356,7 @@ func (p *Pool) reap(agent *Agent, proc Process) {
 
 	// Respawn on the same task. The task is already in_progress in prog,
 	// so we skip prog start and go straight to spawning.
+	// respawn() opens its own log file — no handle passed across.
 	p.respawn(agent.TaskID, agent.Role)
 }
 
@@ -328,10 +378,23 @@ func (p *Pool) respawn(taskID string, role Role) {
 		return
 	}
 
+	// Reopen the same log file in append mode.
+	// Uses openLogFile (with MkdirAll) rather than assuming the directory exists,
+	// so respawn is resilient to the log dir being removed between spawns.
+	logFile, err := openLogFile(p.logDir, taskID)
+	if err != nil {
+		p.log.Error("failed to open log file for respawn",
+			"task_id", taskID,
+			"error", err,
+		)
+		return
+	}
+
 	agentID := p.names.Generate()
 
-	proc, err := p.starter(p.ctx, p.config.SpawnCmd, prompt)
+	proc, err := p.starter(p.ctx, p.config.SpawnCmd, prompt, logFile)
 	if err != nil {
+		logFile.Close()
 		p.log.Error("failed to respawn agent",
 			"task_id", taskID,
 			"agent_id", agentID,
@@ -361,7 +424,7 @@ func (p *Pool) respawn(taskID string, role Role) {
 		"pid", proc.PID(),
 	)
 
-	go p.reap(agent, proc)
+	go p.reap(agent, proc, logFile)
 }
 
 // runningCount returns the number of currently running agents.

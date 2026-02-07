@@ -12,9 +12,10 @@ import (
 
 const (
 	DefaultPoolSize   = 3
-	DefaultSpawnCmd   = "opencode run"
+	DefaultSpawnCmd   = "opencode run --format json"
 	DefaultMaxRetries = 3
 	DefaultPromptDir  = "prompts"
+	DefaultLogDir     = ".aetherflow/logs"
 )
 
 // Config holds daemon configuration.
@@ -45,6 +46,10 @@ type Config struct {
 	// PromptDir is the path to the directory containing role prompt templates.
 	PromptDir string `yaml:"prompt_dir"`
 
+	// LogDir is the directory for agent JSONL log files.
+	// Each task gets a <taskID>.jsonl file in this directory.
+	LogDir string `yaml:"log_dir"`
+
 	// Runner is the command execution function. Not configurable via file/flags.
 	Runner CommandRunner `yaml:"-"`
 
@@ -74,6 +79,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.PromptDir == "" {
 		c.PromptDir = DefaultPromptDir
+	}
+	if c.LogDir == "" {
+		c.LogDir = DefaultLogDir
 	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()
@@ -110,6 +118,15 @@ func (c *Config) Validate() error {
 	// Verify the directory exists and contains at least worker.md.
 	if _, err := os.Stat(filepath.Join(c.PromptDir, "worker.md")); err != nil {
 		return fmt.Errorf("prompt-dir %q must contain worker.md: %w", c.PromptDir, err)
+	}
+
+	// Resolve LogDir to absolute path so detached daemons don't depend on cwd.
+	if !filepath.IsAbs(c.LogDir) {
+		abs, err := filepath.Abs(c.LogDir)
+		if err != nil {
+			return fmt.Errorf("resolving log-dir %q: %w", c.LogDir, err)
+		}
+		c.LogDir = abs
 	}
 
 	return nil
@@ -160,5 +177,8 @@ func mergeConfig(src, dst *Config) {
 	}
 	if dst.PromptDir == "" {
 		dst.PromptDir = src.PromptDir
+	}
+	if dst.LogDir == "" {
+		dst.LogDir = src.LogDir
 	}
 }
