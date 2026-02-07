@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/geobrowser/aetherflow/internal/protocol"
@@ -92,6 +93,9 @@ func ExecProcessStarter(ctx context.Context, spawnCmd string, prompt string, age
 	parts = append(parts, prompt)
 	cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
 	cmd.Env = append(os.Environ(), "AETHERFLOW_AGENT_ID="+agentID)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setsid: true, // Own process group so terminal signals don't propagate to daemon
+	}
 	cmd.Stdout = stdout
 	cmd.Stderr = os.Stderr
 
@@ -162,10 +166,23 @@ func NewPool(cfg Config, runner CommandRunner, starter ProcessStarter, log *slog
 	}
 }
 
+// SetContext sets the pool's context for use by respawn goroutines.
+// Must be called before Reclaim or any operation that triggers respawn
+// outside of the Run loop. Run also sets the context, but calling
+// SetContext first avoids a race when Run and Reclaim start concurrently.
+func (p *Pool) SetContext(ctx context.Context) {
+	p.ctx = ctx
+}
+
 // Run consumes tasks from the channel and schedules them onto free slots.
 // It blocks until the channel is closed (context cancelled).
+// Caller must call SetContext before Run if Reclaim will run concurrently.
 func (p *Pool) Run(ctx context.Context, taskCh <-chan []Task) {
-	p.ctx = ctx
+	// If SetContext wasn't called (standalone usage, tests), set it now.
+	// When SetContext was called first (daemon startup), this is a no-op.
+	if p.ctx == nil {
+		p.ctx = ctx
+	}
 	p.log.Info("pool started", "pool_size", p.config.PoolSize)
 
 	for {

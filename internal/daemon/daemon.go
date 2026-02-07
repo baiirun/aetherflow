@@ -111,8 +111,17 @@ func (d *Daemon) Run() error {
 
 	// Start poll loop and pool if a project is configured.
 	if d.poller != nil && d.pool != nil {
+		// Set pool context before launching goroutines so both Run and
+		// Reclaim (which calls respawn, which uses p.ctx) are safe.
+		d.pool.SetContext(ctx)
+
 		taskCh := d.poller.Start(ctx)
 		go d.pool.Run(ctx, taskCh)
+
+		// Reclaim orphaned in_progress tasks from a previous daemon session.
+		// These are tasks that were claimed in prog but whose agents died
+		// when the daemon crashed or was stopped.
+		go d.pool.Reclaim(ctx)
 	}
 
 	// Accept connections
