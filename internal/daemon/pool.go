@@ -16,6 +16,23 @@ import (
 	"github.com/geobrowser/aetherflow/internal/protocol"
 )
 
+// PoolMode controls pool scheduling behavior.
+type PoolMode string
+
+const (
+	// PoolActive is the default mode — normal scheduling and respawning.
+	PoolActive PoolMode = "active"
+
+	// PoolDraining stops scheduling new tasks from the queue but lets
+	// current agents run to completion. Crash respawns are still allowed
+	// since those tasks are already claimed in prog.
+	PoolDraining PoolMode = "draining"
+
+	// PoolPaused stops both new scheduling and crash respawns.
+	// Existing agents continue running but won't be restarted on crash.
+	PoolPaused PoolMode = "paused"
+)
+
 // AgentState is the lifecycle state of a pool agent.
 type AgentState string
 
@@ -111,6 +128,7 @@ func openLogFile(logDir, taskID string) (*os.File, error) {
 // Pool manages a fixed number of agent slots.
 type Pool struct {
 	mu      sync.RWMutex
+	mode    PoolMode          // controls scheduling behavior
 	agents  map[string]*Agent // keyed by task ID
 	retries map[string]int    // crash count per task ID
 	names   *protocol.NameGenerator
@@ -132,6 +150,7 @@ func NewPool(cfg Config, runner CommandRunner, starter ProcessStarter, log *slog
 	}
 
 	return &Pool{
+		mode:    PoolActive,
 		agents:  make(map[string]*Agent),
 		retries: make(map[string]int),
 		names:   protocol.NewNameGenerator(),
@@ -165,7 +184,17 @@ func (p *Pool) Run(ctx context.Context, taskCh <-chan []Task) {
 }
 
 // schedule assigns ready tasks to free slots.
+// Skips all scheduling when the pool is draining or paused.
 func (p *Pool) schedule(ctx context.Context, tasks []Task) {
+	p.mu.RLock()
+	mode := p.mode
+	p.mu.RUnlock()
+
+	if mode != PoolActive {
+		p.log.Debug("schedule skipped, pool not active", "mode", mode, "task_count", len(tasks))
+		return
+	}
+
 	for _, task := range tasks {
 		if ctx.Err() != nil {
 			return
@@ -365,8 +394,23 @@ func (p *Pool) reap(agent *Agent, proc Process, cleanup io.Closer) {
 }
 
 // respawn launches a new agent for a task that's already in_progress.
+// Respawns are blocked when the pool is paused. In draining mode,
+// respawns are allowed because the task is already claimed in prog
+// and leaving it without an agent would orphan it.
 func (p *Pool) respawn(taskID string, role Role) {
 	if p.ctx.Err() != nil {
+		return
+	}
+
+	p.mu.RLock()
+	mode := p.mode
+	p.mu.RUnlock()
+
+	if mode == PoolPaused {
+		p.log.Info("respawn skipped, pool is paused",
+			"task_id", taskID,
+			"role", role,
+		)
 		return
 	}
 
@@ -447,6 +491,45 @@ func (p *Pool) Status() []Agent {
 		agents = append(agents, *a)
 	}
 	return agents
+}
+
+// Mode returns the current pool mode.
+func (p *Pool) Mode() PoolMode {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.mode
+}
+
+// Drain transitions the pool to draining mode. New tasks from the queue
+// are not scheduled, but current agents run to completion and crash
+// respawns are still allowed (the task is already claimed in prog).
+func (p *Pool) Drain() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	prev := p.mode
+	p.mode = PoolDraining
+	p.log.Info("pool mode changed", "from", prev, "to", PoolDraining)
+}
+
+// Pause transitions the pool to paused mode. No new scheduling and
+// no crash respawns. Existing agents continue running.
+func (p *Pool) Pause() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	prev := p.mode
+	p.mode = PoolPaused
+	p.log.Info("pool mode changed", "from", prev, "to", PoolPaused)
+}
+
+// Resume transitions the pool back to active mode from any state.
+// Note: tasks dropped during drain/pause are not retroactively scheduled;
+// they will be picked up on the next poll cycle.
+func (p *Pool) Resume() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	prev := p.mode
+	p.mode = PoolActive
+	p.log.Info("pool mode changed", "from", prev, "to", PoolActive)
 }
 
 // PoolState is the persisted pool state for daemon restart recovery.

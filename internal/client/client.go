@@ -69,6 +69,7 @@ func (c *Client) call(method string, params any, result any) error {
 // FullStatus is the enriched swarm status returned by the status.full RPC.
 type FullStatus struct {
 	PoolSize int           `json:"pool_size"`
+	PoolMode string        `json:"pool_mode"`
 	Project  string        `json:"project"`
 	Agents   []AgentStatus `json:"agents"`
 	Queue    []Task        `json:"queue"`
@@ -153,6 +154,39 @@ func (c *Client) LogsPath(agentName string) (string, error) {
 		return "", err
 	}
 	return result.Path, nil
+}
+
+// PoolModeResult is the response for pool control RPCs.
+type PoolModeResult struct {
+	Mode    string `json:"mode"`
+	Running int    `json:"running"`
+}
+
+// PoolDrain transitions the pool to draining mode.
+func (c *Client) PoolDrain() (*PoolModeResult, error) {
+	var result PoolModeResult
+	if err := c.call("pool.drain", nil, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// PoolPause transitions the pool to paused mode.
+func (c *Client) PoolPause() (*PoolModeResult, error) {
+	var result PoolModeResult
+	if err := c.call("pool.pause", nil, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// PoolResume transitions the pool back to active mode.
+func (c *Client) PoolResume() (*PoolModeResult, error) {
+	var result PoolModeResult
+	if err := c.call("pool.resume", nil, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 // Shutdown stops the daemon.

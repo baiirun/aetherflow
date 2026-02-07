@@ -156,6 +156,9 @@ func printStatus(s *client.FullStatus) {
 	idle := s.PoolSize - active
 
 	fmt.Printf("Pool: %d/%d active", active, s.PoolSize)
+	if s.PoolMode != "" && s.PoolMode != "active" {
+		fmt.Printf("  [%s]", s.PoolMode)
+	}
 	if s.Project != "" {
 		fmt.Printf("  (%s)", s.Project)
 	}

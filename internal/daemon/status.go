@@ -13,6 +13,7 @@ import (
 // It enriches the live pool data with task metadata from prog.
 type FullStatus struct {
 	PoolSize int           `json:"pool_size"`
+	PoolMode PoolMode      `json:"pool_mode"`
 	Project  string        `json:"project"`
 	Agents   []AgentStatus `json:"agents"`
 	Queue    []Task        `json:"queue"`
@@ -53,6 +54,8 @@ func BuildFullStatus(ctx context.Context, pool *Pool, cfg Config, runner Command
 	if pool == nil {
 		return status
 	}
+
+	status.PoolMode = pool.Mode()
 
 	agents := pool.Status()
 

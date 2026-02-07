@@ -148,6 +148,12 @@ func (d *Daemon) handleRequest(ctx context.Context, req *Request) *Response {
 		return d.handleStatusAgent(ctx, req.Params)
 	case "logs.path":
 		return d.handleLogsPath(req.Params)
+	case "pool.drain":
+		return d.handlePoolDrain()
+	case "pool.pause":
+		return d.handlePoolPause()
+	case "pool.resume":
+		return d.handlePoolResume()
 	case "shutdown":
 		return d.handleShutdown()
 	default:
