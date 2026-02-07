@@ -1,6 +1,16 @@
 # Prompt Assembly
 
-How the daemon turns these prompt files into an agent's first message.
+How the daemon turns prompt files into an agent's first message.
+
+## Where prompts live
+
+Prompt templates are embedded into the `af` binary at compile time from
+`internal/daemon/prompts/*.md`. The daemon reads them from the embedded
+filesystem by default — no files need to exist on disk at runtime.
+
+To override prompts for development, set `prompt_dir` in `.aetherflow.yaml`
+or pass `--prompt-dir` to `af daemon start`. The daemon will read from the
+filesystem path instead of the embedded copies.
 
 ## Template variables
 
@@ -17,8 +27,8 @@ The agent reads everything else (project, description, DoD, learnings) from
 │  Daemon   │                              │    Agent      │
 └─────┬─────┘                              └───────┬───────┘
       │                                            │
-      │  1. Read role prompt file                  │
-      │     (prompts/worker.md or planner.md)      │
+      │  1. Read role prompt from embedded FS      │
+      │     (or filesystem override if configured) │
       │                                            │
       │  2. Replace {{task_id}} with actual ID     │
       │                                            │
@@ -51,7 +61,8 @@ message. Layer 3 is fetched by the agent as its first action.
 
 ## Adding a new role
 
-1. Create `prompts/<role>.md` with the role prompt
+1. Create `internal/daemon/prompts/<role>.md` with the role prompt
 2. Use `{{task_id}}` wherever the task ID should appear
-3. Update the daemon's role inference to recognize the new role
-4. Update the daemon's spawn logic to read the new prompt file
+3. Add the role constant to `role.go` and add it to the allowlist in `RenderPrompt` (`prompt.go`)
+4. Add the file to the `//go:embed` directive in `prompts_embed.go`
+5. Update the daemon's role inference to recognize the new role

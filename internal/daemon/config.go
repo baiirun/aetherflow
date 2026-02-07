@@ -14,7 +14,6 @@ const (
 	DefaultPoolSize   = 3
 	DefaultSpawnCmd   = "opencode run --format json"
 	DefaultMaxRetries = 3
-	DefaultPromptDir  = "prompts"
 	DefaultLogDir     = ".aetherflow/logs"
 )
 
@@ -43,7 +42,9 @@ type Config struct {
 	// MaxRetries is the maximum number of crash respawns per task.
 	MaxRetries int `yaml:"max_retries"`
 
-	// PromptDir is the path to the directory containing role prompt templates.
+	// PromptDir overrides the embedded prompt templates with files from this
+	// directory. When empty, the daemon uses prompts compiled into the binary.
+	// Set this for development or to customize agent behavior without rebuilding.
 	PromptDir string `yaml:"prompt_dir"`
 
 	// LogDir is the directory for agent JSONL log files.
@@ -77,9 +78,7 @@ func (c *Config) ApplyDefaults() {
 	if c.MaxRetries == 0 {
 		c.MaxRetries = DefaultMaxRetries
 	}
-	if c.PromptDir == "" {
-		c.PromptDir = DefaultPromptDir
-	}
+	// PromptDir intentionally has no default — empty means use embedded prompts.
 	if c.LogDir == "" {
 		c.LogDir = DefaultLogDir
 	}
@@ -107,17 +106,27 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("max-retries must be non-negative, got %d", c.MaxRetries)
 	}
 
-	// Resolve PromptDir to absolute path so detached daemons don't depend on cwd.
-	if !filepath.IsAbs(c.PromptDir) {
-		abs, err := filepath.Abs(c.PromptDir)
-		if err != nil {
-			return fmt.Errorf("resolving prompt-dir %q: %w", c.PromptDir, err)
+	// When PromptDir is set (filesystem override), resolve to absolute path
+	// and verify the directory contains the required prompt files.
+	// When empty, embedded prompts are used and no filesystem check is needed.
+	if c.PromptDir != "" {
+		if !filepath.IsAbs(c.PromptDir) {
+			abs, err := filepath.Abs(c.PromptDir)
+			if err != nil {
+				return fmt.Errorf("resolving prompt-dir %q: %w", c.PromptDir, err)
+			}
+			c.PromptDir = abs
 		}
-		c.PromptDir = abs
-	}
-	// Verify the directory exists and contains at least worker.md.
-	if _, err := os.Stat(filepath.Join(c.PromptDir, "worker.md")); err != nil {
-		return fmt.Errorf("prompt-dir %q must contain worker.md: %w", c.PromptDir, err)
+		// Only check worker.md for now — InferRole always returns RoleWorker.
+		// When planner role is enabled, add planner.md check here too.
+		if _, err := os.Stat(filepath.Join(c.PromptDir, "worker.md")); err != nil {
+			return fmt.Errorf("prompt-dir %q must contain worker.md: %w", c.PromptDir, err)
+		}
+		if c.Logger != nil {
+			c.Logger.Info("using filesystem prompts", "prompt_dir", c.PromptDir)
+		}
+	} else if c.Logger != nil {
+		c.Logger.Info("using embedded prompts")
 	}
 
 	// Resolve LogDir to absolute path so detached daemons don't depend on cwd.

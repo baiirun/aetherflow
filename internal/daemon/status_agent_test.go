@@ -24,7 +24,7 @@ func TestBuildAgentDetailHappyPath(t *testing.T) {
 		Project:   "testproject",
 		PoolSize:  2,
 		SpawnCmd:  "fake-agent",
-		PromptDir: testPromptDir(t),
+		PromptDir: "",
 		LogDir:    logDir,
 	}
 	cfg.ApplyDefaults()
@@ -105,7 +105,7 @@ func TestBuildAgentDetailAgentNotFound(t *testing.T) {
 		Project:   "testproject",
 		PoolSize:  2,
 		SpawnCmd:  "fake-agent",
-		PromptDir: testPromptDir(t),
+		PromptDir: "",
 		LogDir:    logDir,
 	}
 	cfg.ApplyDefaults()
@@ -144,7 +144,7 @@ func TestBuildAgentDetailNoLogFile(t *testing.T) {
 		Project:   "testproject",
 		PoolSize:  2,
 		SpawnCmd:  "fake-agent",
-		PromptDir: testPromptDir(t),
+		PromptDir: "",
 		LogDir:    logDir,
 	}
 	cfg.ApplyDefaults()
@@ -196,7 +196,7 @@ func TestBuildAgentDetailProgShowFails(t *testing.T) {
 		Project:   "testproject",
 		PoolSize:  2,
 		SpawnCmd:  "fake-agent",
-		PromptDir: testPromptDir(t),
+		PromptDir: "",
 		LogDir:    logDir,
 	}
 	cfg.ApplyDefaults()

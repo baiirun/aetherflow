@@ -76,7 +76,7 @@ func TestDrainAllowsCrashRespawn(t *testing.T) {
 		PoolSize:   2,
 		SpawnCmd:   "fake-agent",
 		MaxRetries: 3,
-		PromptDir:  testPromptDir(t),
+		PromptDir:  "",
 		LogDir:     t.TempDir(),
 	}
 	cfg.ApplyDefaults()
@@ -157,7 +157,7 @@ func TestPauseBlocksCrashRespawn(t *testing.T) {
 		PoolSize:   2,
 		SpawnCmd:   "fake-agent",
 		MaxRetries: 3,
-		PromptDir:  testPromptDir(t),
+		PromptDir:  "",
 		LogDir:     t.TempDir(),
 	}
 	cfg.ApplyDefaults()
@@ -270,7 +270,7 @@ func TestFullStatusIncludesPoolMode(t *testing.T) {
 		Project:   "testproject",
 		PoolSize:  2,
 		SpawnCmd:  "fake-agent",
-		PromptDir: testPromptDir(t),
+		PromptDir: "",
 		LogDir:    t.TempDir(),
 	}
 	cfg.ApplyDefaults()

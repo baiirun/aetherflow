@@ -43,29 +43,17 @@ func newFakeProcessWithError(pid int, err error) (*fakeProcess, func()) {
 	return p, func() { close(p.waitCh) }
 }
 
-// testPromptDir creates a temp directory with a worker.md template for testing.
-// Only worker.md is created because InferRole() always returns RoleWorker (MVP).
-// Add planner.md here when planner role inference is implemented.
-func testPromptDir(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	content := "# Worker\n\nTask: {{task_id}}\n"
-	if err := os.WriteFile(filepath.Join(dir, "worker.md"), []byte(content), 0644); err != nil {
-		t.Fatal(err)
-	}
-	return dir
-}
-
 // testPool creates a pool with sensible test defaults and the given fakes.
+// PromptDir is empty so the pool uses embedded prompts compiled into the binary.
 // logDir is set to t.TempDir() so filesystem-touching tests don't leak into cwd.
 func testPool(t *testing.T, runner CommandRunner, starter ProcessStarter) *Pool {
 	t.Helper()
 	cfg := Config{
-		Project:   "testproject",
-		PoolSize:  2,
-		SpawnCmd:  "fake-agent",
-		PromptDir: testPromptDir(t),
-		LogDir:    t.TempDir(),
+		Project:  "testproject",
+		PoolSize: 2,
+		SpawnCmd: "fake-agent",
+		LogDir:   t.TempDir(),
+		// PromptDir empty — uses embedded prompts.
 	}
 	cfg.ApplyDefaults()
 
@@ -443,7 +431,6 @@ func TestCrashRespawnsAgent(t *testing.T) {
 		PoolSize:   2,
 		SpawnCmd:   "fake-agent",
 		MaxRetries: 3,
-		PromptDir:  testPromptDir(t),
 	}
 	cfg.ApplyDefaults()
 	pool := NewPool(cfg, progRunner(testTaskMeta), starter, slog.Default())
@@ -509,7 +496,6 @@ func TestCrashMaxRetriesExhausted(t *testing.T) {
 		PoolSize:   2,
 		SpawnCmd:   "fake-agent",
 		MaxRetries: 2, // Allow 2 respawn attempts.
-		PromptDir:  testPromptDir(t),
 	}
 	cfg.ApplyDefaults()
 	pool := NewPool(cfg, progRunner(testTaskMeta), starter, slog.Default())
@@ -578,7 +564,6 @@ func TestCrashCleanExitNoRespawn(t *testing.T) {
 		PoolSize:   2,
 		SpawnCmd:   "fake-agent",
 		MaxRetries: 3,
-		PromptDir:  testPromptDir(t),
 	}
 	cfg.ApplyDefaults()
 	pool := NewPool(cfg, progRunner(testTaskMeta), starter, slog.Default())
@@ -630,8 +615,7 @@ func TestCrashRetryCountResetsOnSuccess(t *testing.T) {
 		Project:    "testproject",
 		PoolSize:   2,
 		SpawnCmd:   "fake-agent",
-		MaxRetries: 2,
-		PromptDir:  testPromptDir(t),
+		MaxRetries: 3,
 	}
 	cfg.ApplyDefaults()
 	pool := NewPool(cfg, progRunner(testTaskMeta), starter, slog.Default())
@@ -762,11 +746,10 @@ func TestReapClosesLogFileOnCrash(t *testing.T) {
 	}
 
 	cfg := Config{
-		Project:   "testproject",
-		PoolSize:  2,
-		SpawnCmd:  "fake-agent",
-		PromptDir: testPromptDir(t),
-		LogDir:    t.TempDir(),
+		Project:  "testproject",
+		PoolSize: 2,
+		SpawnCmd: "fake-agent",
+		LogDir:   t.TempDir(),
 	}
 	cfg.ApplyDefaults()
 	cfg.MaxRetries = 0 // Set AFTER ApplyDefaults since 0 is the zero value.
@@ -853,7 +836,6 @@ func TestRespawnAppendsToSameFile(t *testing.T) {
 		PoolSize:   2,
 		SpawnCmd:   "fake-agent",
 		MaxRetries: 3,
-		PromptDir:  testPromptDir(t),
 	}
 	cfg.ApplyDefaults()
 	pool := NewPool(cfg, progRunner(testTaskMeta), starter, slog.Default())

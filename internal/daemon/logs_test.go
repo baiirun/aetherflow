@@ -20,7 +20,7 @@ func TestHandleLogsPathHappyPath(t *testing.T) {
 		Project:   "testproject",
 		PoolSize:  2,
 		SpawnCmd:  "fake-agent",
-		PromptDir: testPromptDir(t),
+		PromptDir: "",
 		LogDir:    logDir,
 	}
 	cfg.ApplyDefaults()
@@ -104,7 +104,7 @@ func TestHandleLogsPathAgentNotFound(t *testing.T) {
 		Project:   "testproject",
 		PoolSize:  2,
 		SpawnCmd:  "fake-agent",
-		PromptDir: testPromptDir(t),
+		PromptDir: "",
 		LogDir:    t.TempDir(),
 	}
 	cfg.ApplyDefaults()

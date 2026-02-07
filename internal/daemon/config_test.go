@@ -8,7 +8,8 @@ import (
 	"time"
 )
 
-// testConfigPromptDir creates a temp directory with worker.md for config validation tests.
+// testConfigPromptDir creates a temp directory with worker.md for config validation tests
+// that use a filesystem prompt override.
 func testConfigPromptDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -37,8 +38,9 @@ func TestConfigApplyDefaults(t *testing.T) {
 	if cfg.MaxRetries != DefaultMaxRetries {
 		t.Errorf("MaxRetries = %d, want %d", cfg.MaxRetries, DefaultMaxRetries)
 	}
-	if cfg.PromptDir != DefaultPromptDir {
-		t.Errorf("PromptDir = %q, want %q", cfg.PromptDir, DefaultPromptDir)
+	// PromptDir should remain empty (embedded prompts).
+	if cfg.PromptDir != "" {
+		t.Errorf("PromptDir = %q, want empty (embedded)", cfg.PromptDir)
 	}
 	if cfg.Logger == nil {
 		t.Error("Logger should not be nil after ApplyDefaults")
@@ -115,12 +117,24 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: "max-retries must be non-negative",
 		},
 		{
-			name:    "missing prompt dir",
+			name:    "invalid prompt dir",
 			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", PromptDir: "/nonexistent/prompts"},
 			wantErr: "prompt-dir",
 		},
 		{
-			name: "valid config",
+			name: "valid config with embedded prompts",
+			cfg: Config{
+				Project:      "test",
+				PollInterval: 10 * time.Second,
+				PoolSize:     3,
+				SpawnCmd:     "opencode run",
+				MaxRetries:   3,
+				// PromptDir empty — uses embedded prompts.
+			},
+			wantErr: "",
+		},
+		{
+			name: "valid config with filesystem prompts",
 			cfg: Config{
 				Project:      "test",
 				PollInterval: 10 * time.Second,
@@ -139,7 +153,6 @@ func TestConfigValidate(t *testing.T) {
 				PoolSize:     1,
 				SpawnCmd:     "cmd",
 				MaxRetries:   0,
-				PromptDir:    promptDir,
 			},
 			wantErr: "",
 		},
@@ -165,10 +178,9 @@ func TestConfigValidate(t *testing.T) {
 }
 
 func TestConfigValidateAfterDefaults(t *testing.T) {
-	// A config with just Project and PromptDir set should be valid after defaults.
+	// A config with just Project set should be valid after defaults (embedded prompts).
 	cfg := Config{
-		Project:   "myproject",
-		PromptDir: testConfigPromptDir(t),
+		Project: "myproject",
 	}
 	cfg.ApplyDefaults()
 
