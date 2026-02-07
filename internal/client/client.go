@@ -135,6 +135,26 @@ func (c *Client) StatusFull() (*FullStatus, error) {
 	return &result, nil
 }
 
+// LogsPathParams are the parameters for the logs.path RPC.
+type LogsPathParams struct {
+	AgentName string `json:"agent_name"`
+}
+
+// LogsPathResult is the response for the logs.path RPC.
+type LogsPathResult struct {
+	Path string `json:"path"`
+}
+
+// LogsPath returns the JSONL log file path for a running agent.
+func (c *Client) LogsPath(agentName string) (string, error) {
+	params := LogsPathParams{AgentName: agentName}
+	var result LogsPathResult
+	if err := c.call("logs.path", params, &result); err != nil {
+		return "", err
+	}
+	return result.Path, nil
+}
+
 // Shutdown stops the daemon.
 func (c *Client) Shutdown() error {
 	return c.call("shutdown", nil, nil)
