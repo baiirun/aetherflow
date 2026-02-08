@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/charmbracelet/glamour"
 )
 
 // TaskDetail holds the parsed output from `prog show --json <task_id>`.
@@ -45,6 +47,23 @@ func fetchTaskDetail(taskID string) (*TaskDetail, error) {
 	}
 
 	return &detail, nil
+}
+
+// renderMarkdown renders a markdown string using glamour, falling back
+// to plain word-wrapped text if glamour fails.
+func renderMarkdown(md string, width int) string {
+	r, err := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(width),
+	)
+	if err != nil {
+		return wrapText(md, width)
+	}
+	out, err := r.Render(md)
+	if err != nil {
+		return wrapText(md, width)
+	}
+	return strings.TrimRight(out, "\n")
 }
 
 // renderTaskInfo formats the task detail into styled text for display
@@ -92,47 +111,29 @@ func renderTaskInfo(td *TaskDetail, width int) string {
 		b.WriteString("\n")
 	}
 
-	// Description
+	// Description (rendered as markdown)
 	if td.Description != "" {
 		b.WriteString("\n")
 		b.WriteString(dimStyle.Render("── Description ──"))
 		b.WriteString("\n")
-		b.WriteString(wrapText(td.Description, width))
+		b.WriteString(renderMarkdown(td.Description, width))
 		b.WriteString("\n")
 	}
 
-	// Definition of Done
+	// Definition of Done (rendered as markdown)
 	if td.DefinitionOfDone != nil && *td.DefinitionOfDone != "" {
 		b.WriteString("\n")
 		b.WriteString(dimStyle.Render("── Definition of Done ──"))
 		b.WriteString("\n")
-		b.WriteString(wrapText(*td.DefinitionOfDone, width))
+		b.WriteString(renderMarkdown(*td.DefinitionOfDone, width))
 		b.WriteString("\n")
-	}
-
-	// Logs
-	if len(td.Logs) > 0 {
-		b.WriteString("\n")
-		b.WriteString(dimStyle.Render(fmt.Sprintf("── Logs (%d) ──", len(td.Logs))))
-		b.WriteString("\n")
-		for _, log := range td.Logs {
-			// Parse and format the timestamp if possible, otherwise show raw.
-			ts := log.CreatedAt
-			if len(ts) > 16 {
-				ts = ts[:16] // "2026-02-08T05:20" — trim seconds/tz
-			}
-			b.WriteString(fmt.Sprintf("%s  %s\n",
-				dimStyle.Render(ts),
-				log.Message,
-			))
-		}
 	}
 
 	return b.String()
 }
 
 // wrapText does simple word wrapping at the given width.
-// Preserves existing newlines.
+// Preserves existing newlines. Used as fallback when glamour fails.
 func wrapText(s string, width int) string {
 	if width <= 0 {
 		return s
@@ -144,13 +145,11 @@ func wrapText(s string, width int) string {
 			result.WriteString("\n")
 		}
 
-		// If line is already short, keep it.
 		if len([]rune(paragraph)) <= width {
 			result.WriteString(paragraph)
 			continue
 		}
 
-		// Word-wrap long lines.
 		words := strings.Fields(paragraph)
 		lineLen := 0
 		for i, word := range words {
