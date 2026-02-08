@@ -86,6 +86,14 @@ type agentDetailsMsg struct {
 // tickMsg triggers the next poll cycle.
 type tickMsg time.Time
 
+// screen identifies which screen the TUI is showing.
+type screen int
+
+const (
+	screenDashboard screen = iota
+	screenPanel
+)
+
 // Model is the top-level bubbletea model for the TUI.
 type Model struct {
 	config       Config
@@ -96,6 +104,8 @@ type Model struct {
 	err          error
 	selected     int                            // index of selected agent pane
 	agentDetails map[string]*client.AgentDetail // agentID → detail with tool calls
+	screen       screen                         // current screen
+	panel        PanelModel                     // agent master panel (active when screen == screenPanel)
 }
 
 // New creates a new TUI model with the given configuration.
@@ -148,6 +158,16 @@ func tick() tea.Cmd {
 
 // Update implements tea.Model. Handles key presses, window resize, and status polls.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Route to panel if active.
+	if m.screen == screenPanel {
+		return m.updatePanel(msg)
+	}
+
+	return m.updateDashboard(msg)
+}
+
+// updateDashboard handles messages for the dashboard screen.
+func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -160,6 +180,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "k", "up":
 			if m.selected > 0 {
 				m.selected--
+			}
+		case "enter":
+			if m.status != nil && m.selected < len(m.status.Agents) {
+				agent := m.status.Agents[m.selected]
+				m.screen = screenPanel
+				m.panel = NewPanelModel(agent, m.width, m.height)
+				return m, m.panel.Init()
 			}
 		}
 
@@ -193,8 +220,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// View implements tea.Model. Renders the dashboard screen.
+// updatePanel handles messages for the agent master panel screen.
+func (m Model) updatePanel(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Check for back navigation first.
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		switch keyMsg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "q", "esc":
+			m.screen = screenDashboard
+			return m, nil
+		}
+	}
+
+	// Forward window size to both model and panel.
+	if wsMsg, ok := msg.(tea.WindowSizeMsg); ok {
+		m.width = wsMsg.Width
+		m.height = wsMsg.Height
+	}
+
+	// Forward to panel.
+	var cmd tea.Cmd
+	m.panel, cmd = m.panel.Update(msg)
+	return m, cmd
+}
+
+// View implements tea.Model. Renders the current screen.
 func (m Model) View() string {
+	if m.screen == screenPanel {
+		return m.panel.View()
+	}
+
+	return m.viewDashboard()
+}
+
+// viewDashboard renders the dashboard screen.
+func (m Model) viewDashboard() string {
 	var b strings.Builder
 
 	b.WriteString(m.viewHeader())
