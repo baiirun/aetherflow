@@ -169,6 +169,7 @@ func TestExtractKeyInput(t *testing.T) {
 		{"glob pattern", "glob", `{"pattern":"**/*.go"}`, "**/*.go"},
 		{"grep pattern", "grep", `{"pattern":"func main"}`, "func main"},
 		{"task description", "task", `{"description":"review code"}`, "review code"},
+		{"skill name", "skill", `{"name":"review-auto"}`, "review-auto"},
 		{"unknown with filePath", "webfetch", `{"url":"https://example.com"}`, "https://example.com"},
 		{"unknown no known fields", "custom", `{"foo":"bar"}`, ""},
 		{"empty input", "read", `{}`, ""},

@@ -121,9 +121,11 @@ func extractKeyInput(tool string, raw json.RawMessage) string {
 		return unquoteField(m, "pattern")
 	case "task":
 		return unquoteField(m, "description")
+	case "skill":
+		return unquoteField(m, "name")
 	default:
 		// For unknown tools, try common fields.
-		for _, key := range []string{"filePath", "command", "url", "query", "pattern", "description"} {
+		for _, key := range []string{"filePath", "command", "url", "query", "pattern", "description", "name"} {
 			if v := unquoteField(m, key); v != "" {
 				return v
 			}
