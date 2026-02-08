@@ -119,11 +119,11 @@ Review findings come back prioritized.
 
 ### land
 
-Final verification, then compound knowledge, then ship.
+Final verification, then ship, then compound knowledge. Ship steps (2-6) are the critical path — do them before compounding.
 
 1. **Final verification** -- run the DoD verification command, full test suite, lint, build one final time (all inside your worktree). If anything fails, fix it and re-verify.
-2. **Compound** -- load `skill: compound-auto`. It will guide you through documentation enrichment, feature matrix updates, learnings, and handoff.
 {{land_steps}}
+7. **Compound** -- load `skill: compound-auto`. It will guide you through documentation enrichment, feature matrix updates, learnings, and handoff.
 
 ## Stuck detection
 

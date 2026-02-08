@@ -11,18 +11,18 @@ import (
 // Landing instructions injected into the worker prompt based on solo mode.
 // These replace {{land_steps}} and {{land_donts}} in worker.md.
 const (
-	landStepsNormal = `3. **Push your branch** -- from inside your worktree: ` + "`git push -u origin HEAD`" + `. If push fails (no remote configured), that's fine — log the situation and continue. The branch still exists locally for review.
-4. **Create PR** -- if push succeeded, create a PR with a clear title and description summarizing the change. If push failed, skip this step.
-5. **Clean up worktree** -- remove your worktree: ` + "`git worktree remove .aetherflow/worktrees/{{task_id}}`" + `
-6. **Mark task for review** -- ` + "`prog review {{task_id}}`" + `. This signals that your work is complete and awaiting merge. Do NOT use ` + "`prog done`" + ` — the daemon will automatically mark the task done when your branch lands on main.`
+	landStepsNormal = `2. **Push your branch** -- from inside your worktree: ` + "`git push -u origin HEAD`" + `. If push fails (no remote configured), that's fine — log the situation and continue. The branch still exists locally for review.
+3. **Create PR** -- if push succeeded, create a PR with a clear title and description summarizing the change. If push failed, skip this step.
+4. **Clean up worktree** -- remove your worktree: ` + "`git worktree remove .aetherflow/worktrees/{{task_id}}`" + `
+5. **Mark task for review** -- ` + "`prog review {{task_id}}`" + `. This signals that your work is complete and awaiting merge. Do NOT use ` + "`prog done`" + ` — the daemon will automatically mark the task done when your branch lands on main.`
 
-	landStepsSolo = `3. **Pull latest main** -- before merging, ensure your local main is up to date:
+	landStepsSolo = `2. **Pull latest main** -- before merging, ensure your local main is up to date:
    ` + "```bash" + `
    git checkout main
    git pull origin main
    ` + "```" + `
    If pull fails (no remote), that's fine — continue with local state.
-4. **Merge to main** -- from the project root (NOT the worktree):
+3. **Merge to main** -- from the project root (NOT the worktree):
    ` + "```bash" + `
    git merge af/{{task_id}} --no-ff -m "Merge af/{{task_id}}: <brief summary>"
    ` + "```" + `
@@ -32,13 +32,13 @@ const (
    prog block {{task_id}} "Merge conflicts with main require manual resolution"
    ` + "```" + `
    Then stop — do not continue with further steps.
-5. **Push main** -- ` + "`git push origin main`" + `. If push fails (no remote), that's fine — the merge is local.
-6. **Clean up** -- remove the branch and worktree:
+4. **Push main** -- ` + "`git push origin main`" + `. If push fails (no remote), that's fine — the merge is local.
+5. **Clean up** -- remove the branch and worktree:
    ` + "```bash" + `
    git worktree remove .aetherflow/worktrees/{{task_id}}
    git branch -d af/{{task_id}}
    ` + "```" + `
-7. **Mark task done** -- ` + "`prog done {{task_id}}`" + `. In solo mode the merge already landed, so the task is complete.`
+6. **Mark task done** -- ` + "`prog done {{task_id}}`" + `. In solo mode the merge already landed, so the task is complete.`
 
 	landDontsNormal = `- Don't merge your PR -- just create it. The daemon moves tasks to done when branches land on main.
 - Don't use ` + "`prog done`" + ` -- use ` + "`prog review`" + ` instead. The done transition happens automatically after merge.`
