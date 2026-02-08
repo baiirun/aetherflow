@@ -20,8 +20,7 @@ allowed since those tasks are already claimed.
 
 Use 'af resume' to return to normal scheduling.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		socketPath, _ := cmd.Flags().GetString("socket")
-		c := client.New(socketPath)
+		c := client.New(resolveSocketPath(cmd))
 		result, err := c.PoolDrain()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -42,8 +41,7 @@ or crash.
 
 Use 'af resume' to return to normal scheduling.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		socketPath, _ := cmd.Flags().GetString("socket")
-		c := client.New(socketPath)
+		c := client.New(resolveSocketPath(cmd))
 		result, err := c.PoolPause()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -61,8 +59,7 @@ var resumeCmd = &cobra.Command{
 Normal scheduling resumes: tasks from the queue will be assigned to
 free slots and crashed agents will be respawned.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		socketPath, _ := cmd.Flags().GetString("socket")
-		c := client.New(socketPath)
+		c := client.New(resolveSocketPath(cmd))
 		result, err := c.PoolResume()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -92,7 +89,4 @@ func init() {
 	rootCmd.AddCommand(pauseCmd)
 	rootCmd.AddCommand(resumeCmd)
 
-	drainCmd.Flags().String("socket", "", "Unix socket path (default: /tmp/aetherd.sock)")
-	pauseCmd.Flags().String("socket", "", "Unix socket path (default: /tmp/aetherd.sock)")
-	resumeCmd.Flags().String("socket", "", "Unix socket path (default: /tmp/aetherd.sock)")
 }

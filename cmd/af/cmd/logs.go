@@ -25,11 +25,10 @@ and -f to follow new output as it's written.
 Requires a running daemon and an active agent.`,
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		socketPath, _ := cmd.Flags().GetString("socket")
 		follow, _ := cmd.Flags().GetBool("follow")
 		lines, _ := cmd.Flags().GetInt("lines")
 
-		c := client.New(socketPath)
+		c := client.New(resolveSocketPath(cmd))
 		path, err := c.LogsPath(args[0])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -142,7 +141,6 @@ func followFile(f *os.File) error {
 func init() {
 	rootCmd.AddCommand(logsCmd)
 
-	logsCmd.Flags().String("socket", "", "Unix socket path (default: /tmp/aetherd.sock)")
 	logsCmd.Flags().BoolP("follow", "f", false, "Follow new output as it's written")
 	logsCmd.Flags().IntP("lines", "n", defaultTailLines, "Number of initial lines to show")
 }

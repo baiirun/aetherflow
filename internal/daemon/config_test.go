@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/geobrowser/aetherflow/internal/protocol"
 )
 
 // testConfigPromptDir creates a temp directory with worker.md for config validation tests
@@ -23,8 +25,8 @@ func TestConfigApplyDefaults(t *testing.T) {
 	var cfg Config
 	cfg.ApplyDefaults()
 
-	if cfg.SocketPath != DefaultSocketPath {
-		t.Errorf("SocketPath = %q, want %q", cfg.SocketPath, DefaultSocketPath)
+	if cfg.SocketPath != protocol.DefaultSocketPath {
+		t.Errorf("SocketPath = %q, want %q", cfg.SocketPath, protocol.DefaultSocketPath)
 	}
 	if cfg.PollInterval != DefaultPollInterval {
 		t.Errorf("PollInterval = %v, want %v", cfg.PollInterval, DefaultPollInterval)
@@ -44,6 +46,16 @@ func TestConfigApplyDefaults(t *testing.T) {
 	}
 	if cfg.Logger == nil {
 		t.Error("Logger should not be nil after ApplyDefaults")
+	}
+}
+
+func TestConfigApplyDefaultsWithProject(t *testing.T) {
+	cfg := Config{Project: "myproject"}
+	cfg.ApplyDefaults()
+
+	want := protocol.SocketPathFor("myproject")
+	if cfg.SocketPath != want {
+		t.Errorf("SocketPath = %q, want %q (should derive from project)", cfg.SocketPath, want)
 	}
 }
 
@@ -90,6 +102,26 @@ func TestConfigValidate(t *testing.T) {
 			name:    "missing project",
 			cfg:     Config{PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
 			wantErr: "project is required",
+		},
+		{
+			name:    "project with slashes",
+			cfg:     Config{Project: "../etc/evil", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
+			wantErr: "invalid characters",
+		},
+		{
+			name:    "project with spaces",
+			cfg:     Config{Project: "my project", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
+			wantErr: "invalid characters",
+		},
+		{
+			name:    "project starting with dot",
+			cfg:     Config{Project: ".hidden", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
+			wantErr: "invalid characters",
+		},
+		{
+			name:    "project starting with hyphen",
+			cfg:     Config{Project: "-bad", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
+			wantErr: "invalid characters",
 		},
 		{
 			name:    "negative poll interval",

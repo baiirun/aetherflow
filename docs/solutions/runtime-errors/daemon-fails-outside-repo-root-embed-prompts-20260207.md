@@ -104,3 +104,6 @@ The Go `embed.FS` is read-only and compiled into the binary at build time, addin
 
 - See also: [af-pool-flow-control](../developer-experience/af-pool-flow-control-drain-pause-resume-20260207.md) — uses the same Config/Validate pattern
 - See also: [af-status-color-terminal-styling](../developer-experience/af-status-color-terminal-styling-20260207.md) — recent feature that uses embedded prompts via pool
+- See also: [nil-pointer-status-handler](./nil-pointer-status-handler-runner-not-set-20260207.md) — another Config initialization issue from same session
+- See also: [orphaned-in-progress-tasks-reclaim](./orphaned-in-progress-tasks-reclaim-on-startup-20260207.md) — daemon crash recovery from same session
+- See also: [daemon-cross-project-shutdown-socket-isolation](../security-issues/daemon-cross-project-shutdown-socket-isolation-20260207.md) — cross-project socket isolation and path traversal hardening

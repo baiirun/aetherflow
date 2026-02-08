@@ -213,4 +213,4 @@ fmt.Printf("  %6s  %-10s%s %s%s\n", relTime, tc.Tool, title, input, dur)
 
 ## Related Issues
 
-No related issues documented yet.
+- See also: [daemon-cross-project-shutdown-socket-isolation](../security-issues/daemon-cross-project-shutdown-socket-isolation-20260207.md) — cross-project socket isolation and path traversal hardening (also used multi-agent review)

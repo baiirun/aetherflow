@@ -20,7 +20,6 @@ import (
 )
 
 const (
-	DefaultSocketPath   = "/tmp/aetherd.sock"
 	DefaultPollInterval = 10 * time.Second
 )
 
@@ -88,6 +87,12 @@ func (d *Daemon) Run() error {
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", d.config.SocketPath, err)
 	}
+	// Restrict socket to owner only — prevents other local users from
+	// issuing RPC commands (especially shutdown) to this daemon.
+	if err := os.Chmod(d.config.SocketPath, 0700); err != nil {
+		listener.Close()
+		return fmt.Errorf("failed to set socket permissions on %s: %w", d.config.SocketPath, err)
+	}
 	d.listener = listener
 
 	d.log.Info("daemon started", "socket", d.config.SocketPath)
@@ -149,9 +154,10 @@ func (d *Daemon) handleConnection(ctx context.Context, conn net.Conn) {
 	for {
 		var req Request
 		if err := decoder.Decode(&req); err != nil {
-			return // Connection closed or invalid JSON
+			return // Connection closed or read error
 		}
 
+		d.log.Debug("rpc request", "method", req.Method)
 		resp := d.handleRequest(ctx, &req)
 		if err := encoder.Encode(resp); err != nil {
 			return
@@ -181,6 +187,7 @@ func (d *Daemon) handleRequest(ctx context.Context, req *Request) *Response {
 }
 
 func (d *Daemon) handleShutdown() *Response {
+	d.log.Info("shutdown requested via RPC")
 	// Signal shutdown in background so we can send response first
 	go func() {
 		time.Sleep(50 * time.Millisecond)

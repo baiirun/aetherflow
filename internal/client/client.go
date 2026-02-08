@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"net"
 	"time"
-)
 
-const DefaultSocketPath = "/tmp/aetherd.sock"
+	"github.com/geobrowser/aetherflow/internal/protocol"
+)
 
 // Client communicates with the aetherd daemon.
 type Client struct {
@@ -18,7 +18,7 @@ type Client struct {
 // New creates a new client.
 func New(socketPath string) *Client {
 	if socketPath == "" {
-		socketPath = DefaultSocketPath
+		socketPath = protocol.DefaultSocketPath
 	}
 	return &Client{socketPath: socketPath}
 }

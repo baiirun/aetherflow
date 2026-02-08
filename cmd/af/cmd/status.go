@@ -31,7 +31,7 @@ Use -w/--watch for continuous monitoring (refreshes every 2s by default).
 Requires a running daemon.`,
 	Args: cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		socketPath, _ := cmd.Flags().GetString("socket")
+		socketPath := resolveSocketPath(cmd)
 		asJSON, _ := cmd.Flags().GetBool("json")
 		watch, _ := cmd.Flags().GetBool("watch")
 		interval, _ := cmd.Flags().GetDuration("interval")
@@ -64,6 +64,7 @@ func runStatusOnce(c *client.Client, args []string, asJSON bool, cmd *cobra.Comm
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		fmt.Fprintf(os.Stderr, "\nIs the daemon running? Start it with: af daemon start --project <name>\n")
+		fmt.Fprintf(os.Stderr, "Hint: socket path is derived from project in .aetherflow.yaml\n")
 		os.Exit(1)
 	}
 
@@ -391,7 +392,6 @@ func formatRelativeTime(t time.Time) string {
 func init() {
 	rootCmd.AddCommand(statusCmd)
 
-	statusCmd.Flags().String("socket", "", "Unix socket path (default: /tmp/aetherd.sock)")
 	statusCmd.Flags().Bool("json", false, "Output raw JSON")
 	statusCmd.Flags().Int("limit", 20, "Max tool calls to show in agent detail view")
 	statusCmd.Flags().BoolP("watch", "w", false, "Continuously refresh the display")

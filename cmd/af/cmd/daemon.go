@@ -17,7 +17,7 @@ var daemonCmd = &cobra.Command{
 	Long:  `Start the daemon or check its status.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Default: show status
-		c := client.New("")
+		c := client.New(resolveSocketPath(cmd))
 		status, err := c.StatusFull()
 		if err != nil {
 			fmt.Println("not running")
@@ -135,7 +135,7 @@ var daemonStopCmd = &cobra.Command{
 	Use:   "stop",
 	Short: "Stop the daemon",
 	Run: func(cmd *cobra.Command, args []string) {
-		c := client.New("")
+		c := client.New(resolveSocketPath(cmd))
 		if err := c.Shutdown(); err != nil {
 			Fatal("%v", err)
 		}
@@ -151,7 +151,6 @@ func init() {
 	f := daemonStartCmd.Flags()
 	f.BoolP("detach", "d", false, "Run in background")
 	f.StringP("project", "p", "", "Project to watch for tasks (required)")
-	f.String("socket", daemon.DefaultSocketPath, "Unix socket path")
 	f.Duration("poll-interval", daemon.DefaultPollInterval, "How often to poll prog for tasks")
 	f.Int("pool-size", daemon.DefaultPoolSize, "Maximum concurrent agent slots")
 	f.String("spawn-cmd", daemon.DefaultSpawnCmd, "Command to launch agent sessions")

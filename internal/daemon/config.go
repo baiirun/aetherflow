@@ -5,8 +5,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 
+	"github.com/geobrowser/aetherflow/internal/protocol"
 	"gopkg.in/yaml.v3"
 )
 
@@ -16,6 +18,11 @@ const (
 	DefaultMaxRetries = 3
 	DefaultLogDir     = ".aetherflow/logs"
 )
+
+// validProjectName restricts project names to safe characters for use in
+// socket paths and log file paths. Rejects slashes, spaces, and other
+// characters that could cause path traversal or shell interpretation issues.
+var validProjectName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
 // Config holds daemon configuration.
 //
@@ -64,7 +71,7 @@ type Config struct {
 // ApplyDefaults fills in zero-valued fields with sensible defaults.
 func (c *Config) ApplyDefaults() {
 	if c.SocketPath == "" {
-		c.SocketPath = DefaultSocketPath
+		c.SocketPath = protocol.SocketPathFor(c.Project)
 	}
 	if c.PollInterval == 0 {
 		c.PollInterval = DefaultPollInterval
@@ -92,6 +99,9 @@ func (c *Config) ApplyDefaults() {
 func (c *Config) Validate() error {
 	if c.Project == "" {
 		return fmt.Errorf("project is required (use --project or set project in config file)")
+	}
+	if !validProjectName.MatchString(c.Project) {
+		return fmt.Errorf("project name %q contains invalid characters (allowed: letters, digits, hyphens, underscores, dots)", c.Project)
 	}
 	if c.PollInterval <= 0 {
 		return fmt.Errorf("poll-interval must be positive, got %v", c.PollInterval)
