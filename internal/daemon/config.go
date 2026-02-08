@@ -13,10 +13,11 @@ import (
 )
 
 const (
-	DefaultPoolSize   = 3
-	DefaultSpawnCmd   = "opencode run --format json"
-	DefaultMaxRetries = 3
-	DefaultLogDir     = ".aetherflow/logs"
+	DefaultPoolSize          = 3
+	DefaultSpawnCmd          = "opencode run --format json"
+	DefaultMaxRetries        = 3
+	DefaultLogDir            = ".aetherflow/logs"
+	DefaultReconcileInterval = 30 * time.Second
 )
 
 // validProjectName restricts project names to safe characters for use in
@@ -58,6 +59,12 @@ type Config struct {
 	// Each task gets a <taskID>.jsonl file in this directory.
 	LogDir string `yaml:"log_dir"`
 
+	// ReconcileInterval is how often the daemon checks if reviewing tasks
+	// have been merged to main. When a task's af/<task-id> branch is an
+	// ancestor of main (or the branch no longer exists), the daemon
+	// automatically marks the task done via `prog done`.
+	ReconcileInterval time.Duration `yaml:"reconcile_interval"`
+
 	// Runner is the command execution function. Not configurable via file/flags.
 	Runner CommandRunner `yaml:"-"`
 
@@ -86,6 +93,9 @@ func (c *Config) ApplyDefaults() {
 		c.MaxRetries = DefaultMaxRetries
 	}
 	// PromptDir intentionally has no default — empty means use embedded prompts.
+	if c.ReconcileInterval == 0 {
+		c.ReconcileInterval = DefaultReconcileInterval
+	}
 	if c.LogDir == "" {
 		c.LogDir = DefaultLogDir
 	}
@@ -196,6 +206,9 @@ func mergeConfig(src, dst *Config) {
 	}
 	if dst.PromptDir == "" {
 		dst.PromptDir = src.PromptDir
+	}
+	if dst.ReconcileInterval == 0 {
+		dst.ReconcileInterval = src.ReconcileInterval
 	}
 	if dst.LogDir == "" {
 		dst.LogDir = src.LogDir

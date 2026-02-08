@@ -13,7 +13,7 @@ Read your task before doing anything else: `prog show {{task_id}}`
 
 ## Output
 
-Committed code. Passing tests. Clean review. PR created. Handoff written to prog.
+Committed code. Passing tests. Clean review. Branch pushed. Handoff written to prog.
 
 ## Constraints
 
@@ -123,9 +123,10 @@ Final verification, then compound knowledge, then ship.
 
 1. **Final verification** -- run the DoD verification command, full test suite, lint, build one final time (all inside your worktree). If anything fails, fix it and re-verify.
 2. **Compound** -- load `skill: compound-auto`. It will guide you through documentation enrichment, feature matrix updates, learnings, and handoff.
-3. **Create PR** -- from inside your worktree: `git push -u origin HEAD` then create a PR with a clear title and description summarizing the change.
-4. **Clean up worktree** -- after the PR is created, remove your worktree: `git worktree remove .aetherflow/worktrees/{{task_id}}`
-5. **Mark task done** -- `prog done {{task_id}}`
+3. **Push your branch** -- from inside your worktree: `git push -u origin HEAD`. If push fails (no remote configured), that's fine — log the situation and continue. The branch still exists locally for review.
+4. **Create PR** -- if push succeeded, create a PR with a clear title and description summarizing the change. If push failed, skip this step.
+5. **Clean up worktree** -- remove your worktree: `git worktree remove .aetherflow/worktrees/{{task_id}}`
+6. **Mark task for review** -- `prog review {{task_id}}`. This signals that your work is complete and awaiting merge. Do NOT use `prog done` — the daemon will automatically mark the task done when your branch lands on main.
 
 ## Stuck detection
 
@@ -147,6 +148,7 @@ When stuck:
 - Don't refactor code outside your task scope, even if it's ugly
 - Don't add features beyond the DoD, even if they'd be nice
 - Don't spend time on performance optimization unless the DoD requires it
-- Don't merge your PR -- just create it
+- Don't merge your PR -- just create it. The daemon moves tasks to done when branches land on main.
+- Don't use `prog done` -- use `prog review` instead. The done transition happens automatically after merge.
 - Don't ask the user anything -- there is no user
 - Don't output completion promises unless every item in `land` is green

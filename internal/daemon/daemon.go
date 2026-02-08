@@ -127,6 +127,10 @@ func (d *Daemon) Run() error {
 		// These are tasks that were claimed in prog but whose agents died
 		// when the daemon crashed or was stopped.
 		go d.pool.Reclaim(ctx)
+
+		// Reconcile reviewing tasks — periodically check if branches have
+		// been merged to main and mark the corresponding tasks as done.
+		go d.reconcileReviewing(ctx)
 	}
 
 	// Accept connections
