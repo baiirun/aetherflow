@@ -50,10 +50,12 @@ func fetchTaskDetail(taskID string) (*TaskDetail, error) {
 }
 
 // renderMarkdown renders a markdown string using glamour, falling back
-// to plain word-wrapped text if glamour fails.
+// to plain word-wrapped text if glamour fails. Uses DarkStyle to avoid
+// terminal queries (WithAutoStyle sends escape sequences that interfere
+// with bubbletea's input handling on repeated calls).
 func renderMarkdown(md string, width int) string {
 	r, err := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
+		glamour.WithStylePath("dark"),
 		glamour.WithWordWrap(width),
 	)
 	if err != nil {
