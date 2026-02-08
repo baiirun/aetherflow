@@ -92,6 +92,7 @@ type screen int
 const (
 	screenDashboard screen = iota
 	screenPanel
+	screenLogStream
 )
 
 // Model is the top-level bubbletea model for the TUI.
@@ -106,6 +107,7 @@ type Model struct {
 	agentDetails map[string]*client.AgentDetail // agentID → detail with tool calls
 	screen       screen                         // current screen
 	panel        PanelModel                     // agent master panel (active when screen == screenPanel)
+	logStream    LogStreamModel                 // full-screen log stream (active when screen == screenLogStream)
 }
 
 // New creates a new TUI model with the given configuration.
@@ -158,12 +160,14 @@ func tick() tea.Cmd {
 
 // Update implements tea.Model. Handles key presses, window resize, and status polls.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Route to panel if active.
-	if m.screen == screenPanel {
+	switch m.screen {
+	case screenPanel:
 		return m.updatePanel(msg)
+	case screenLogStream:
+		return m.updateLogStream(msg)
+	default:
+		return m.updateDashboard(msg)
 	}
-
-	return m.updateDashboard(msg)
 }
 
 // updateDashboard handles messages for the dashboard screen.
@@ -223,6 +227,14 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// fetchLogPathCmd returns a Cmd that fetches the log file path for an agent.
+func fetchLogPathCmd(c *client.Client, agentID string) tea.Cmd {
+	return func() tea.Msg {
+		path, err := c.LogsPath(agentID)
+		return logPathMsg{path: path, err: err}
+	}
+}
+
 // updatePanel handles messages for the agent master panel screen.
 func (m Model) updatePanel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Check for back navigation first.
@@ -233,6 +245,11 @@ func (m Model) updatePanel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "esc":
 			m.screen = screenDashboard
 			return m, nil
+		case "l":
+			// Open full-screen log stream for the current agent.
+			m.screen = screenLogStream
+			m.logStream = NewLogStreamModel(m.panel.agent.ID, m.width, m.height)
+			return m, fetchLogPathCmd(m.client, m.panel.agent.ID)
 		}
 	}
 
@@ -264,13 +281,56 @@ func (m Model) updatePanel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// View implements tea.Model. Renders the current screen.
-func (m Model) View() string {
-	if m.screen == screenPanel {
-		return m.panel.View()
+// updateLogStream handles messages for the full-screen log stream.
+func (m Model) updateLogStream(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Check for back navigation first.
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		switch keyMsg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "q", "esc":
+			m.screen = screenPanel
+			return m, nil
+		}
 	}
 
-	return m.viewDashboard()
+	// Forward window size to model.
+	if wsMsg, ok := msg.(tea.WindowSizeMsg); ok {
+		m.width = wsMsg.Width
+		m.height = wsMsg.Height
+	}
+
+	// On tick, poll for new log lines if we have the path.
+	if _, ok := msg.(tickMsg); ok {
+		cmds := []tea.Cmd{tick()}
+		if m.logStream.path != "" {
+			cmds = append(cmds, m.logStream.readNewLinesCmd())
+		}
+		// Forward tick to logStream.
+		var lsCmd tea.Cmd
+		m.logStream, lsCmd = m.logStream.Update(msg)
+		if lsCmd != nil {
+			cmds = append(cmds, lsCmd)
+		}
+		return m, tea.Batch(cmds...)
+	}
+
+	// Forward to logStream model.
+	var cmd tea.Cmd
+	m.logStream, cmd = m.logStream.Update(msg)
+	return m, cmd
+}
+
+// View implements tea.Model. Renders the current screen.
+func (m Model) View() string {
+	switch m.screen {
+	case screenPanel:
+		return m.panel.View()
+	case screenLogStream:
+		return m.logStream.View()
+	default:
+		return m.viewDashboard()
+	}
 }
 
 // viewDashboard renders the dashboard screen.

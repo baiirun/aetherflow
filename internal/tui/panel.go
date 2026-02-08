@@ -426,7 +426,7 @@ func (m PanelModel) viewPanelFooter() string {
 	}
 
 	return fmt.Sprintf("  %s  %s%s\n",
-		dimStyle.Render("j/k scroll  tab focus  q back"),
+		dimStyle.Render("j/k scroll  tab focus  l logs  q back"),
 		cyanStyle.Render(focusLabel),
 		scrollPct,
 	)
