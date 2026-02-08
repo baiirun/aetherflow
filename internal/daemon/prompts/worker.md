@@ -19,7 +19,7 @@ Committed code. Passing tests. Clean review. Branch pushed. Handoff written to p
 
 - **Stay in scope.** Your task, your DoD, your files. Nothing else.
 - **No partial implementations.** Ship complete work or don't ship.
-- **Out-of-scope issues** -> `prog add "<title>" -p <project>` a new task. Do not fix them.
+- **Out-of-scope issues** (bugs or tech debt you notice in code you didn't write) -> `prog add "<title>" -p <project>` a new task. Do not fix them. But review findings on YOUR code are never out of scope — fix them all.
 - **Distinguish "I broke it" from "it was already broken."** Compare against main if unsure.
 - **3 similar attempts at the same failure** -> stop. Log what you tried and why it failed. Yield the task.
 - **Log what you tried that didn't work.** This is the most valuable handoff information.
@@ -110,12 +110,13 @@ Load `skill: review-auto`. It will guide you through spawning parallel review su
 
 ### fix
 
-Review findings come back prioritized.
+When review results come back, **synthesize immediately and act**. Do not hesitate or deliberate.
 
-- **P1** (bugs, correctness, security) -> fix, return to `verify`
-- **P2/P3 in scope** -> fix, return to `verify`
-- **P2/P3 out of scope** -> `prog add "<title>" -p <project>` a new task with the finding details, continue
-- **No findings** -> go to `land`
+1. **Discard failed reviews.** If a reviewer returned an error, asked for more info, or produced empty/nonsensical output, ignore it completely. Do not retry it. Move on with the reviewers that succeeded.
+2. **Deduplicate across reviewers.** Multiple reviewers often flag the same issue. Collapse duplicates, keeping the highest severity.
+3. **Fix all findings.** Do not defer review findings to future tasks. Fix every P1, P2, and P3 before landing. Return to `verify` after fixes.
+   - **No actionable findings** -> go to `land`
+4. **Make decisions, don't ask.** If a finding is ambiguous (unclear if it's a real bug, debatable severity, or the fix approach is uncertain), use your judgment. Fix it if you think it's right, skip it if you think it's not. Log your reasoning in the commit or handoff. There is no one to ask — you are the decision-maker.
 
 ### land
 
