@@ -943,6 +943,139 @@ func TestSpawnPassesAgentIDToStarter(t *testing.T) {
 	}
 }
 
+// --- dead agent sweep tests ---
+
+func TestPoolSweepsDeadProcess(t *testing.T) {
+	// Simulate an agent whose Wait() hangs forever but whose PID is gone.
+	// sweepDead should remove it from the pool.
+	proc := &fakeProcess{pid: 99999, waitCh: make(chan struct{})} // never closed → Wait blocks forever
+
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
+		return proc, nil
+	}
+
+	pool := testPool(t, progRunner(testTaskMeta), starter)
+	// Override pidAlive to report the PID as dead.
+	pool.pidAlive = func(pid int) bool { return false }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	taskCh := make(chan []Task, 1)
+	taskCh <- []Task{{ID: "ts-abc", Priority: 1, Title: "Do it"}}
+
+	go pool.Run(ctx, taskCh)
+
+	// Wait for agent to appear.
+	waitFor(t, func() bool {
+		return len(pool.Status()) == 1
+	})
+
+	// Manually trigger sweep (don't wait 30s for the ticker).
+	pool.sweepDead()
+
+	// Agent should be removed.
+	if got := len(pool.Status()); got != 0 {
+		t.Errorf("after sweep: running agents = %d, want 0", got)
+	}
+}
+
+func TestPoolSweepKeepsAliveProcess(t *testing.T) {
+	// Agent with a live PID should not be removed by sweep.
+	proc, release := newFakeProcess(1234)
+	defer release()
+
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
+		return proc, nil
+	}
+
+	pool := testPool(t, progRunner(testTaskMeta), starter)
+	// Override pidAlive to report the PID as alive.
+	pool.pidAlive = func(pid int) bool { return true }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	taskCh := make(chan []Task, 1)
+	taskCh <- []Task{{ID: "ts-abc", Priority: 1, Title: "Do it"}}
+
+	go pool.Run(ctx, taskCh)
+
+	waitFor(t, func() bool {
+		return len(pool.Status()) == 1
+	})
+
+	// Sweep should not remove a live agent.
+	pool.sweepDead()
+
+	if got := len(pool.Status()); got != 1 {
+		t.Errorf("after sweep: running agents = %d, want 1", got)
+	}
+}
+
+func TestPoolSweepFreesSlot(t *testing.T) {
+	// After sweeping a dead agent, the freed slot should allow a new task
+	// to be scheduled on the next poll cycle.
+	var spawnCount atomic.Int32
+
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
+		spawnCount.Add(1)
+		// All processes block forever (simulating hung Wait).
+		proc := &fakeProcess{pid: int(spawnCount.Load()) * 100, waitCh: make(chan struct{})}
+		return proc, nil
+	}
+
+	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if len(args) >= 1 && args[0] == "start" {
+			return []byte("Started"), nil
+		}
+		if len(args) >= 2 && args[0] == "show" {
+			meta := fmt.Sprintf(`{"id":"%s","type":"task","definition_of_done":"Do it","labels":[]}`, args[1])
+			return []byte(meta), nil
+		}
+		return nil, fmt.Errorf("unexpected: %v", args)
+	}
+
+	pool := testPool(t, runner, starter) // pool size = 2
+	// All PIDs report dead on sweep.
+	pool.pidAlive = func(pid int) bool { return false }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	taskCh := make(chan []Task, 2)
+	// Fill both slots.
+	taskCh <- []Task{
+		{ID: "ts-1", Priority: 1, Title: "First"},
+		{ID: "ts-2", Priority: 1, Title: "Second"},
+	}
+
+	go pool.Run(ctx, taskCh)
+
+	waitFor(t, func() bool {
+		return len(pool.Status()) == 2
+	})
+
+	// Sweep kills both.
+	pool.sweepDead()
+
+	if got := len(pool.Status()); got != 0 {
+		t.Fatalf("after sweep: running agents = %d, want 0", got)
+	}
+
+	// Now a new task should be schedulable.
+	taskCh <- []Task{{ID: "ts-3", Priority: 1, Title: "Third"}}
+
+	waitFor(t, func() bool {
+		return len(pool.Status()) == 1
+	})
+
+	agents := pool.Status()
+	if agents[0].TaskID != "ts-3" {
+		t.Errorf("new agent task = %q, want %q", agents[0].TaskID, "ts-3")
+	}
+}
+
 // --- helpers ---
 
 // waitFor polls a condition with a timeout.

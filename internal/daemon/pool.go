@@ -142,7 +142,26 @@ type Pool struct {
 	starter ProcessStarter
 	log     *slog.Logger
 	ctx     context.Context // stored for respawn goroutines
+
+	// pidAlive checks whether a process with the given PID is still running.
+	// Defaults to the real syscall check; overridden in tests.
+	pidAlive func(int) bool
 }
+
+// defaultPIDAlive checks process liveness via kill(pid, 0).
+// Returns false when the process does not exist (ESRCH).
+// Returns true for any other case (alive, or permission denied which
+// means the process exists but belongs to another user).
+func defaultPIDAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	if err == nil {
+		return true
+	}
+	// ESRCH = no such process — the only signal that the PID is gone.
+	return err != syscall.ESRCH
+}
+
+const sweepInterval = 30 * time.Second
 
 // NewPool creates a pool with the given configuration.
 func NewPool(cfg Config, runner CommandRunner, starter ProcessStarter, log *slog.Logger) *Pool {
@@ -154,15 +173,16 @@ func NewPool(cfg Config, runner CommandRunner, starter ProcessStarter, log *slog
 	}
 
 	return &Pool{
-		mode:    PoolActive,
-		agents:  make(map[string]*Agent),
-		retries: make(map[string]int),
-		names:   protocol.NewNameGenerator(),
-		config:  cfg,
-		logDir:  cfg.LogDir,
-		runner:  runner,
-		starter: starter,
-		log:     log,
+		mode:     PoolActive,
+		agents:   make(map[string]*Agent),
+		retries:  make(map[string]int),
+		names:    protocol.NewNameGenerator(),
+		config:   cfg,
+		logDir:   cfg.LogDir,
+		runner:   runner,
+		starter:  starter,
+		log:      log,
+		pidAlive: defaultPIDAlive,
 	}
 }
 
@@ -185,6 +205,9 @@ func (p *Pool) Run(ctx context.Context, taskCh <-chan []Task) {
 	}
 	p.log.Info("pool started", "pool_size", p.config.PoolSize)
 
+	sweepTicker := time.NewTicker(sweepInterval)
+	defer sweepTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -196,6 +219,8 @@ func (p *Pool) Run(ctx context.Context, taskCh <-chan []Task) {
 				return
 			}
 			p.schedule(ctx, tasks)
+		case <-sweepTicker.C:
+			p.sweepDead()
 		}
 	}
 }
@@ -496,6 +521,36 @@ func (p *Pool) respawn(taskID string, role Role) {
 // Caller must hold at least a read lock.
 func (p *Pool) runningCount() int {
 	return len(p.agents)
+}
+
+// sweepDead removes agents whose OS process has exited but whose reap
+// goroutine is stuck on Wait(). This is a safety net — normally reap()
+// handles cleanup, but when Wait() hangs (observed with Setsid session
+// leaders), the agent slot is leaked. The sweep checks PID liveness via
+// kill(pid, 0) and force-removes dead agents.
+//
+// The orphaned reap goroutine for each swept agent will leak (it's blocked
+// on Wait() forever). This is acceptable: one goroutine per dead agent,
+// and dead agents are rare.
+func (p *Pool) sweepDead() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for taskID, agent := range p.agents {
+		if p.pidAlive(agent.PID) {
+			continue
+		}
+
+		p.log.Warn("sweep: removing dead agent (PID gone, Wait hung)",
+			"agent_id", agent.ID,
+			"task_id", taskID,
+			"pid", agent.PID,
+			"uptime", time.Since(agent.SpawnTime).Round(time.Second),
+		)
+
+		delete(p.agents, taskID)
+		p.names.Release(agent.ID)
+	}
 }
 
 // Status returns the current pool state for the status RPC.
