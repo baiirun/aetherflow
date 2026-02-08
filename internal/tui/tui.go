@@ -186,7 +186,10 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 				agent := m.status.Agents[m.selected]
 				m.screen = screenPanel
 				m.panel = NewPanelModel(agent, m.width, m.height)
-				return m, m.panel.Init()
+				return m, tea.Batch(
+					m.panel.Init(),
+					fetchPanelAgentDetailCmd(m.client, agent.ID),
+				)
 			}
 		}
 
@@ -237,6 +240,22 @@ func (m Model) updatePanel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if wsMsg, ok := msg.(tea.WindowSizeMsg); ok {
 		m.width = wsMsg.Width
 		m.height = wsMsg.Height
+	}
+
+	// Keep the tick chain alive and refresh data while on panel.
+	if _, ok := msg.(tickMsg); ok {
+		cmds := []tea.Cmd{
+			tick(),
+			fetchTaskDetailCmd(m.panel.agent.TaskID),
+			fetchPanelAgentDetailCmd(m.client, m.panel.agent.ID),
+		}
+		// Forward tick to panel in case it needs it later.
+		var panelCmd tea.Cmd
+		m.panel, panelCmd = m.panel.Update(msg)
+		if panelCmd != nil {
+			cmds = append(cmds, panelCmd)
+		}
+		return m, tea.Batch(cmds...)
 	}
 
 	// Forward to panel.
