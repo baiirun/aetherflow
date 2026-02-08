@@ -25,6 +25,11 @@ const (
 // characters that could cause path traversal or shell interpretation issues.
 var validProjectName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
+// validTaskID restricts task IDs parsed from prog output to safe characters
+// before they flow into git commands (rev-parse, merge-base) and prog done.
+// Without this, a crafted ID like "--exec=evil" could be interpreted as a flag.
+var validTaskID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+
 // Config holds daemon configuration.
 //
 // Configuration is assembled from three sources in priority order:
@@ -54,6 +59,11 @@ type Config struct {
 	// directory. When empty, the daemon uses prompts compiled into the binary.
 	// Set this for development or to customize agent behavior without rebuilding.
 	PromptDir string `yaml:"prompt_dir"`
+
+	// Solo mode has agents merge their branch directly to main instead of
+	// creating a PR and waiting for review. Use when running a single agent
+	// or when you want autonomous end-to-end delivery without a review gate.
+	Solo bool `yaml:"solo"`
 
 	// LogDir is the directory for agent JSONL log files.
 	// Each task gets a <taskID>.jsonl file in this directory.
@@ -124,6 +134,9 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxRetries < 0 {
 		return fmt.Errorf("max-retries must be non-negative, got %d", c.MaxRetries)
+	}
+	if c.ReconcileInterval < 5*time.Second {
+		return fmt.Errorf("reconcile-interval must be at least 5s, got %v", c.ReconcileInterval)
 	}
 
 	// When PromptDir is set (filesystem override), resolve to absolute path
@@ -209,6 +222,11 @@ func mergeConfig(src, dst *Config) {
 	}
 	if dst.ReconcileInterval == 0 {
 		dst.ReconcileInterval = src.ReconcileInterval
+	}
+	// Solo is a bool — only override if dst hasn't been set by CLI flag.
+	// Since bool zero is false, we can only merge true from file.
+	if src.Solo && !dst.Solo {
+		dst.Solo = true
 	}
 	if dst.LogDir == "" {
 		dst.LogDir = src.LogDir

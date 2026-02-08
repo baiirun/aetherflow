@@ -21,7 +21,7 @@ func TestFetchInProgressTasks(t *testing.T) {
 		return data, nil
 	}
 
-	tasks, err := fetchInProgressTasks(context.Background(), "testproject", runner)
+	tasks, err := fetchInProgressTasks(context.Background(), "testproject", runner, slog.Default())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestFetchInProgressTasksEmpty(t *testing.T) {
 		return []byte("[]"), nil
 	}
 
-	tasks, err := fetchInProgressTasks(context.Background(), "testproject", runner)
+	tasks, err := fetchInProgressTasks(context.Background(), "testproject", runner, slog.Default())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestFetchInProgressTasksCommandError(t *testing.T) {
 		return []byte("error output"), fmt.Errorf("exit status 1")
 	}
 
-	_, err := fetchInProgressTasks(context.Background(), "testproject", runner)
+	_, err := fetchInProgressTasks(context.Background(), "testproject", runner, slog.Default())
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}

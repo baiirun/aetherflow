@@ -29,6 +29,11 @@ type reconcileRunner struct {
 func (r *reconcileRunner) run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := strings.Join(append([]string{name}, args...), " ")
 
+	// git fetch origin main — always succeed (simulate remote available).
+	if name == "git" && len(args) >= 2 && args[0] == "fetch" {
+		return nil, nil
+	}
+
 	// prog list --status reviewing --type task --json -p <project>
 	if name == "prog" && len(args) >= 2 && args[0] == "list" && strings.Contains(cmd, "reviewing") {
 		if r.listErr != nil {
@@ -57,7 +62,7 @@ func (r *reconcileRunner) run(ctx context.Context, name string, args ...string) 
 	}
 
 	// prog done <taskID>
-	if name == "prog" && len(args) >= 1 && args[0] == "done" {
+	if name == "prog" && len(args) >= 2 && args[0] == "done" {
 		if r.doneErr != nil {
 			return nil, r.doneErr
 		}

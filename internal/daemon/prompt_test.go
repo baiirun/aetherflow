@@ -10,7 +10,7 @@ import (
 // --- Embedded prompt tests (promptDir == "") ---
 
 func TestRenderPromptEmbedded(t *testing.T) {
-	got, err := RenderPrompt("", RoleWorker, "ts-abc123")
+	got, err := RenderPrompt("", RoleWorker, "ts-abc123", false)
 	if err != nil {
 		t.Fatalf("RenderPrompt (embedded) returned error: %v", err)
 	}
@@ -22,10 +22,16 @@ func TestRenderPromptEmbedded(t *testing.T) {
 	if strings.Contains(got, "{{task_id}}") {
 		t.Error("rendered prompt should not contain unreplaced {{task_id}}")
 	}
+	if strings.Contains(got, "{{land_steps}}") {
+		t.Error("rendered prompt should not contain unreplaced {{land_steps}}")
+	}
+	if strings.Contains(got, "{{land_donts}}") {
+		t.Error("rendered prompt should not contain unreplaced {{land_donts}}")
+	}
 }
 
 func TestRenderPromptEmbeddedPlanner(t *testing.T) {
-	got, err := RenderPrompt("", RolePlanner, "ts-plan42")
+	got, err := RenderPrompt("", RolePlanner, "ts-plan42", false)
 	if err != nil {
 		t.Fatalf("RenderPrompt (embedded planner) returned error: %v", err)
 	}
@@ -39,12 +45,57 @@ func TestRenderPromptEmbeddedPlanner(t *testing.T) {
 }
 
 func TestRenderPromptEmbeddedUnknownRole(t *testing.T) {
-	_, err := RenderPrompt("", Role("hacker"), "ts-abc123")
+	_, err := RenderPrompt("", Role("hacker"), "ts-abc123", false)
 	if err == nil {
 		t.Fatal("expected error for unknown role, got nil")
 	}
 	if !strings.Contains(err.Error(), "unknown role") {
 		t.Errorf("error should mention unknown role, got: %v", err)
+	}
+}
+
+// --- Solo vs Normal mode ---
+
+func TestRenderPromptNormalMode(t *testing.T) {
+	got, err := RenderPrompt("", RoleWorker, "ts-abc123", false)
+	if err != nil {
+		t.Fatalf("RenderPrompt returned error: %v", err)
+	}
+
+	// Normal mode should include PR creation and prog review.
+	if !strings.Contains(got, "Create PR") {
+		t.Error("normal mode should mention creating a PR")
+	}
+	if !strings.Contains(got, "prog review ts-abc123") {
+		t.Error("normal mode should use prog review")
+	}
+	if strings.Contains(got, "Merge to main") {
+		t.Error("normal mode should NOT mention merging to main")
+	}
+}
+
+func TestRenderPromptSoloMode(t *testing.T) {
+	got, err := RenderPrompt("", RoleWorker, "ts-abc123", true)
+	if err != nil {
+		t.Fatalf("RenderPrompt returned error: %v", err)
+	}
+
+	// Solo mode should include merge-to-main and prog done.
+	if !strings.Contains(got, "Merge to main") {
+		t.Error("solo mode should mention merging to main")
+	}
+	if !strings.Contains(got, "prog done ts-abc123") {
+		t.Error("solo mode should use prog done")
+	}
+	if !strings.Contains(got, "git merge af/ts-abc123") {
+		t.Error("solo mode should include the merge command with task ID")
+	}
+	// Solo mode should NOT include PR creation or prog review.
+	if strings.Contains(got, "Create PR") {
+		t.Error("solo mode should NOT mention creating a PR")
+	}
+	if strings.Contains(got, "prog review") {
+		t.Error("solo mode should NOT mention prog review")
 	}
 }
 
@@ -58,7 +109,7 @@ func TestRenderPromptFilesystemOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := RenderPrompt(dir, RoleWorker, "ts-abc123")
+	got, err := RenderPrompt(dir, RoleWorker, "ts-abc123", false)
 	if err != nil {
 		t.Fatalf("RenderPrompt returned error: %v", err)
 	}
@@ -76,7 +127,7 @@ func TestRenderPromptFilesystemOverride(t *testing.T) {
 func TestRenderPromptFilesystemMissingFile(t *testing.T) {
 	dir := t.TempDir()
 
-	_, err := RenderPrompt(dir, RoleWorker, "ts-abc123")
+	_, err := RenderPrompt(dir, RoleWorker, "ts-abc123", false)
 	if err == nil {
 		t.Fatal("expected error for missing prompt file, got nil")
 	}
@@ -94,7 +145,7 @@ func TestRenderPromptFilesystemUnresolvedVariable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := RenderPrompt(dir, RoleWorker, "ts-abc123")
+	_, err := RenderPrompt(dir, RoleWorker, "ts-abc123", false)
 	if err == nil {
 		t.Fatal("expected error for unresolved template variable, got nil")
 	}

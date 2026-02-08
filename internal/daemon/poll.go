@@ -3,6 +3,7 @@ package daemon
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -18,6 +19,15 @@ type Task struct {
 	Title    string `json:"title"`
 }
 
+// progListItem is the sparse parse target for `prog list --json`.
+// Only the fields needed for status-based queries are included.
+type progListItem struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Type   string `json:"type"`
+	Status string `json:"status"`
+}
+
 // CommandRunner executes a command and returns its combined output.
 // This is the seam for testing — swap the real exec with a fake.
 type CommandRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
@@ -25,6 +35,35 @@ type CommandRunner func(ctx context.Context, name string, args ...string) ([]byt
 // ExecCommandRunner runs a real command via os/exec.
 func ExecCommandRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
+
+// fetchTasksByStatus queries prog for tasks with a given status. Task IDs are
+// validated before returning to prevent injection into git/shell commands.
+func fetchTasksByStatus(ctx context.Context, project, status string, runner CommandRunner, log *slog.Logger) ([]progListItem, error) {
+	output, err := runner(ctx, "prog", "list", "--status", status, "--type", "task", "--json", "-p", project)
+	if err != nil {
+		return nil, fmt.Errorf("prog list --status %s: %w (output: %s)", status, err, string(output))
+	}
+
+	var items []progListItem
+	if err := json.Unmarshal(output, &items); err != nil {
+		return nil, fmt.Errorf("parsing prog list output: %w", err)
+	}
+
+	valid := items[:0]
+	for _, item := range items {
+		if !validTaskID.MatchString(item.ID) {
+			log.Warn("fetchTasksByStatus: skipping task with invalid ID",
+				"id", item.ID,
+				"status", status,
+				"title", item.Title,
+			)
+			continue
+		}
+		valid = append(valid, item)
+	}
+
+	return valid, nil
 }
 
 // ParseProgReady parses the table output of `prog ready` into tasks.

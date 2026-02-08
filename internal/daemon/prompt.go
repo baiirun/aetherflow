@@ -8,19 +8,60 @@ import (
 	"strings"
 )
 
-// RenderPrompt reads a role prompt template and replaces {{task_id}} with the
-// actual task ID.
+// Landing instructions injected into the worker prompt based on solo mode.
+// These replace {{land_steps}} and {{land_donts}} in worker.md.
+const (
+	landStepsNormal = `3. **Push your branch** -- from inside your worktree: ` + "`git push -u origin HEAD`" + `. If push fails (no remote configured), that's fine — log the situation and continue. The branch still exists locally for review.
+4. **Create PR** -- if push succeeded, create a PR with a clear title and description summarizing the change. If push failed, skip this step.
+5. **Clean up worktree** -- remove your worktree: ` + "`git worktree remove .aetherflow/worktrees/{{task_id}}`" + `
+6. **Mark task for review** -- ` + "`prog review {{task_id}}`" + `. This signals that your work is complete and awaiting merge. Do NOT use ` + "`prog done`" + ` — the daemon will automatically mark the task done when your branch lands on main.`
+
+	landStepsSolo = `3. **Pull latest main** -- before merging, ensure your local main is up to date:
+   ` + "```bash" + `
+   git checkout main
+   git pull origin main
+   ` + "```" + `
+   If pull fails (no remote), that's fine — continue with local state.
+4. **Merge to main** -- from the project root (NOT the worktree):
+   ` + "```bash" + `
+   git merge af/{{task_id}} --no-ff -m "Merge af/{{task_id}}: <brief summary>"
+   ` + "```" + `
+   If the merge has conflicts, try to resolve them. If conflicts are too complex to resolve cleanly, abort and yield:
+   ` + "```bash" + `
+   git merge --abort
+   prog block {{task_id}} "Merge conflicts with main require manual resolution"
+   ` + "```" + `
+   Then stop — do not continue with further steps.
+5. **Push main** -- ` + "`git push origin main`" + `. If push fails (no remote), that's fine — the merge is local.
+6. **Clean up** -- remove the branch and worktree:
+   ` + "```bash" + `
+   git worktree remove .aetherflow/worktrees/{{task_id}}
+   git branch -d af/{{task_id}}
+   ` + "```" + `
+7. **Mark task done** -- ` + "`prog done {{task_id}}`" + `. In solo mode the merge already landed, so the task is complete.`
+
+	landDontsNormal = `- Don't merge your PR -- just create it. The daemon moves tasks to done when branches land on main.
+- Don't use ` + "`prog done`" + ` -- use ` + "`prog review`" + ` instead. The done transition happens automatically after merge.`
+
+	landDontsSolo = `- Don't leave your branch unmerged -- in solo mode you are responsible for merging to main.
+- Don't forget to delete the branch after merging -- clean up after yourself.`
+)
+
+// RenderPrompt reads a role prompt template and replaces template variables
+// with actual values.
 //
 // When promptDir is empty, prompts are read from the embedded filesystem
 // compiled into the binary. When promptDir is set, prompts are read from
 // that filesystem path instead (for development/customization).
 //
-// This is literal string replacement, not Go text/template. The only recognized
-// variable is {{task_id}}.
+// Recognized variables:
+//   - {{task_id}} — the task identifier
+//   - {{land_steps}} — landing instructions (solo vs normal mode)
+//   - {{land_donts}} — "what not to do" rules for landing
 //
 // Returns the rendered prompt string ready to pass as the message argument
 // to "opencode run".
-func RenderPrompt(promptDir string, role Role, taskID string) (string, error) {
+func RenderPrompt(promptDir string, role Role, taskID string, solo bool) (string, error) {
 	// Allowlist roles to prevent path traversal if role ever becomes dynamic.
 	switch role {
 	case RoleWorker, RolePlanner:
@@ -48,7 +89,18 @@ func RenderPrompt(promptDir string, role Role, taskID string) (string, error) {
 		}
 	}
 
-	rendered := strings.ReplaceAll(string(data), "{{task_id}}", taskID)
+	// Select landing instructions based on mode.
+	landSteps := landStepsNormal
+	landDonts := landDontsNormal
+	if solo {
+		landSteps = landStepsSolo
+		landDonts = landDontsSolo
+	}
+
+	rendered := string(data)
+	rendered = strings.ReplaceAll(rendered, "{{land_steps}}", landSteps)
+	rendered = strings.ReplaceAll(rendered, "{{land_donts}}", landDonts)
+	rendered = strings.ReplaceAll(rendered, "{{task_id}}", taskID)
 
 	// Catch template typos (e.g., "{{ task_id }}" with spaces) that would
 	// leave unresolved variables in the prompt.

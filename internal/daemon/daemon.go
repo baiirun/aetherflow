@@ -130,7 +130,11 @@ func (d *Daemon) Run() error {
 
 		// Reconcile reviewing tasks — periodically check if branches have
 		// been merged to main and mark the corresponding tasks as done.
-		go d.reconcileReviewing(ctx)
+		// Skip in solo mode: solo agents merge directly and call prog done
+		// themselves, so there's nothing to reconcile.
+		if !d.config.Solo {
+			go d.reconcileReviewing(ctx)
+		}
 	}
 
 	// Accept connections

@@ -256,7 +256,7 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 	role := InferRole(meta)
 
 	// Prep: render the role prompt with the task ID baked in.
-	prompt, err := RenderPrompt(p.config.PromptDir, role, task.ID)
+	prompt, err := RenderPrompt(p.config.PromptDir, role, task.ID, p.config.Solo)
 	if err != nil {
 		p.log.Error("failed to render prompt",
 			"task_id", task.ID,
@@ -433,7 +433,7 @@ func (p *Pool) respawn(taskID string, role Role) {
 
 	// Re-render the prompt from disk. This intentionally re-reads the template
 	// so prompt changes take effect on respawn without daemon restart.
-	prompt, err := RenderPrompt(p.config.PromptDir, role, taskID)
+	prompt, err := RenderPrompt(p.config.PromptDir, role, taskID, p.config.Solo)
 	if err != nil {
 		p.log.Error("failed to render prompt for respawn",
 			"task_id", taskID,

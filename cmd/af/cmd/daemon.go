@@ -79,6 +79,9 @@ func buildConfig(cmd *cobra.Command) daemon.Config {
 	if cmd.Flags().Changed("max-retries") {
 		cfg.MaxRetries, _ = cmd.Flags().GetInt("max-retries")
 	}
+	if cmd.Flags().Changed("solo") {
+		cfg.Solo, _ = cmd.Flags().GetBool("solo")
+	}
 
 	// Load config file (only fills zero-valued fields).
 	configPath, _ := cmd.Flags().GetString("config")
@@ -107,7 +110,7 @@ func startDetached(cmd *cobra.Command) {
 
 	// Forward all flags except --detach.
 	reArgs := []string{"daemon", "start"}
-	for _, name := range []string{"project", "socket", "poll-interval", "pool-size", "spawn-cmd", "max-retries", "config"} {
+	for _, name := range []string{"project", "socket", "poll-interval", "pool-size", "spawn-cmd", "max-retries", "solo", "config"} {
 		if cmd.Flags().Changed(name) {
 			val, _ := cmd.Flags().GetString(name)
 			// Duration and int flags also work with GetString via pflag.
@@ -155,5 +158,6 @@ func init() {
 	f.Int("pool-size", daemon.DefaultPoolSize, "Maximum concurrent agent slots")
 	f.String("spawn-cmd", daemon.DefaultSpawnCmd, "Command to launch agent sessions")
 	f.Int("max-retries", daemon.DefaultMaxRetries, "Max crash respawns per task")
+	f.Bool("solo", false, "Solo mode: agents merge to main directly instead of creating PRs")
 	f.String("config", "", "Config file path (default: .aetherflow.yaml)")
 }

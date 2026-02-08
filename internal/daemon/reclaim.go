@@ -2,30 +2,15 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
+	"log/slog"
 )
-
-// progListItem is the sparse parse target for `prog list --json`.
-// Only fields needed for reclaim are included.
-type progListItem struct {
-	ID     string `json:"id"`
-	Title  string `json:"title"`
-	Type   string `json:"type"`
-	Status string `json:"status"`
-}
 
 // fetchInProgressTasks queries prog for tasks currently in_progress for this project.
 // Returns only tasks (not epics) since epics don't have agents assigned to them.
-func fetchInProgressTasks(ctx context.Context, project string, runner CommandRunner) ([]Task, error) {
-	output, err := runner(ctx, "prog", "list", "--status", "in_progress", "--type", "task", "--json", "-p", project)
+func fetchInProgressTasks(ctx context.Context, project string, runner CommandRunner, log *slog.Logger) ([]Task, error) {
+	items, err := fetchTasksByStatus(ctx, project, "in_progress", runner, log)
 	if err != nil {
-		return nil, fmt.Errorf("prog list: %w (output: %s)", err, string(output))
-	}
-
-	var items []progListItem
-	if err := json.Unmarshal(output, &items); err != nil {
-		return nil, fmt.Errorf("parsing prog list output: %w", err)
+		return nil, err
 	}
 
 	tasks := make([]Task, 0, len(items))
@@ -58,7 +43,7 @@ func (p *Pool) Reclaim(ctx context.Context) {
 		return
 	}
 
-	tasks, err := fetchInProgressTasks(ctx, p.config.Project, p.runner)
+	tasks, err := fetchInProgressTasks(ctx, p.config.Project, p.runner, p.log)
 	if err != nil {
 		p.log.Error("reclaim: failed to fetch in_progress tasks", "error", err)
 		return
