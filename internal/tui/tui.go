@@ -200,6 +200,7 @@ func (m Model) View() string {
 	b.WriteString(m.viewHeader())
 	b.WriteString("\n")
 	b.WriteString(m.viewAgentPanes())
+	b.WriteString(m.viewQueue())
 	b.WriteString(m.viewFooter())
 
 	return b.String()
@@ -208,10 +209,9 @@ func (m Model) View() string {
 // viewHeader renders the top bar with pool stats, mode, and project.
 func (m Model) viewHeader() string {
 	if m.err != nil {
-		return fmt.Sprintf("\n  %s  %s  %s\n",
+		return fmt.Sprintf("\n  %s  %s\n",
 			titleStyle.Render("aetherflow"),
-			redStyle.Render("disconnected"),
-			dimStyle.Render(m.err.Error()),
+			yellowStyle.Render("connecting to daemon..."),
 		)
 	}
 
@@ -273,6 +273,33 @@ func (m Model) viewAgentPanes() string {
 	if idle > 0 {
 		b.WriteString(fmt.Sprintf("  %s\n", dimStyle.Render(fmt.Sprintf("+ %d idle", idle))))
 	}
+
+	return b.String()
+}
+
+// viewQueue renders the pending task queue below the agent panes.
+func (m Model) viewQueue() string {
+	if m.status == nil || m.err != nil {
+		return ""
+	}
+
+	queue := m.status.Queue
+	if len(queue) == 0 {
+		return "  " + dimStyle.Render("Queue: empty") + "\n\n"
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("  %s\n", dimStyle.Render(fmt.Sprintf("Queue (%d tasks)", len(queue)))))
+
+	for _, t := range queue {
+		pri := dimStyle.Render(fmt.Sprintf("P%d", t.Priority))
+		b.WriteString(fmt.Sprintf("    %s  %s  %s\n",
+			blueStyle.Render(t.ID),
+			pri,
+			t.Title,
+		))
+	}
+	b.WriteString("\n")
 
 	return b.String()
 }
