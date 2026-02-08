@@ -155,11 +155,11 @@ func calcLayout(termW, termH int) panelLayout {
 func (m *PanelModel) initViewports() {
 	l := calcLayout(m.width, m.height)
 
-	m.taskVP = viewport.New(l.leftTextW, l.taskBoxH)
-	m.taskVP.SetContent(renderTaskInfo(m.taskDetail, l.leftTextW))
+	m.taskVP = viewport.New(l.rightTextW, l.taskBoxH)
+	m.taskVP.SetContent(renderTaskInfo(m.taskDetail, l.rightTextW))
 
-	m.logsVP = viewport.New(l.rightTextW, l.logsBoxH)
-	m.logsVP.SetContent(m.renderProgLogs(l.rightTextW))
+	m.logsVP = viewport.New(l.leftTextW, l.logsBoxH)
+	m.logsVP.SetContent(m.renderProgLogs(l.leftTextW))
 
 	m.ready = true
 }
@@ -335,24 +335,25 @@ func (m PanelModel) View() string {
 }
 
 // viewBody renders the two-column pane layout.
+// Left: agent meta + tool calls + prog logs. Right: task info.
 func (m PanelModel) viewBody() string {
 	l := calcLayout(m.width, m.height)
 
-	// Left column: task info (full body height).
-	left := m.boxStyle(paneTaskInfo, l.leftBoxW, l.taskBoxH).
-		Render(m.taskVP.View())
-
-	// Right column: meta + tools + logs stacked vertically.
-	meta := m.boxStyle(-1, l.rightBoxW, l.metaBoxH).
+	// Left column: meta + tools + logs stacked vertically.
+	meta := m.boxStyle(-1, l.leftBoxW, l.metaBoxH).
 		Render(m.renderAgentMeta())
 
-	tools := m.boxStyle(paneToolCalls, l.rightBoxW, l.toolsBoxH).
-		Render(m.renderToolCalls(l.rightTextW, l.toolsBoxH))
+	tools := m.boxStyle(paneToolCalls, l.leftBoxW, l.toolsBoxH).
+		Render(m.renderToolCalls(l.leftTextW, l.toolsBoxH))
 
-	logs := m.boxStyle(paneProgLogs, l.rightBoxW, l.logsBoxH).
+	logs := m.boxStyle(paneProgLogs, l.leftBoxW, l.logsBoxH).
 		Render(m.logsVP.View())
 
-	right := lipgloss.JoinVertical(lipgloss.Left, meta, tools, logs)
+	left := lipgloss.JoinVertical(lipgloss.Left, meta, tools, logs)
+
+	// Right column: task info (full body height).
+	right := m.boxStyle(paneTaskInfo, l.rightBoxW, l.taskBoxH).
+		Render(m.taskVP.View())
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right) + "\n"
 }
