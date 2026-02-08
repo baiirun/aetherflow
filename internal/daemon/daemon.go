@@ -126,7 +126,17 @@ func (d *Daemon) Run() error {
 		// Reclaim orphaned in_progress tasks from a previous daemon session.
 		// These are tasks that were claimed in prog but whose agents died
 		// when the daemon crashed or was stopped.
-		go d.pool.Reclaim(ctx)
+		//
+		// Delay briefly so the poller's initial `prog ready` completes first.
+		// Both hit prog's SQLite database and concurrent access during WAL
+		// mode initialization causes "database is locked" errors.
+		go func() {
+			select {
+			case <-time.After(2 * time.Second):
+				d.pool.Reclaim(ctx)
+			case <-ctx.Done():
+			}
+		}()
 
 		// Reconcile reviewing tasks — periodically check if branches have
 		// been merged to main and mark the corresponding tasks as done.
