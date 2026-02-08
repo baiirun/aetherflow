@@ -61,7 +61,7 @@ func TestTailFileLastN(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := tailFile(path, 3, false)
+	err := tailFile(path, 3, false, false)
 
 	w.Close()
 	os.Stdout = old
@@ -88,7 +88,7 @@ func TestTailFileAllLines(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := tailFile(path, 100, false)
+	err := tailFile(path, 100, false, false)
 
 	w.Close()
 	os.Stdout = old
@@ -106,7 +106,7 @@ func TestTailFileAllLines(t *testing.T) {
 }
 
 func TestTailFileNotFound(t *testing.T) {
-	err := tailFile("/nonexistent/file.jsonl", 10, false)
+	err := tailFile("/nonexistent/file.jsonl", 10, false, false)
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}
