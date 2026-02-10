@@ -218,6 +218,31 @@ func printStatus(s *client.FullStatus) {
 
 	fmt.Println()
 
+	// Recent section — recently exited agents
+	if len(s.Recent) > 0 {
+		fmt.Printf("%s %d recent\n", term.Bold("Recent:"), len(s.Recent))
+		for _, r := range s.Recent {
+			// Show at most 5 recent agents to avoid clutter
+			if len(s.Recent) > 5 {
+				s.Recent = s.Recent[:5]
+			}
+			dur := formatDuration(r.Duration)
+			exitDisplay := term.Green("✓")
+			if r.ExitState == "crashed" {
+				exitDisplay = term.Red("✗")
+			}
+			fmt.Printf("  %s %s %s  %s %s %s\n",
+				term.PadRight(r.ID, colID, term.Dim),
+				term.PadRight(r.TaskID, colTask, term.Blue),
+				term.PadLeft(dur, colUptime, term.Dim),
+				term.PadRight(r.Role, colRole, term.Dim),
+				exitDisplay,
+				term.Dimf("exit=%d", r.ExitCode),
+			)
+		}
+		fmt.Println()
+	}
+
 	if len(s.Queue) > 0 {
 		fmt.Printf("%s %s\n", term.Bold("Queue:"), term.Yellowf("%d pending", len(s.Queue)))
 		for _, t := range s.Queue {
@@ -248,6 +273,27 @@ func formatUptime(spawnTime time.Time) string {
 	}
 	d := time.Since(spawnTime)
 
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		h := int(d.Hours())
+		m := int(d.Minutes()) % 60
+		if m == 0 {
+			return fmt.Sprintf("%dh", h)
+		}
+		return fmt.Sprintf("%dh%dm", h, m)
+	default:
+		days := int(d.Hours()) / 24
+		h := int(d.Hours()) % 24
+		return fmt.Sprintf("%dd%dh", days, h)
+	}
+}
+
+// formatDuration returns a human-readable duration string.
+func formatDuration(d time.Duration) string {
 	switch {
 	case d < time.Minute:
 		return fmt.Sprintf("%ds", int(d.Seconds()))

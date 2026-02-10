@@ -53,6 +53,27 @@ type Agent struct {
 	ExitCode  int              `json:"exit_code,omitempty"`
 }
 
+// ExitState classifies how an agent exited.
+type ExitState string
+
+const (
+	ExitClean   ExitState = "clean"   // Exit code 0, normal completion
+	ExitCrashed ExitState = "crashed" // Non-zero exit code or Wait() error
+)
+
+// RecentAgent is a snapshot of an agent that has exited.
+// Stored in the pool's history ring buffer for observability.
+type RecentAgent struct {
+	ID        protocol.AgentID `json:"id"`
+	TaskID    string           `json:"task_id"`
+	Role      Role             `json:"role"`
+	SpawnTime time.Time        `json:"spawn_time"`
+	ExitTime  time.Time        `json:"exit_time"`
+	ExitState ExitState        `json:"exit_state"`
+	ExitCode  int              `json:"exit_code"`
+	Duration  time.Duration    `json:"duration"` // rounded to seconds
+}
+
 // Process is the handle to a spawned agent process.
 // This is the interface the pool uses to wait on agents.
 type Process interface {
@@ -146,6 +167,11 @@ type Pool struct {
 	// pidAlive checks whether a process with the given PID is still running.
 	// Defaults to the real syscall check; overridden in tests.
 	pidAlive func(int) bool
+
+	// Recent agent history ring buffer.
+	recentBuf  []RecentAgent // fixed-size ring buffer
+	recentHead int           // next write position (0 to cap-1)
+	recentSize int           // current number of entries (0 to cap)
 }
 
 // defaultPIDAlive checks process liveness via kill(pid, 0).
@@ -163,6 +189,8 @@ func defaultPIDAlive(pid int) bool {
 
 const sweepInterval = 30 * time.Second
 
+const recentHistorySize = 20 // number of recently exited agents to track
+
 // NewPool creates a pool with the given configuration.
 func NewPool(cfg Config, runner CommandRunner, starter ProcessStarter, log *slog.Logger) *Pool {
 	if runner == nil {
@@ -173,16 +201,19 @@ func NewPool(cfg Config, runner CommandRunner, starter ProcessStarter, log *slog
 	}
 
 	return &Pool{
-		mode:     PoolActive,
-		agents:   make(map[string]*Agent),
-		retries:  make(map[string]int),
-		names:    protocol.NewNameGenerator(),
-		config:   cfg,
-		logDir:   cfg.LogDir,
-		runner:   runner,
-		starter:  starter,
-		log:      log,
-		pidAlive: defaultPIDAlive,
+		mode:       PoolActive,
+		agents:     make(map[string]*Agent),
+		retries:    make(map[string]int),
+		names:      protocol.NewNameGenerator(),
+		config:     cfg,
+		logDir:     cfg.LogDir,
+		runner:     runner,
+		starter:    starter,
+		log:        log,
+		pidAlive:   defaultPIDAlive,
+		recentBuf:  make([]RecentAgent, recentHistorySize),
+		recentHead: 0,
+		recentSize: 0,
 	}
 }
 
@@ -375,13 +406,36 @@ func (p *Pool) reap(agent *Agent, proc Process, cleanup io.Closer) {
 	}
 
 	duration := time.Since(agent.SpawnTime).Round(time.Second)
+	exitTime := time.Now()
 
-	// Single lock to update all state atomically: remove agent, update retries.
+	// Determine exit state.
+	exitState := ExitClean
+	if err != nil {
+		exitState = ExitCrashed
+	}
+
+	// Single lock to update all state atomically: remove agent, update retries, push to history.
 	p.mu.Lock()
 	agent.State = AgentExited
 	agent.ExitCode = exitCode
 	delete(p.agents, agent.TaskID)
 	p.names.Release(agent.ID)
+
+	// Push to recent history ring buffer.
+	p.recentBuf[p.recentHead] = RecentAgent{
+		ID:        agent.ID,
+		TaskID:    agent.TaskID,
+		Role:      agent.Role,
+		SpawnTime: agent.SpawnTime,
+		ExitTime:  exitTime,
+		ExitState: exitState,
+		ExitCode:  exitCode,
+		Duration:  duration,
+	}
+	p.recentHead = (p.recentHead + 1) % len(p.recentBuf)
+	if p.recentSize < len(p.recentBuf) {
+		p.recentSize++
+	}
 
 	if err == nil {
 		// Clean exit — clear retry count.
@@ -563,6 +617,26 @@ func (p *Pool) Status() []Agent {
 		agents = append(agents, *a)
 	}
 	return agents
+}
+
+// Recent returns recently exited agents in reverse chronological order (most recent first).
+// The returned slice contains at most recentHistorySize entries.
+func (p *Pool) Recent() []RecentAgent {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if p.recentSize == 0 {
+		return nil
+	}
+
+	// Build the slice in reverse chronological order.
+	// The ring buffer head points to the next write position, so head-1 is the most recent.
+	result := make([]RecentAgent, 0, p.recentSize)
+	for i := 0; i < p.recentSize; i++ {
+		idx := (p.recentHead - 1 - i + len(p.recentBuf)) % len(p.recentBuf)
+		result = append(result, p.recentBuf[idx])
+	}
+	return result
 }
 
 // Mode returns the current pool mode.

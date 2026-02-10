@@ -1090,3 +1090,224 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 	t.Fatal("timed out waiting for condition")
 }
+
+func TestPoolRecentHistory(t *testing.T) {
+	// Test that the ring buffer tracks recently exited agents correctly.
+	procs := make([]*fakeProcess, 3)
+	releases := make([]func(), 3)
+	released := make([]bool, 3)
+	for i := range procs {
+		i := i // capture loop variable
+		procs[i], releases[i] = newFakeProcess(1000 + i)
+		defer func() {
+			if !released[i] {
+				releases[i]()
+			}
+		}()
+	}
+
+	idx := 0
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
+		p := procs[idx]
+		idx++
+		return p, nil
+	}
+
+	pool := testPool(t, progRunner(testTaskMeta), starter)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	taskCh := make(chan []Task, 3)
+	taskCh <- []Task{
+		{ID: "ts-001", Priority: 1, Title: "Task 1"},
+		{ID: "ts-002", Priority: 1, Title: "Task 2"},
+		{ID: "ts-003", Priority: 1, Title: "Task 3"},
+	}
+
+	go pool.Run(ctx, taskCh)
+
+	// Wait for all agents to spawn.
+	waitFor(t, func() bool {
+		return len(pool.Status()) == 2 // pool size is 2
+	})
+
+	// Release first agent (clean exit).
+	releases[0]()
+	released[0] = true
+	waitFor(t, func() bool {
+		return len(pool.Recent()) == 1
+	})
+
+	recent := pool.Recent()
+	if len(recent) != 1 {
+		t.Fatalf("Recent() = %d agents, want 1", len(recent))
+	}
+	if recent[0].TaskID != "ts-001" {
+		t.Errorf("Recent[0].TaskID = %q, want %q", recent[0].TaskID, "ts-001")
+	}
+	if recent[0].ExitState != ExitClean {
+		t.Errorf("Recent[0].ExitState = %q, want %q", recent[0].ExitState, ExitClean)
+	}
+	if recent[0].ExitCode != 0 {
+		t.Errorf("Recent[0].ExitCode = %d, want 0", recent[0].ExitCode)
+	}
+
+	// Release second agent (clean exit).
+	releases[1]()
+	released[1] = true
+	waitFor(t, func() bool {
+		return len(pool.Recent()) == 2
+	})
+
+	recent = pool.Recent()
+	if len(recent) != 2 {
+		t.Fatalf("Recent() = %d agents, want 2", len(recent))
+	}
+	// Recent should be in reverse chronological order (most recent first).
+	if recent[0].TaskID != "ts-002" {
+		t.Errorf("Recent[0].TaskID = %q, want %q (most recent)", recent[0].TaskID, "ts-002")
+	}
+	if recent[1].TaskID != "ts-001" {
+		t.Errorf("Recent[1].TaskID = %q, want %q", recent[1].TaskID, "ts-001")
+	}
+}
+
+func TestPoolRecentHistoryCrash(t *testing.T) {
+	// Test that crashed agents are tracked with ExitCrashed state.
+	// MaxRetries is 3, so the agent will crash 4 times total (initial + 3 respawns).
+	maxRetries := 3
+	totalAttempts := maxRetries + 1
+	procs := make([]*fakeProcess, totalAttempts)
+	releases := make([]func(), totalAttempts)
+	for i := range procs {
+		procs[i], releases[i] = newFakeProcessWithError(1000+i, fmt.Errorf("agent crashed"))
+	}
+
+	idx := 0
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
+		p := procs[idx]
+		idx++
+		return p, nil
+	}
+
+	pool := testPool(t, progRunner(testTaskMeta), starter)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	taskCh := make(chan []Task, 1)
+	taskCh <- []Task{{ID: "ts-crash", Priority: 1, Title: "Crash task"}}
+
+	go pool.Run(ctx, taskCh)
+
+	// Wait for agent to spawn.
+	waitFor(t, func() bool {
+		return len(pool.Status()) == 1
+	})
+
+	// Release all attempts (crashes).
+	for i := 0; i < totalAttempts; i++ {
+		releases[i]()
+		time.Sleep(10 * time.Millisecond) // allow respawn
+	}
+
+	// Wait for all crashes to be recorded in recent history.
+	waitFor(t, func() bool {
+		return len(pool.Recent()) == totalAttempts
+	})
+
+	recent := pool.Recent()
+	if len(recent) != totalAttempts {
+		t.Fatalf("Recent() = %d agents, want %d", len(recent), totalAttempts)
+	}
+	// All should be crashed with the same task ID.
+	for i, r := range recent {
+		if r.TaskID != "ts-crash" {
+			t.Errorf("Recent[%d].TaskID = %q, want %q", i, r.TaskID, "ts-crash")
+		}
+		if r.ExitState != ExitCrashed {
+			t.Errorf("Recent[%d].ExitState = %q, want %q", i, r.ExitState, ExitCrashed)
+		}
+		if r.ExitCode == 0 {
+			t.Errorf("Recent[%d].ExitCode = %d, want non-zero", i, r.ExitCode)
+		}
+	}
+}
+
+func TestPoolRecentHistoryRingBuffer(t *testing.T) {
+	// Test that the ring buffer correctly wraps around when full.
+	// Set up a pool and spawn recentHistorySize + 5 agents to verify wrapping.
+	procs := make([]*fakeProcess, recentHistorySize+5)
+	releases := make([]func(), len(procs))
+	released := make([]bool, len(procs))
+	for i := range procs {
+		i := i // capture loop variable
+		procs[i], releases[i] = newFakeProcess(1000 + i)
+	}
+	defer func() {
+		for i, rel := range releases {
+			if !released[i] {
+				rel()
+			}
+		}
+	}()
+
+	idx := 0
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
+		p := procs[idx]
+		idx++
+		return p, nil
+	}
+
+	pool := testPool(t, progRunner(testTaskMeta), starter)
+	pool.config.PoolSize = 100 // large pool so all spawn immediately
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	taskCh := make(chan []Task, 1)
+	tasks := make([]Task, len(procs))
+	for i := range tasks {
+		tasks[i] = Task{ID: fmt.Sprintf("ts-%03d", i), Priority: 1, Title: fmt.Sprintf("Task %d", i)}
+	}
+	taskCh <- tasks
+
+	go pool.Run(ctx, taskCh)
+
+	// Wait for all agents to spawn.
+	waitFor(t, func() bool {
+		return len(pool.Status()) == len(procs)
+	})
+
+	// Release all agents in order.
+	for i := range releases {
+		releases[i]()
+		released[i] = true
+		time.Sleep(5 * time.Millisecond) // small delay to ensure ordering
+	}
+
+	// Wait for all to exit.
+	waitFor(t, func() bool {
+		return len(pool.Status()) == 0
+	})
+
+	recent := pool.Recent()
+	// Ring buffer should contain at most recentHistorySize entries.
+	if len(recent) != recentHistorySize {
+		t.Fatalf("Recent() = %d agents, want %d", len(recent), recentHistorySize)
+	}
+
+	// The most recent should be the last tasks (wrapping happened).
+	// Recent is in reverse chronological order, so Recent[0] is the most recent.
+	expectedFirst := fmt.Sprintf("ts-%03d", len(procs)-1)
+	if recent[0].TaskID != expectedFirst {
+		t.Errorf("Recent[0].TaskID = %q, want %q (most recent)", recent[0].TaskID, expectedFirst)
+	}
+
+	// The oldest in the buffer should be recentHistorySize-1 positions back.
+	expectedLast := fmt.Sprintf("ts-%03d", len(procs)-recentHistorySize)
+	if recent[recentHistorySize-1].TaskID != expectedLast {
+		t.Errorf("Recent[%d].TaskID = %q, want %q (oldest in buffer)", recentHistorySize-1, recent[recentHistorySize-1].TaskID, expectedLast)
+	}
+}

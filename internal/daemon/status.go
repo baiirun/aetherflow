@@ -16,6 +16,7 @@ type FullStatus struct {
 	PoolMode PoolMode      `json:"pool_mode"`
 	Project  string        `json:"project"`
 	Agents   []AgentStatus `json:"agents"`
+	Recent   []RecentAgent `json:"recent,omitempty"`
 	Queue    []Task        `json:"queue"`
 	Errors   []string      `json:"errors,omitempty"`
 }
@@ -116,6 +117,7 @@ func BuildFullStatus(ctx context.Context, pool *Pool, cfg Config, runner Command
 	})
 
 	status.Agents = enriched
+	status.Recent = pool.Recent() // already sorted newest-first
 	status.Errors = errors
 
 	if queueErr != nil {

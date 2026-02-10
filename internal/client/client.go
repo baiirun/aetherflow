@@ -72,8 +72,21 @@ type FullStatus struct {
 	PoolMode string        `json:"pool_mode"`
 	Project  string        `json:"project"`
 	Agents   []AgentStatus `json:"agents"`
+	Recent   []RecentAgent `json:"recent,omitempty"`
 	Queue    []Task        `json:"queue"`
 	Errors   []string      `json:"errors,omitempty"`
+}
+
+// RecentAgent is a snapshot of an agent that has exited.
+type RecentAgent struct {
+	ID        string        `json:"id"`
+	TaskID    string        `json:"task_id"`
+	Role      string        `json:"role"`
+	SpawnTime time.Time     `json:"spawn_time"`
+	ExitTime  time.Time     `json:"exit_time"`
+	ExitState string        `json:"exit_state"` // "clean" or "crashed"
+	ExitCode  int           `json:"exit_code"`
+	Duration  time.Duration `json:"duration"`
 }
 
 // AgentStatus is a single agent's enriched status.
