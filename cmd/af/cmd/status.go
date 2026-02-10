@@ -26,7 +26,7 @@ With an agent name, shows detailed agent info:
   Task details, uptime, last prog log, and recent tool call history
   parsed from the agent's JSONL log.
 
-Use -w/--watch for continuous monitoring (refreshes every 2s by default).
+Use -w/--watch or -f/--follow for continuous monitoring (refreshes every 2s by default).
 
 Requires a running daemon.`,
 	Args: cobra.MaximumNArgs(1),
@@ -34,18 +34,22 @@ Requires a running daemon.`,
 		socketPath := resolveSocketPath(cmd)
 		asJSON, _ := cmd.Flags().GetBool("json")
 		watch, _ := cmd.Flags().GetBool("watch")
+		follow, _ := cmd.Flags().GetBool("follow")
 		interval, _ := cmd.Flags().GetDuration("interval")
+
+		// Both --watch and --follow enable streaming; treat them as aliases.
+		streaming := watch || follow
 
 		c := client.New(socketPath)
 
-		if !watch {
+		if !streaming {
 			runStatusOnce(c, args, asJSON, cmd)
 			return
 		}
 
-		// Watch mode: re-render on interval until interrupted.
+		// Streaming mode: re-render on interval until interrupted.
 		if asJSON {
-			fmt.Fprintf(os.Stderr, "error: --watch and --json cannot be combined\n")
+			fmt.Fprintf(os.Stderr, "error: streaming mode (--watch/--follow) and --json cannot be combined\n")
 			os.Exit(1)
 		}
 
@@ -395,5 +399,6 @@ func init() {
 	statusCmd.Flags().Bool("json", false, "Output raw JSON")
 	statusCmd.Flags().Int("limit", 20, "Max tool calls to show in agent detail view")
 	statusCmd.Flags().BoolP("watch", "w", false, "Continuously refresh the display")
-	statusCmd.Flags().Duration("interval", 2*time.Second, "Refresh interval for watch mode")
+	statusCmd.Flags().BoolP("follow", "f", false, "Continuously refresh the display (alias for --watch)")
+	statusCmd.Flags().Duration("interval", 2*time.Second, "Refresh interval for streaming mode")
 }
