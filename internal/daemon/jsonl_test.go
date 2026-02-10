@@ -241,16 +241,22 @@ func TestParseSessionIDHappyPath(t *testing.T) {
 
 	writeLines(t, path, lines)
 
-	got := ParseSessionID(path)
-	want := "ses_3ba7385ddffeRK9Kk26WLuA3XA"
+	got, err := ParseSessionID(context.Background(), path)
+	if err != nil {
+		t.Fatalf("ParseSessionID: %v", err)
+	}
 
+	want := "ses_3ba7385ddffeRK9Kk26WLuA3XA"
 	if got != want {
 		t.Errorf("ParseSessionID = %q, want %q", got, want)
 	}
 }
 
 func TestParseSessionIDMissingFile(t *testing.T) {
-	got := ParseSessionID("/nonexistent/file.jsonl")
+	got, err := ParseSessionID(context.Background(), "/nonexistent/file.jsonl")
+	if err != nil {
+		t.Errorf("ParseSessionID on missing file returned error: %v", err)
+	}
 	if got != "" {
 		t.Errorf("ParseSessionID on missing file = %q, want empty string", got)
 	}
@@ -264,7 +270,10 @@ func TestParseSessionIDEmptyFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := ParseSessionID(path)
+	got, err := ParseSessionID(context.Background(), path)
+	if err != nil {
+		t.Errorf("ParseSessionID on empty file returned error: %v", err)
+	}
 	if got != "" {
 		t.Errorf("ParseSessionID on empty file = %q, want empty string", got)
 	}
@@ -277,7 +286,10 @@ func TestParseSessionIDMalformedJSON(t *testing.T) {
 	lines := []string{`not valid json at all`}
 	writeLines(t, path, lines)
 
-	got := ParseSessionID(path)
+	got, err := ParseSessionID(context.Background(), path)
+	if err == nil {
+		t.Error("ParseSessionID on malformed JSON should return error")
+	}
 	if got != "" {
 		t.Errorf("ParseSessionID on malformed JSON = %q, want empty string", got)
 	}
@@ -291,9 +303,30 @@ func TestParseSessionIDNoSessionField(t *testing.T) {
 	lines := []string{`{"type":"step_start","timestamp":1770499337321}`}
 	writeLines(t, path, lines)
 
-	got := ParseSessionID(path)
+	got, err := ParseSessionID(context.Background(), path)
+	if err != nil {
+		t.Errorf("ParseSessionID on valid JSON without sessionID field returned error: %v", err)
+	}
 	if got != "" {
 		t.Errorf("ParseSessionID on line without sessionID = %q, want empty string", got)
+	}
+}
+
+func TestParseSessionIDCancelledContext(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ts-abc.jsonl")
+
+	lines := []string{
+		`{"type":"step_start","timestamp":1770499337321,"sessionID":"ses_abc","part":{"type":"step-start"}}`,
+	}
+	writeLines(t, path, lines)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	_, err := ParseSessionID(ctx, path)
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
 	}
 }
 

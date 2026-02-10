@@ -149,24 +149,36 @@ func unquoteField(m map[string]json.RawMessage, key string) string {
 }
 
 // ParseSessionID reads the first JSONL line from a log file and extracts the
-// sessionID. Returns empty string if the file doesn't exist, is empty, or the
-// first line doesn't contain a sessionID.
-func ParseSessionID(logFile string) string {
+// sessionID. Returns empty string and nil error if the file doesn't exist or
+// the sessionID field is absent (these are not errors - the field may not be
+// available yet). Returns an error if the file exists but is malformed.
+func ParseSessionID(ctx context.Context, logFile string) (string, error) {
 	f, err := os.Open(logFile)
 	if err != nil {
-		return ""
+		if os.IsNotExist(err) {
+			return "", nil // Not an error - file doesn't exist yet
+		}
+		return "", fmt.Errorf("opening log file: %w", err)
 	}
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
 	if !scanner.Scan() {
-		return ""
+		if err := scanner.Err(); err != nil {
+			return "", fmt.Errorf("reading first line: %w", err)
+		}
+		return "", nil // Empty file is not an error
+	}
+
+	// Check context before parsing
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 
 	var line jsonlLine
 	if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
-		return ""
+		return "", fmt.Errorf("parsing first line: %w", err)
 	}
 
-	return line.SessionID
+	return line.SessionID, nil
 }

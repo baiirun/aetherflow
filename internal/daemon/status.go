@@ -222,7 +222,15 @@ func BuildAgentDetail(ctx context.Context, pool *Pool, cfg Config, runner Comman
 			mu.Unlock()
 		}
 		detail.ToolCalls = calls
-		detail.SessionID = ParseSessionID(path)
+
+		sessionID, err := ParseSessionID(parseCtx, path)
+		if err != nil {
+			mu.Lock()
+			errors = append(errors, fmt.Sprintf("parsing session ID from %s: %v", path, err))
+			mu.Unlock()
+		} else {
+			detail.SessionID = sessionID
+		}
 	}()
 
 	wg.Wait()
