@@ -222,11 +222,23 @@ func (h *claudeHarness) Detect() bool {
 }
 
 // codexHarness implements the Harness interface for Codex
-type codexHarness struct{}
+type codexHarness struct {
+	homeDir string
+}
 
-// Codex returns a Harness for the Codex agent runtime
+// Codex returns a Harness for the Codex agent runtime.
+// It panics if the user's home directory cannot be determined.
 func Codex() Harness {
-	return &codexHarness{}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		panic(fmt.Sprintf("failed to get user home directory: %v", err))
+	}
+	if home == "" {
+		panic("user home directory is empty")
+	}
+	return &codexHarness{
+		homeDir: home,
+	}
 }
 
 func (h *codexHarness) Name() string {
@@ -234,19 +246,30 @@ func (h *codexHarness) Name() string {
 }
 
 func (h *codexHarness) SkillPath(name string) (string, error) {
-	return "", fmt.Errorf("skill installation: %w", ErrNotSupported)
+	if err := validateComponentName(name); err != nil {
+		return "", fmt.Errorf("invalid skill name: %w", err)
+	}
+	// Codex discovers skills from $HOME/.agents/skills/
+	// Reference: https://developers.openai.com/codex/skills
+	return filepath.Join(h.homeDir, ".agents", "skills", name, "SKILL.md"), nil
 }
 
 func (h *codexHarness) AgentPath(name string) (string, error) {
-	return "", fmt.Errorf("agent installation: %w", ErrNotSupported)
+	// Codex does not support agents as separate installation units.
+	// Codex uses AGENTS.md files for custom instructions, not subagent definitions.
+	// Reference: https://developers.openai.com/codex/guides/agents-md
+	return "", fmt.Errorf("agent installation: %w (Codex uses AGENTS.md for instructions, not separate agent files)", ErrNotSupported)
 }
 
 func (h *codexHarness) PluginPath(name string) (string, error) {
-	return "", fmt.Errorf("plugin installation: %w", ErrNotSupported)
+	// Codex does not have a plugin system.
+	// It uses .rules files for command control and MCP for tool integration.
+	// Reference: https://developers.openai.com/codex/rules
+	return "", fmt.Errorf("plugin installation: %w (Codex has no plugin system)", ErrNotSupported)
 }
 
 func (h *codexHarness) SupportsSkills() bool {
-	return false
+	return true
 }
 
 func (h *codexHarness) SupportsAgents() bool {
@@ -258,15 +281,11 @@ func (h *codexHarness) SupportsPlugins() bool {
 }
 
 func (h *codexHarness) RegisterPlugin(name, path string) error {
-	return fmt.Errorf("plugin registration: %w", ErrNotSupported)
+	return fmt.Errorf("plugin registration: %w (Codex has no plugin system)", ErrNotSupported)
 }
 
 func (h *codexHarness) Detect() bool {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false
-	}
-	codexDir := filepath.Join(home, ".codex")
+	codexDir := filepath.Join(h.homeDir, ".codex")
 	return detectHarness("codex", codexDir)
 }
 

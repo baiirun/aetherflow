@@ -130,30 +130,57 @@ func TestClaudeHarness_Supports(t *testing.T) {
 	}
 }
 
+func TestCodexHarness_SkillPath(t *testing.T) {
+	h := Codex()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path, err := h.SkillPath("review-auto")
+	if err != nil {
+		t.Fatalf("SkillPath() unexpected error: %v", err)
+	}
+
+	want := filepath.Join(home, ".agents", "skills", "review-auto", "SKILL.md")
+	if path != want {
+		t.Errorf("SkillPath() = %q, want %q", path, want)
+	}
+}
+
 func TestCodexHarness_NotSupported(t *testing.T) {
 	h := Codex()
 
+	// Skills ARE supported by Codex
 	_, err := h.SkillPath("review-auto")
-	if err == nil {
-		t.Error("Codex should return error for skills")
+	if err != nil {
+		t.Errorf("Codex should support skills, got error: %v", err)
 	}
 
+	// Agents are NOT supported
 	_, err = h.AgentPath("code-reviewer")
 	if err == nil {
 		t.Error("Codex should return error for agents")
 	}
+	if !errors.Is(err, ErrNotSupported) {
+		t.Errorf("AgentPath() error should wrap ErrNotSupported, got %v", err)
+	}
 
+	// Plugins are NOT supported
 	_, err = h.PluginPath("activity-logger")
 	if err == nil {
 		t.Error("Codex should return error for plugins")
+	}
+	if !errors.Is(err, ErrNotSupported) {
+		t.Errorf("PluginPath() error should wrap ErrNotSupported, got %v", err)
 	}
 }
 
 func TestCodexHarness_Supports(t *testing.T) {
 	h := Codex()
 
-	if h.SupportsSkills() {
-		t.Error("Codex should not support skills")
+	if !h.SupportsSkills() {
+		t.Error("Codex should support skills")
 	}
 	if h.SupportsAgents() {
 		t.Error("Codex should not support agents")
@@ -273,21 +300,25 @@ func TestOpenCodeHarness_PluginPath_InvalidName(t *testing.T) {
 func TestCodexHarness_ErrorWrapping(t *testing.T) {
 	h := Codex()
 
+	// SkillPath should succeed, not return ErrNotSupported
 	_, err := h.SkillPath("test")
-	if !errors.Is(err, ErrNotSupported) {
-		t.Errorf("SkillPath() error should wrap ErrNotSupported, got %v", err)
+	if err != nil {
+		t.Errorf("SkillPath() should succeed for valid name, got %v", err)
 	}
 
+	// AgentPath should return ErrNotSupported
 	_, err = h.AgentPath("test")
 	if !errors.Is(err, ErrNotSupported) {
 		t.Errorf("AgentPath() error should wrap ErrNotSupported, got %v", err)
 	}
 
+	// PluginPath should return ErrNotSupported
 	_, err = h.PluginPath("test")
 	if !errors.Is(err, ErrNotSupported) {
 		t.Errorf("PluginPath() error should wrap ErrNotSupported, got %v", err)
 	}
 
+	// RegisterPlugin should return ErrNotSupported
 	err = h.RegisterPlugin("test", "/path")
 	if !errors.Is(err, ErrNotSupported) {
 		t.Errorf("RegisterPlugin() error should wrap ErrNotSupported, got %v", err)
