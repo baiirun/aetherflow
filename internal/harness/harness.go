@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // Harness defines the interface for agent harness installations.
@@ -46,14 +47,66 @@ var (
 	ErrNotInstalled = errors.New("harness not detected on this system")
 )
 
+// validateComponentName validates a skill/agent/plugin name for security.
+// It prevents path traversal, enforces length limits, and restricts characters.
+func validateComponentName(name string) error {
+	if name == "" {
+		return errors.New("name cannot be empty")
+	}
+
+	if len(name) > 255 {
+		return errors.New("name too long (max 255 characters)")
+	}
+
+	// Prevent path traversal - name must not contain path separators
+	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		return fmt.Errorf("name cannot contain path separators: %q", name)
+	}
+
+	// Reject special directory names
+	if name == "." || name == ".." {
+		return fmt.Errorf("invalid name: %q", name)
+	}
+
+	// Use filepath.Base as additional safety check
+	if filepath.Base(name) != name {
+		return fmt.Errorf("name contains invalid path components: %q", name)
+	}
+
+	return nil
+}
+
+// detectHarness checks if a harness is installed by looking for the binary on PATH
+// or checking if the config directory exists.
+func detectHarness(binaryName, configDir string) bool {
+	// Check if binary is on PATH
+	if _, err := exec.LookPath(binaryName); err == nil {
+		return true
+	}
+
+	// Check if config directory exists
+	if info, err := os.Stat(configDir); err == nil && info.IsDir() {
+		return true
+	}
+
+	return false
+}
+
 // openCodeHarness implements the Harness interface for OpenCode
 type openCodeHarness struct {
 	configDir string
 }
 
-// OpenCode returns a Harness for the OpenCode agent runtime
+// OpenCode returns a Harness for the OpenCode agent runtime.
+// It panics if the user's home directory cannot be determined.
 func OpenCode() Harness {
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		panic(fmt.Sprintf("failed to get user home directory: %v", err))
+	}
+	if home == "" {
+		panic("user home directory is empty")
+	}
 	return &openCodeHarness{
 		configDir: filepath.Join(home, ".config", "opencode"),
 	}
@@ -64,14 +117,23 @@ func (h *openCodeHarness) Name() string {
 }
 
 func (h *openCodeHarness) SkillPath(name string) (string, error) {
+	if err := validateComponentName(name); err != nil {
+		return "", fmt.Errorf("invalid skill name: %w", err)
+	}
 	return filepath.Join(h.configDir, "skills", name, "SKILL.md"), nil
 }
 
 func (h *openCodeHarness) AgentPath(name string) (string, error) {
+	if err := validateComponentName(name); err != nil {
+		return "", fmt.Errorf("invalid agent name: %w", err)
+	}
 	return filepath.Join(h.configDir, "agents", name+".md"), nil
 }
 
 func (h *openCodeHarness) PluginPath(name string) (string, error) {
+	if err := validateComponentName(name); err != nil {
+		return "", fmt.Errorf("invalid plugin name: %w", err)
+	}
 	return filepath.Join(h.configDir, "plugins", name+".ts"), nil
 }
 
@@ -89,23 +151,12 @@ func (h *openCodeHarness) SupportsPlugins() bool {
 
 func (h *openCodeHarness) RegisterPlugin(name, path string) error {
 	// OpenCode plugins may need registration in opencode.json
-	// For now, this is a no-op - actual registration logic will be implemented
-	// when the install command is built
-	return nil
+	// Return not supported until actual registration logic is implemented
+	return fmt.Errorf("plugin registration: %w", ErrNotSupported)
 }
 
 func (h *openCodeHarness) Detect() bool {
-	// Check if opencode binary is on PATH
-	if _, err := exec.LookPath("opencode"); err == nil {
-		return true
-	}
-
-	// Check if config directory exists
-	if info, err := os.Stat(h.configDir); err == nil && info.IsDir() {
-		return true
-	}
-
-	return false
+	return detectHarness("opencode", h.configDir)
 }
 
 // claudeHarness implements the Harness interface for Claude Code
@@ -113,9 +164,16 @@ type claudeHarness struct {
 	configDir string
 }
 
-// Claude returns a Harness for the Claude Code agent runtime
+// Claude returns a Harness for the Claude Code agent runtime.
+// It panics if the user's home directory cannot be determined.
 func Claude() Harness {
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		panic(fmt.Sprintf("failed to get user home directory: %v", err))
+	}
+	if home == "" {
+		panic("user home directory is empty")
+	}
 	return &claudeHarness{
 		configDir: filepath.Join(home, ".claude"),
 	}
@@ -126,10 +184,16 @@ func (h *claudeHarness) Name() string {
 }
 
 func (h *claudeHarness) SkillPath(name string) (string, error) {
+	if err := validateComponentName(name); err != nil {
+		return "", fmt.Errorf("invalid skill name: %w", err)
+	}
 	return filepath.Join(h.configDir, "skills", name, "SKILL.md"), nil
 }
 
 func (h *claudeHarness) AgentPath(name string) (string, error) {
+	if err := validateComponentName(name); err != nil {
+		return "", fmt.Errorf("invalid agent name: %w", err)
+	}
 	return filepath.Join(h.configDir, "agents", name+".md"), nil
 }
 
@@ -154,17 +218,7 @@ func (h *claudeHarness) RegisterPlugin(name, path string) error {
 }
 
 func (h *claudeHarness) Detect() bool {
-	// Check if claude binary is on PATH
-	if _, err := exec.LookPath("claude"); err == nil {
-		return true
-	}
-
-	// Check if config directory exists
-	if info, err := os.Stat(h.configDir); err == nil && info.IsDir() {
-		return true
-	}
-
-	return false
+	return detectHarness("claude", h.configDir)
 }
 
 // codexHarness implements the Harness interface for Codex
@@ -180,15 +234,15 @@ func (h *codexHarness) Name() string {
 }
 
 func (h *codexHarness) SkillPath(name string) (string, error) {
-	return "", fmt.Errorf("codex harness is not yet supported - skill installation locations need investigation")
+	return "", fmt.Errorf("skill installation: %w", ErrNotSupported)
 }
 
 func (h *codexHarness) AgentPath(name string) (string, error) {
-	return "", fmt.Errorf("codex harness is not yet supported - agent installation locations need investigation")
+	return "", fmt.Errorf("agent installation: %w", ErrNotSupported)
 }
 
 func (h *codexHarness) PluginPath(name string) (string, error) {
-	return "", fmt.Errorf("codex harness is not yet supported - plugin installation locations need investigation")
+	return "", fmt.Errorf("plugin installation: %w", ErrNotSupported)
 }
 
 func (h *codexHarness) SupportsSkills() bool {
@@ -204,22 +258,16 @@ func (h *codexHarness) SupportsPlugins() bool {
 }
 
 func (h *codexHarness) RegisterPlugin(name, path string) error {
-	return fmt.Errorf("codex harness is not yet supported")
+	return fmt.Errorf("plugin registration: %w", ErrNotSupported)
 }
 
 func (h *codexHarness) Detect() bool {
-	// Check if codex binary is on PATH
-	if _, err := exec.LookPath("codex"); err == nil {
-		return true
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
 	}
-
-	home, _ := os.UserHomeDir()
 	codexDir := filepath.Join(home, ".codex")
-	if info, err := os.Stat(codexDir); err == nil && info.IsDir() {
-		return true
-	}
-
-	return false
+	return detectHarness("codex", codexDir)
 }
 
 // All returns all available harnesses
