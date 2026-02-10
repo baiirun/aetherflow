@@ -230,6 +230,73 @@ func TestParseToolCallsCancelledContext(t *testing.T) {
 	}
 }
 
+func TestParseSessionIDHappyPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ts-abc.jsonl")
+
+	lines := []string{
+		`{"type":"step_start","timestamp":1770499337321,"sessionID":"ses_3ba7385ddffeRK9Kk26WLuA3XA","part":{"type":"step-start"}}`,
+		`{"type":"tool_use","timestamp":1770499345000,"sessionID":"ses_3ba7385ddffeRK9Kk26WLuA3XA","part":{"tool":"read","state":{"status":"completed","input":{"filePath":"/project/go.mod"}}}}`,
+	}
+
+	writeLines(t, path, lines)
+
+	got := ParseSessionID(path)
+	want := "ses_3ba7385ddffeRK9Kk26WLuA3XA"
+
+	if got != want {
+		t.Errorf("ParseSessionID = %q, want %q", got, want)
+	}
+}
+
+func TestParseSessionIDMissingFile(t *testing.T) {
+	got := ParseSessionID("/nonexistent/file.jsonl")
+	if got != "" {
+		t.Errorf("ParseSessionID on missing file = %q, want empty string", got)
+	}
+}
+
+func TestParseSessionIDEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty.jsonl")
+
+	if err := os.WriteFile(path, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := ParseSessionID(path)
+	if got != "" {
+		t.Errorf("ParseSessionID on empty file = %q, want empty string", got)
+	}
+}
+
+func TestParseSessionIDMalformedJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "malformed.jsonl")
+
+	lines := []string{`not valid json at all`}
+	writeLines(t, path, lines)
+
+	got := ParseSessionID(path)
+	if got != "" {
+		t.Errorf("ParseSessionID on malformed JSON = %q, want empty string", got)
+	}
+}
+
+func TestParseSessionIDNoSessionField(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "no-session.jsonl")
+
+	// Valid JSON but no sessionID field
+	lines := []string{`{"type":"step_start","timestamp":1770499337321}`}
+	writeLines(t, path, lines)
+
+	got := ParseSessionID(path)
+	if got != "" {
+		t.Errorf("ParseSessionID on line without sessionID = %q, want empty string", got)
+	}
+}
+
 // writeLines writes JSONL lines to a file.
 func writeLines(t *testing.T, path string, lines []string) {
 	t.Helper()
