@@ -12,3 +12,6 @@ Expected behaviors and their verification status. This is the project's oracle â
 | Daemon | Crashed agents are respawned up to max retries | `go test ./internal/daemon/... -run TestReap` | covered | 2025-02-06 |
 | Daemon | Config loads from YAML file with CLI flag override | `go test ./internal/daemon/... -run TestConfig` | covered | 2025-02-06 |
 | Daemon | Unix socket RPC responds to status and shutdown | `go test ./internal/daemon/... -run TestDaemon` | covered | 2025-02-06 |
+| Pool | Tracks last 20 exited agents in ring buffer with exit state | `go test ./internal/daemon/... -run TestPoolRecentHistory` | covered | 2026-02-10 |
+| Pool | Ring buffer wraps correctly when exceeding capacity | `go test ./internal/daemon/... -run TestPoolRecentHistoryRingBuffer` | covered | 2026-02-10 |
+| Status | af status displays Recent section with exited agents | Manual: `af status` (daemon required) | manual | 2026-02-10 |
