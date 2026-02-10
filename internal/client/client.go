@@ -189,6 +189,27 @@ func (c *Client) PoolResume() (*PoolModeResult, error) {
 	return &result, nil
 }
 
+// AgentKillParams are the parameters for the agent.kill RPC.
+type AgentKillParams struct {
+	AgentName string `json:"agent_name"`
+}
+
+// AgentKillResult is the response for the agent.kill RPC.
+type AgentKillResult struct {
+	AgentName string `json:"agent_name"`
+	PID       int    `json:"pid"`
+}
+
+// KillAgent sends SIGTERM to the specified agent.
+func (c *Client) KillAgent(agentName string) (*AgentKillResult, error) {
+	params := AgentKillParams{AgentName: agentName}
+	var result AgentKillResult
+	if err := c.call("agent.kill", params, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // Shutdown stops the daemon.
 func (c *Client) Shutdown() error {
 	return c.call("shutdown", nil, nil)

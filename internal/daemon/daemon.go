@@ -197,6 +197,8 @@ func (d *Daemon) handleRequest(ctx context.Context, req *Request) *Response {
 		return d.handlePoolPause()
 	case "pool.resume":
 		return d.handlePoolResume()
+	case "agent.kill":
+		return d.handleAgentKill(req.Params)
 	case "shutdown":
 		return d.handleShutdown()
 	default:
