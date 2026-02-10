@@ -24,6 +24,7 @@ type ToolCall struct {
 type jsonlLine struct {
 	Type      string `json:"type"`
 	Timestamp int64  `json:"timestamp"` // Unix millis
+	SessionID string `json:"sessionID"`
 	Part      struct {
 		Tool  string `json:"tool"`
 		Title string `json:"title"`
@@ -145,4 +146,27 @@ func unquoteField(m map[string]json.RawMessage, key string) string {
 		return ""
 	}
 	return s
+}
+
+// ParseSessionID reads the first JSONL line from a log file and extracts the
+// sessionID. Returns empty string if the file doesn't exist, is empty, or the
+// first line doesn't contain a sessionID.
+func ParseSessionID(logFile string) string {
+	f, err := os.Open(logFile)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	if !scanner.Scan() {
+		return ""
+	}
+
+	var line jsonlLine
+	if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+		return ""
+	}
+
+	return line.SessionID
 }

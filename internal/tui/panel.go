@@ -95,7 +95,7 @@ const (
 	borderLR   = 2 // left + right border chars
 	paddingLR  = 2 // Padding(0,1) → 1 left + 1 right
 	borderTB   = 2 // top + bottom border rows
-	metaLines  = 5 // "Agent" header + name + pid + role/up + spawned
+	metaLines  = 6 // "Agent" header + name + pid + role/up + spawned + session
 	headerRows = 3 // panel header bar + blank line
 	footerRows = 2 // blank line + help text
 )
@@ -378,6 +378,11 @@ func (m PanelModel) renderAgentMeta() string {
 		spawnStr = a.SpawnTime.Format("15:04:05")
 	}
 
+	sessionStr := "—"
+	if a.SessionID != "" {
+		sessionStr = a.SessionID
+	}
+
 	var b strings.Builder
 	b.WriteString(paneHeaderStyle.Render("Agent") + "\n")
 	b.WriteString(fmt.Sprintf("%s %s\n", dimStyle.Render("Name:"), a.ID))
@@ -386,7 +391,8 @@ func (m PanelModel) renderAgentMeta() string {
 		dimStyle.Render("Role:"), magentaStyle.Render(a.Role),
 		dimStyle.Render("Up:"), greenStyle.Render(uptime),
 	))
-	b.WriteString(fmt.Sprintf("%s %s", dimStyle.Render("Spawned:"), spawnStr))
+	b.WriteString(fmt.Sprintf("%s %s\n", dimStyle.Render("Spawned:"), spawnStr))
+	b.WriteString(fmt.Sprintf("%s %s", dimStyle.Render("Session:"), sessionStr))
 	return b.String()
 }
 
