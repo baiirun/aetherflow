@@ -26,6 +26,7 @@ Committed code. Passing tests. Clean review. Branch pushed. Handoff written to p
 - **No human interaction.** Do not ask questions. Do not wait for approval.
 - **Ambiguity in implementation** (how to solve it) -> make a reasonable decision, document it in your handoff, and continue.
 - **Ambiguity in the task itself** (what to build, what the terms mean, what the DoD is asking for) -> yield immediately with `prog block {{task_id}} "<what's unclear>"`. Building the wrong thing wastes more time than yielding early.
+- **Task needs re-planning** (the DoD is really multiple independent tasks, or the task needs a planner to break it down) -> `prog log {{task_id}} "Scope issue: <what's wrong and how it should be broken down>"`, then `prog draft {{task_id}}` to send it back.
 
 ## Protocol
 
