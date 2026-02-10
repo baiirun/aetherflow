@@ -214,3 +214,137 @@ func TestHandleAgentKillSignalError(t *testing.T) {
 		t.Errorf("error = %q, want permission error", resp.Error)
 	}
 }
+
+func TestHandleAgentKillESRCHError(t *testing.T) {
+	cfg := Config{
+		Project:   "testproject",
+		PoolSize:  2,
+		SpawnCmd:  "fake-agent",
+		PromptDir: "",
+		LogDir:    t.TempDir(),
+	}
+	cfg.ApplyDefaults()
+
+	proc, release := newFakeProcess(9999)
+	defer release()
+
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
+		return proc, nil
+	}
+
+	pool := NewPool(cfg, progRunner(testTaskMeta), starter, testLogger())
+	pool.ctx = context.Background()
+
+	// Inject a signal sender that returns ESRCH (process already exited)
+	origKillFunc := syscallKill
+	defer func() { syscallKill = origKillFunc }()
+	syscallKill = func(pid int, sig syscall.Signal) error {
+		return syscall.ESRCH
+	}
+
+	// Spawn a fake agent
+	pool.mu.Lock()
+	agentID := protocol.AgentID("test-agent-1")
+	pool.agents["ts-abc"] = &Agent{
+		ID:        agentID,
+		TaskID:    "ts-abc",
+		Role:      RoleWorker,
+		PID:       9999,
+		SpawnTime: time.Now(),
+		State:     AgentRunning,
+	}
+	pool.mu.Unlock()
+
+	d := &Daemon{config: cfg, pool: pool, log: testLogger()}
+
+	// Build request params
+	params, _ := json.Marshal(AgentKillParams{AgentName: "test-agent-1"})
+
+	resp := d.handleAgentKill(json.RawMessage(params))
+	if resp.Success {
+		t.Fatal("expected error when process already exited")
+	}
+	if resp.Error != "agent test-agent-1 (PID 9999) already exited" {
+		t.Errorf("error = %q, want already-exited error", resp.Error)
+	}
+}
+
+func TestHandleAgentKillInvalidPID(t *testing.T) {
+	cfg := Config{
+		Project:   "testproject",
+		PoolSize:  2,
+		SpawnCmd:  "fake-agent",
+		PromptDir: "",
+		LogDir:    t.TempDir(),
+	}
+	cfg.ApplyDefaults()
+
+	pool := NewPool(cfg, nil, nil, testLogger())
+	pool.ctx = context.Background()
+
+	// Spawn a fake agent with invalid PID (0)
+	pool.mu.Lock()
+	agentID := protocol.AgentID("test-agent-1")
+	pool.agents["ts-abc"] = &Agent{
+		ID:        agentID,
+		TaskID:    "ts-abc",
+		Role:      RoleWorker,
+		PID:       0, // Invalid PID
+		SpawnTime: time.Now(),
+		State:     AgentRunning,
+	}
+	pool.mu.Unlock()
+
+	d := &Daemon{config: cfg, pool: pool, log: testLogger()}
+
+	// Build request params
+	params, _ := json.Marshal(AgentKillParams{AgentName: "test-agent-1"})
+
+	resp := d.handleAgentKill(json.RawMessage(params))
+	if resp.Success {
+		t.Fatal("expected error for invalid PID")
+	}
+	if resp.Error != "invalid agent PID: 0" {
+		t.Errorf("error = %q, want invalid PID error", resp.Error)
+	}
+}
+
+func TestHandleAgentKillNonRunningAgent(t *testing.T) {
+	cfg := Config{
+		Project:   "testproject",
+		PoolSize:  2,
+		SpawnCmd:  "fake-agent",
+		PromptDir: "",
+		LogDir:    t.TempDir(),
+	}
+	cfg.ApplyDefaults()
+
+	pool := NewPool(cfg, nil, nil, testLogger())
+	pool.ctx = context.Background()
+
+	// Spawn a fake agent with Exited state
+	pool.mu.Lock()
+	agentID := protocol.AgentID("test-agent-1")
+	pool.agents["ts-abc"] = &Agent{
+		ID:        agentID,
+		TaskID:    "ts-abc",
+		Role:      RoleWorker,
+		PID:       9999,
+		SpawnTime: time.Now(),
+		State:     AgentExited, // Not running
+	}
+	pool.mu.Unlock()
+
+	d := &Daemon{config: cfg, pool: pool, log: testLogger()}
+
+	// Build request params
+	params, _ := json.Marshal(AgentKillParams{AgentName: "test-agent-1"})
+
+	resp := d.handleAgentKill(json.RawMessage(params))
+	if resp.Success {
+		t.Fatal("expected error for non-running agent")
+	}
+	if resp.Error != "agent is not running (state: exited)" {
+		t.Errorf("error = %q, want non-running error", resp.Error)
+	}
+}
