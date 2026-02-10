@@ -8,14 +8,16 @@ Prompt templates are embedded into the `af` binary at compile time from
 `internal/daemon/prompts/*.md`. The daemon reads them from the embedded
 filesystem by default — no files need to exist on disk at runtime.
 
-To override prompts for development, set `prompt_dir` in `.aetherflow.yaml`
-or pass `--prompt-dir` to `af daemon start`. The daemon will read from the
-filesystem path instead of the embedded copies.
+To override prompts for development, set `prompt_dir` in `.aetherflow.yaml`.
+The daemon will read from the filesystem path instead of the embedded copies.
 
 ## Template variables
 
-The only template variable is `{{task_id}}`. The daemon replaces it with the
-actual task ID at spawn time before passing the rendered prompt to `opencode run`.
+Three template variables are replaced at spawn time:
+
+- `{{task_id}}` — the task identifier
+- `{{land_steps}}` — landing instructions (differs between solo and normal mode)
+- `{{land_donts}}` — "what not to do" rules for landing (differs between solo and normal mode)
 
 The agent reads everything else (project, description, DoD, learnings) from
 `prog show <task_id>` during its orient step.
