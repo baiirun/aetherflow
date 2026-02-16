@@ -86,6 +86,7 @@ af daemon start -p myapp
 # You monitor from the TUI or CLI
 af status -w
 af logs worker-ts-a1b2c3 -f
+af tui -p myapp
 ```
 
 ### Task Lifecycle
