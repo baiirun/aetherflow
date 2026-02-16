@@ -22,14 +22,18 @@ var logsCmd = &cobra.Command{
 The daemon returns the log file path and the CLI tails it directly.
 By default shows the last 20 lines in human-readable format.
 Use --raw for raw JSONL, -n to change the initial count,
-and -f to follow new output as it's written.
+and -f/--follow or -w/--watch to stream new output as it's written.
 
 Requires a running daemon and an active agent.`,
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		follow, _ := cmd.Flags().GetBool("follow")
+		watch, _ := cmd.Flags().GetBool("watch")
 		lines, _ := cmd.Flags().GetInt("lines")
 		raw, _ := cmd.Flags().GetBool("raw")
+
+		// Both --follow and --watch enable streaming; treat them as aliases.
+		streaming := follow || watch
 
 		c := client.New(resolveSocketPath(cmd))
 		path, err := c.LogsPath(args[0])
@@ -38,7 +42,7 @@ Requires a running daemon and an active agent.`,
 			os.Exit(1)
 		}
 
-		if err := tailFile(path, lines, follow, !raw); err != nil {
+		if err := tailFile(path, lines, streaming, !raw); err != nil {
 			fmt.Fprintf(os.Stderr, "error tailing log: %v\n", err)
 			os.Exit(1)
 		}
@@ -153,7 +157,8 @@ func followFile(f *os.File, pretty bool) error {
 func init() {
 	rootCmd.AddCommand(logsCmd)
 
-	logsCmd.Flags().BoolP("follow", "f", false, "Follow new output as it's written")
+	logsCmd.Flags().BoolP("follow", "f", false, "Stream new output as it's written")
+	logsCmd.Flags().BoolP("watch", "w", false, "Stream new output as it's written (alias for --follow)")
 	logsCmd.Flags().IntP("lines", "n", defaultTailLines, "Number of initial lines to show")
 	logsCmd.Flags().Bool("raw", false, "Output raw JSONL instead of formatted text")
 }
