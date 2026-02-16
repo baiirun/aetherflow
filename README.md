@@ -116,7 +116,7 @@ aetherflow uses prog's status system to coordinate the full task lifecycle:
 | `reviewing` | Agent (via `prog review`) | Work is complete, PR created, awaiting merge (normal mode only) |
 | `done` | Agent or reconciler | Branch merged, task complete |
 | `blocked` | Agent (via `prog block`) | Agent hit a wall -- needs human or re-planning |
-| `draft` | Agent (via `prog draft`) | Task needs re-planning -- scope is wrong or DoD is multiple tasks |
+| `draft` | Agent (via `prog draft`) | Task needs planning -- agent may set to draft if the task is not defined well-enough |
 | `canceled` | You | Task is no longer needed |
 
 The daemon only picks up tasks in `open` status that have no unmet dependencies (`prog ready` handles this). Once claimed, the task moves through `in_progress` -> `reviewing` -> `done` (normal mode) or `in_progress` -> `done` (solo mode).
