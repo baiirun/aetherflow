@@ -3,12 +3,12 @@
 Async runtime for agent work scheduling. A process supervisor that watches [prog](https://github.com/baiirun/prog) for ready tasks and spawns [opencode](https://github.com/anomalyco/opencode) sessions to work on them.
 
 ```
-              +---------+         +-----------+         +----------+
-              |  prog    |         | aetherflow |         | opencode |
-              |          |  poll   |  (daemon)  |  spawn  |          |
-              | task db  |------>  |  af / aetherd|------> | agent    |
-              |          |         |            |         | sessions |
-              +---------+         +-----------+         +----------+
+    +-----------+           +---------------+           +------------+
+    |   prog    |           |  aetherflow   |           |  opencode  |
+    |           |   poll    |   (daemon)    |   spawn   |            |
+    |  task db  |---------->|  af / aetherd |---------->|   agent    |
+    |           |           |               |           |  sessions  |
+    +-----------+           +---------------+           +------------+
 ```
 
 [prog](https://github.com/baiirun/prog) is a local task management CLI -- create, prioritize, track tasks, and capture learnings. [opencode](https://github.com/anomalyco/opencode) is an agent runtime that runs LLM sessions with tool access. aetherflow bridges them: it watches prog for unblocked tasks and spawns opencode sessions to do the work.
