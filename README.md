@@ -188,36 +188,6 @@ In **solo mode**: pull latest main, merge the branch with `--no-ff`, push main, 
 
 After landing, the agent loads the `compound-auto` skill to capture solution documentation, update the feature matrix, log learnings, and write a handoff summary.
 
-## Planner Agent
-
-Not all tasks are implementation work. When a task is labeled `plan` (future: the daemon will infer this from labels), a planner agent is spawned instead of a worker.
-
-Planners take an intent (epic, feature, problem statement) and produce tasks with behavioral definitions of done. They never write code. They never prescribe implementation approach. They define WHAT the system should do, never HOW.
-
-```
-orient -> identify gaps -> write tasks -> verify completeness
-```
-
-**orient**: Read the intent, read the feature matrix if one exists, understand the current system state. Check relevant learnings from past agents.
-
-**identify gaps**: The delta between the intent and the current matrix is the task list. Each missing behavior is a candidate task, sized for a single agent session (20-50 tool calls). Consider edge cases and negative behaviors.
-
-**write tasks**: For each task, create a fully-specified entry in prog with:
-- A description explaining why this task exists and what context the worker needs
-- A behavioral definition of done with verification commands
-- Dependencies (`prog blocks <blocker> <blocked>`)
-- Labels for categorization
-
-Good DoDs describe outcomes, not steps. They include something testable:
-
-> Users can filter by date range. The query uses the existing index, not a table scan. The endpoint returns results in under 200ms for 10k rows. Run: `go test ./internal/api/... -v`
-
-Bad DoDs prescribe implementation:
-
-> Add a filter dropdown. Write a SQL query. Add an index. Write tests.
-
-**verify completeness**: Walk through the intent one more time. Is anything missing? Are tasks self-contained? Could a worker pick up any single task with no knowledge of the others?
-
 ## Stuck Detection
 
 Agents monitor their own progress. They're stuck if:
