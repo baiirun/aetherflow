@@ -85,6 +85,7 @@ type AgentStatus struct {
 	SpawnTime time.Time `json:"spawn_time"`
 	TaskTitle string    `json:"task_title"`
 	LastLog   string    `json:"last_log,omitempty"`
+	SessionID string    `json:"session_id,omitempty"`
 }
 
 // Task is a pending task from the queue.

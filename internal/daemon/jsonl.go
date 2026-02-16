@@ -24,6 +24,7 @@ type ToolCall struct {
 type jsonlLine struct {
 	Type      string `json:"type"`
 	Timestamp int64  `json:"timestamp"` // Unix millis
+	SessionID string `json:"sessionID"`
 	Part      struct {
 		Tool  string `json:"tool"`
 		Title string `json:"title"`
@@ -145,4 +146,39 @@ func unquoteField(m map[string]json.RawMessage, key string) string {
 		return ""
 	}
 	return s
+}
+
+// ParseSessionID reads the first JSONL line from a log file and extracts the
+// sessionID. Returns empty string and nil error if the file doesn't exist or
+// the sessionID field is absent (these are not errors - the field may not be
+// available yet). Returns an error if the file exists but is malformed.
+func ParseSessionID(ctx context.Context, logFile string) (string, error) {
+	f, err := os.Open(logFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil // Not an error - file doesn't exist yet
+		}
+		return "", fmt.Errorf("opening log file: %w", err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return "", fmt.Errorf("reading first line: %w", err)
+		}
+		return "", nil // Empty file is not an error
+	}
+
+	// Check context before parsing
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
+	var line jsonlLine
+	if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+		return "", fmt.Errorf("parsing first line: %w", err)
+	}
+
+	return line.SessionID, nil
 }

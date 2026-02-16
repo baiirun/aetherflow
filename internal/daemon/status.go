@@ -29,6 +29,7 @@ type AgentStatus struct {
 	SpawnTime time.Time `json:"spawn_time"`
 	TaskTitle string    `json:"task_title"`
 	LastLog   string    `json:"last_log,omitempty"`
+	SessionID string    `json:"session_id,omitempty"`
 }
 
 // taskShowResponse is the sparse parse target for `prog show --json`.
@@ -200,7 +201,7 @@ func BuildAgentDetail(ctx context.Context, pool *Pool, cfg Config, runner Comman
 		detail.LastLog = lastLog
 	}()
 
-	// Parse tool calls from JSONL log.
+	// Parse tool calls and session ID from JSONL log.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -221,6 +222,15 @@ func BuildAgentDetail(ctx context.Context, pool *Pool, cfg Config, runner Comman
 			mu.Unlock()
 		}
 		detail.ToolCalls = calls
+
+		sessionID, err := ParseSessionID(parseCtx, path)
+		if err != nil {
+			mu.Lock()
+			errors = append(errors, fmt.Sprintf("parsing session ID from %s: %v", path, err))
+			mu.Unlock()
+		} else {
+			detail.SessionID = sessionID
+		}
 	}()
 
 	wg.Wait()
