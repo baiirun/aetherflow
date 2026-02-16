@@ -484,6 +484,16 @@ Socket paths are derived automatically from the project name. Each project gets 
 | `af install --check` | Exit 0 if up-to-date, 1 if install needed |
 | `af install --json` | Structured JSON output for automation |
 
+## Roadmap
+
+**Custom task sources.** The daemon currently requires prog as the task backend. A plugin interface for task sources would let you swap in Linear, GitHub Issues, Jira, or a simple JSON file -- anything that can answer "what's ready?" and "mark this as started."
+
+**Ad-hoc agent spawning.** `af spawn "Your prompt"` to fire off a one-shot agent without creating a task first. Useful for quick jobs that don't need tracking.
+
+**External triggers.** Spawn agents from Slack, Linear, Discord, or any webhook. A lightweight API layer that accepts a prompt and queues it into the pool.
+
+**Remote sandboxes.** Run agents in isolated cloud environments instead of local processes. [Sprites](https://sprites.dev) and similar sandboxing runtimes would let you scale beyond your machine and provide stronger isolation between concurrent agents.
+
 ## License
 
 MIT
