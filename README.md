@@ -213,7 +213,7 @@ The handoff protocol ensures that when a new agent picks up a yielded task, it i
 
 ## Handoff Protocol
 
-Used at: context compaction, session end, blocked/escalation, task yield, task completion.
+Used at: session end, blocked/escalation, task yield, task completion.
 
 Agents write handoff summaries to the task log (not the task description, which is the original specification):
 
