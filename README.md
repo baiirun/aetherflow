@@ -1,6 +1,6 @@
 # aetherflow
 
-Async runtime for agent work scheduling. A process supervisor that watches [prog](https://github.com/baiirun/prog) for ready tasks and spawns [opencode](https://github.com/anomalyco/opencode) sessions to work on them.
+An opinionated harness for running autonomous agents. A process supervisor that watches [prog](https://github.com/baiirun/prog) for ready tasks and spawns [opencode](https://github.com/anomalyco/opencode) sessions to work on them.
 
 ```
     +-----------+           +---------------+           +------------+
