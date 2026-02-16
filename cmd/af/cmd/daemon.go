@@ -61,6 +61,10 @@ func buildConfig(cmd *cobra.Command) daemon.Config {
 	var cfg daemon.Config
 
 	// Read CLI flags into config. Only non-default values override.
+	if cmd.Flags().Changed("runtime") {
+		v, _ := cmd.Flags().GetString("runtime")
+		cfg.Runtime = daemon.Runtime(v)
+	}
 	if cmd.Flags().Changed("project") {
 		cfg.Project, _ = cmd.Flags().GetString("project")
 	}
@@ -110,7 +114,7 @@ func startDetached(cmd *cobra.Command) {
 
 	// Forward all flags except --detach.
 	reArgs := []string{"daemon", "start"}
-	for _, name := range []string{"project", "socket", "poll-interval", "pool-size", "spawn-cmd", "max-retries", "solo", "config"} {
+	for _, name := range []string{"runtime", "project", "socket", "poll-interval", "pool-size", "spawn-cmd", "max-retries", "solo", "config"} {
 		if cmd.Flags().Changed(name) {
 			val, _ := cmd.Flags().GetString(name)
 			// Duration and int flags also work with GetString via pflag.
@@ -153,6 +157,7 @@ func init() {
 
 	f := daemonStartCmd.Flags()
 	f.BoolP("detach", "d", false, "Run in background")
+	f.String("runtime", string(daemon.RuntimeOpencode), "Agent runtime: opencode or claude")
 	f.StringP("project", "p", "", "Project to watch for tasks (required)")
 	f.Duration("poll-interval", daemon.DefaultPollInterval, "How often to poll prog for tasks")
 	f.Int("pool-size", daemon.DefaultPoolSize, "Maximum concurrent agent slots")

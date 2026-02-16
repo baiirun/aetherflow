@@ -68,17 +68,34 @@ type Result struct {
 	Errors  int
 }
 
-// Plan walks the embedded assets and determines what actions would be taken
-// against targetDir. It does not write any files. The returned FileActions
-// carry the source bytes so Execute can write them without re-reading.
+// Plan walks the embedded opencode assets and determines what actions would
+// be taken against targetDir. It does not write any files. The returned
+// FileActions carry the source bytes so Execute can write them without
+// re-reading.
 func Plan(targetDir string) ([]FileAction, error) {
+	return planFromFS(assetsFS, ".", targetDir)
+}
+
+// PlanClaude walks the embedded Claude Code command assets and determines
+// what actions would be taken against targetDir (typically .claude/commands/).
+// It does not write any files.
+func PlanClaude(targetDir string) ([]FileAction, error) {
+	subFS, err := fs.Sub(claudeAssetsFS, "claude-commands")
+	if err != nil {
+		return nil, fmt.Errorf("accessing claude-commands embed: %w", err)
+	}
+	return planFromFS(subFS, ".", targetDir)
+}
+
+// planFromFS is the shared implementation for Plan and PlanClaude.
+func planFromFS(assets fs.FS, root, targetDir string) ([]FileAction, error) {
 	if targetDir == "" {
-		panic("install.Plan: targetDir must not be empty")
+		panic("install.planFromFS: targetDir must not be empty")
 	}
 
 	var actions []FileAction
 
-	err := fs.WalkDir(assetsFS, ".", func(path string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(assets, root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -86,7 +103,7 @@ func Plan(targetDir string) ([]FileAction, error) {
 			return nil
 		}
 
-		srcData, readErr := fs.ReadFile(assetsFS, path)
+		srcData, readErr := fs.ReadFile(assets, path)
 		if readErr != nil {
 			return fmt.Errorf("reading embedded %s: %w", path, readErr)
 		}
@@ -114,10 +131,10 @@ func Plan(targetDir string) ([]FileAction, error) {
 
 	// The embedded FS is compiled in — zero files means a build/packaging error.
 	if len(actions) == 0 {
-		panic("install.Plan: embedded assets produced zero actions — build is broken")
+		panic("install.planFromFS: embedded assets produced zero actions — build is broken")
 	}
 	if len(actions) > maxEmbeddedAssets {
-		panic(fmt.Sprintf("install.Plan: embedded assets (%d) exceed limit of %d — accidental embed?", len(actions), maxEmbeddedAssets))
+		panic(fmt.Sprintf("install.planFromFS: embedded assets (%d) exceed limit of %d — accidental embed?", len(actions), maxEmbeddedAssets))
 	}
 
 	slog.Debug("plan complete", "target", targetDir, "total", len(actions))

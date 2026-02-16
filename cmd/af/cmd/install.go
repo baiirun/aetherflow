@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/baiirun/aetherflow/internal/daemon"
 	"github.com/baiirun/aetherflow/internal/install"
 	"github.com/baiirun/aetherflow/internal/term"
 	"github.com/spf13/cobra"
@@ -17,13 +18,18 @@ import (
 
 var installCmd = &cobra.Command{
 	Use:   "install",
-	Short: "Install aetherflow skills and agents to opencode",
-	Long: `Install bundled skill and agent definitions to your opencode
-configuration directory (~/.config/opencode/ by default).
+	Short: "Install aetherflow skills and agents",
+	Long: `Install bundled skill and agent definitions to your agent runtime.
 
-Skills and agents are required for aetherflow's worker agents to perform
-code reviews and knowledge compounding. Running this command ensures
-your opencode installation has the definitions it needs.
+For opencode (default): installs skill and agent definitions to the
+opencode configuration directory (~/.config/opencode/ by default).
+Skills and agents are required for aetherflow's worker agents to
+perform code reviews and knowledge compounding.
+
+For Claude Code (--runtime claude): installs slash commands
+(review-auto, compound-auto) to .claude/commands/ in the current
+project. These provide the same review and compound workflows
+adapted for Claude Code's Task tool.
 
 The command is idempotent — files that are already up to date are skipped.`,
 	Run: runInstall,
@@ -35,13 +41,25 @@ func runInstall(cmd *cobra.Command, args []string) {
 	target, _ := cmd.Flags().GetString("target")
 	asJSON, _ := cmd.Flags().GetBool("json")
 	check, _ := cmd.Flags().GetBool("check")
+	runtimeStr, _ := cmd.Flags().GetString("runtime")
+	rt := daemon.Runtime(runtimeStr)
 
 	// --json implies --yes (agents requesting JSON are inherently non-interactive).
 	if asJSON {
 		yes = true
 	}
 
-	// Resolve target directory.
+	// Claude Code: install slash commands to .claude/commands/ in the project.
+	if rt == daemon.RuntimeClaude {
+		claudeTarget := ".claude/commands"
+		if target != "" {
+			claudeTarget = target
+		}
+		runInstallClaude(claudeTarget, dryRun, yes, asJSON, check)
+		return
+	}
+
+	// Resolve target directory (opencode).
 	targetDir, err := resolveInstallTarget(target)
 	if err != nil {
 		Fatal("%v", err)
@@ -157,6 +175,134 @@ func runInstall(cmd *cobra.Command, args []string) {
 		emitInstallJSON(targetDir, actions, result, true)
 	} else {
 		// Report results.
+		fmt.Println()
+		for _, a := range actions {
+			switch {
+			case a.Err != nil:
+				fmt.Printf("  %s  %s — %v\n", term.Red("✗"), a.RelPath, a.Err)
+			case a.Action == install.ActionSkip:
+				fmt.Printf("  %s  %s %s\n", term.Dim("·"), a.RelPath, term.Dim("(up to date)"))
+			default:
+				fmt.Printf("  %s  %s\n", term.Green("✓"), a.RelPath)
+			}
+		}
+		fmt.Println()
+
+		fmt.Printf("Done. %d written, %d up to date.", result.Written, result.Skipped)
+		if result.Errors > 0 {
+			fmt.Printf(" %s", term.Redf("%d failed.", result.Errors))
+		}
+		fmt.Println()
+	}
+
+	if result.Errors > 0 {
+		os.Exit(1)
+	}
+}
+
+// runInstallClaude installs Claude Code slash commands to the target directory
+// (typically .claude/commands/ in the project root). It mirrors the opencode
+// install flow: plan, display, confirm, execute.
+func runInstallClaude(targetDir string, dryRun, yes, asJSON, check bool) {
+	absTarget, err := filepath.Abs(targetDir)
+	if err != nil {
+		Fatal("resolving target: %v", err)
+	}
+
+	actions, err := install.PlanClaude(absTarget)
+	if err != nil {
+		Fatal("%v", err)
+	}
+
+	var writeCount, skipCount int
+	for _, a := range actions {
+		switch a.Action {
+		case install.ActionWrite:
+			writeCount++
+		case install.ActionSkip:
+			skipCount++
+		default:
+			Fatal("install: unknown action %s for %s", a.Action, a.RelPath)
+		}
+	}
+
+	if check {
+		if asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(installCheckJSON{
+				Target:   absTarget,
+				UpToDate: writeCount == 0,
+				ToWrite:  writeCount,
+				ToSkip:   skipCount,
+				Executed: false,
+			}); err != nil {
+				Fatal("failed to encode JSON: %v", err)
+			}
+		}
+		if writeCount > 0 {
+			if !asJSON {
+				fmt.Printf("%d files need updating.\n", writeCount)
+			}
+			os.Exit(1)
+		}
+		if !asJSON {
+			fmt.Println("Everything is up to date.")
+		}
+		return
+	}
+
+	if writeCount == 0 {
+		if asJSON {
+			emitInstallJSON(absTarget, actions, nil, false)
+		} else {
+			fmt.Println("Everything is up to date.")
+		}
+		return
+	}
+
+	if !asJSON {
+		fmt.Printf("Installing Claude Code commands to %s:\n\n", absTarget)
+		for _, a := range actions {
+			switch a.Action {
+			case install.ActionWrite:
+				fmt.Printf("  %s  %s\n", term.Green("write"), a.RelPath)
+			case install.ActionSkip:
+				fmt.Printf("  %s   %s %s\n", term.Dim("skip"), a.RelPath, term.Dim("(up to date)"))
+			}
+		}
+		fmt.Println()
+	}
+
+	if dryRun {
+		if asJSON {
+			emitInstallJSON(absTarget, actions, nil, false)
+		} else {
+			fmt.Printf("%d to write, %d up to date. (dry run — no files written)\n", writeCount, skipCount)
+		}
+		return
+	}
+
+	if !yes {
+		fmt.Print("Proceed? [Y/n] ")
+		reader := bufio.NewReader(os.Stdin)
+		input, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			fmt.Println("Aborted.")
+			return
+		}
+		input = strings.TrimSpace(strings.ToLower(input))
+		if input != "" && input != "y" && input != "yes" {
+			fmt.Println("Aborted.")
+			return
+		}
+	}
+
+	result := install.Execute(actions)
+
+	if asJSON {
+		emitInstallJSON(absTarget, actions, result, true)
+	} else {
 		fmt.Println()
 		for _, a := range actions {
 			switch {
@@ -312,6 +458,7 @@ func emitInstallJSON(targetDir string, actions []install.FileAction, result *ins
 func init() {
 	rootCmd.AddCommand(installCmd)
 
+	installCmd.Flags().String("runtime", string(daemon.RuntimeOpencode), "Agent runtime: opencode or claude")
 	installCmd.Flags().Bool("dry-run", false, "Show what would be installed without writing files")
 	installCmd.Flags().BoolP("yes", "y", false, "Skip confirmation prompt")
 	installCmd.Flags().String("target", "", "Override install directory (default: ~/.config/opencode/)")

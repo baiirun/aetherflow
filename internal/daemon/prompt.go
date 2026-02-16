@@ -45,6 +45,52 @@ const (
 
 	landDontsSolo = `- Don't leave your branch unmerged -- in solo mode you are responsible for merging to main.
 - Don't forget to delete the branch after merging -- clean up after yourself.`
+
+	// Runtime-conditional content for worker.md.
+	// These replace {{context_comment}}, {{review_instructions}}, and {{compound_instructions}}.
+
+	contextCommentOpencode = `<!-- Machine-parsed by .opencode/plugins/compaction-handoff.ts — do not change this format -->`
+	contextCommentClaude   = ``
+
+	reviewInstructionsOpencode = `Load ` + "`skill: review-auto`" + `. It will guide you through spawning parallel review subagents on your diff and collecting prioritized findings.`
+	reviewInstructionsClaude  = `Run parallel code reviewers on your current changes. Each reviewer gets a fresh context.
+
+1. Get the list of changed files: ` + "`git diff --stat $(git merge-base HEAD main)..HEAD`" + `
+2. Spawn these Task agents **simultaneously** (they are independent):
+
+` + "```" + `
+Task(subagent_type="general-purpose", prompt="You are a code reviewer. Review code changes for bugs, correctness, and logic errors.
+
+Context: <what this change does>
+Changed files: <git diff --stat output>
+
+Run ` + "`git diff $(git merge-base HEAD main)..HEAD`" + ` to see the full diff. Return findings as P1/P2/P3.")
+
+Task(subagent_type="general-purpose", prompt="You are a code simplicity reviewer. Review code changes for unnecessary complexity and simplification opportunities.
+
+Context: <what this change does>
+Changed files: <git diff --stat output>
+
+Run ` + "`git diff $(git merge-base HEAD main)..HEAD`" + ` to see the full diff. Return findings as P1/P2/P3.")
+
+Task(subagent_type="general-purpose", prompt="You are a security reviewer. Review code changes for security vulnerabilities.
+
+Context: <what this change does>
+Changed files: <git diff --stat output>
+
+Run ` + "`git diff $(git merge-base HEAD main)..HEAD`" + ` to see the full diff. Return findings as P1/P2/P3.")
+` + "```" + `
+
+3. Collect and deduplicate findings from all reviewers. Keep the highest severity for duplicates. Discard any reviewer that returned an error or empty results.
+4. Return findings as P1 (must fix), P2 (should fix), P3 (consider).`
+
+	compoundInstructionsOpencode = `7. **Compound** -- load ` + "`skill: compound-auto`" + `. It will guide you through documentation enrichment, feature matrix updates, learnings, and handoff.`
+	compoundInstructionsClaude  = `7. **Compound** -- capture and persist what this task produced beyond the code:
+   - If this was non-trivial work (multiple investigation attempts, non-obvious solution), write a solution doc to ` + "`docs/solutions/<category>/<slug>.md`" + `
+   - If ` + "`MATRIX.md`" + ` exists, update coverage for behaviors you implemented
+   - Log genuine learnings (non-obvious patterns, pitfalls) to ` + "`docs/solutions/learnings.md`" + `
+   - Write a handoff summary to ` + "`docs/solutions/handoffs/<slug>-<YYYYMMDD>.md`" + ` covering what was done, what was tried, key decisions, and remaining concerns
+   - Persist handoff to prog: ` + "`prog log {{task_id}} \"Handoff: <summary>\"`" + ``
 )
 
 // RenderPrompt reads a role prompt template and replaces template variables
@@ -58,10 +104,13 @@ const (
 //   - {{task_id}} — the task identifier
 //   - {{land_steps}} — landing instructions (solo vs normal mode)
 //   - {{land_donts}} — "what not to do" rules for landing
+//   - {{context_comment}} — runtime-specific header comment (opencode plugin marker or empty)
+//   - {{review_instructions}} — runtime-specific review section
+//   - {{compound_instructions}} — runtime-specific compound section
 //
 // Returns the rendered prompt string ready to pass as the message argument
-// to "opencode run".
-func RenderPrompt(promptDir string, role Role, taskID string, solo bool) (string, error) {
+// to the agent runtime.
+func RenderPrompt(promptDir string, role Role, taskID string, solo bool, runtime Runtime) (string, error) {
 	// Allowlist roles to prevent path traversal if role ever becomes dynamic.
 	switch role {
 	case RoleWorker, RolePlanner:
@@ -97,7 +146,20 @@ func RenderPrompt(promptDir string, role Role, taskID string, solo bool) (string
 		landDonts = landDontsSolo
 	}
 
+	// Select runtime-specific content.
+	contextComment := contextCommentOpencode
+	reviewInstructions := reviewInstructionsOpencode
+	compoundInstructions := compoundInstructionsOpencode
+	if runtime == RuntimeClaude {
+		contextComment = contextCommentClaude
+		reviewInstructions = reviewInstructionsClaude
+		compoundInstructions = compoundInstructionsClaude
+	}
+
 	rendered := string(data)
+	rendered = strings.ReplaceAll(rendered, "{{context_comment}}", contextComment)
+	rendered = strings.ReplaceAll(rendered, "{{review_instructions}}", reviewInstructions)
+	rendered = strings.ReplaceAll(rendered, "{{compound_instructions}}", compoundInstructions)
 	rendered = strings.ReplaceAll(rendered, "{{land_steps}}", landSteps)
 	rendered = strings.ReplaceAll(rendered, "{{land_donts}}", landDonts)
 	rendered = strings.ReplaceAll(rendered, "{{task_id}}", taskID)

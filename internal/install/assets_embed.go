@@ -8,3 +8,10 @@ import "embed"
 //
 //go:embed skills agents
 var assetsFS embed.FS
+
+// claudeAssetsFS holds Claude Code slash command definitions compiled into
+// the binary. These are installed to the project's .claude/commands/
+// directory by "af install --runtime claude".
+//
+//go:embed claude-commands
+var claudeAssetsFS embed.FS

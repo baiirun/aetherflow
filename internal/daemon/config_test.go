@@ -99,81 +99,87 @@ func TestConfigValidate(t *testing.T) {
 		wantErr string
 	}{
 		{
+			name:    "invalid runtime",
+			cfg:     Config{Runtime: "bad", Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", ReconcileInterval: DefaultReconcileInterval},
+			wantErr: "runtime must be",
+		},
+		{
 			name:    "missing project",
-			cfg:     Config{PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
+			cfg:     Config{Runtime: RuntimeOpencode, PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
 			wantErr: "project is required",
 		},
 		{
 			name:    "project with slashes",
-			cfg:     Config{Project: "../etc/evil", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
+			cfg:     Config{Runtime: RuntimeOpencode, Project: "../etc/evil", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
 			wantErr: "invalid characters",
 		},
 		{
 			name:    "project with spaces",
-			cfg:     Config{Project: "my project", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
+			cfg:     Config{Runtime: RuntimeOpencode, Project: "my project", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
 			wantErr: "invalid characters",
 		},
 		{
 			name:    "project starting with dot",
-			cfg:     Config{Project: ".hidden", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
+			cfg:     Config{Runtime: RuntimeOpencode, Project: ".hidden", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
 			wantErr: "invalid characters",
 		},
 		{
 			name:    "project starting with hyphen",
-			cfg:     Config{Project: "-bad", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
+			cfg:     Config{Runtime: RuntimeOpencode, Project: "-bad", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
 			wantErr: "invalid characters",
 		},
 		{
 			name:    "negative poll interval",
-			cfg:     Config{Project: "test", PollInterval: -1, PoolSize: 1, SpawnCmd: "cmd"},
+			cfg:     Config{Runtime: RuntimeOpencode, Project: "test", PollInterval: -1, PoolSize: 1, SpawnCmd: "cmd"},
 			wantErr: "poll-interval must be positive",
 		},
 		{
 			name:    "zero pool size",
-			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 0, SpawnCmd: "cmd"},
+			cfg:     Config{Runtime: RuntimeOpencode, Project: "test", PollInterval: time.Second, PoolSize: 0, SpawnCmd: "cmd"},
 			wantErr: "pool-size must be positive",
 		},
 		{
 			name:    "negative pool size",
-			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: -1, SpawnCmd: "cmd"},
+			cfg:     Config{Runtime: RuntimeOpencode, Project: "test", PollInterval: time.Second, PoolSize: -1, SpawnCmd: "cmd"},
 			wantErr: "pool-size must be positive",
 		},
 		{
 			name:    "empty spawn cmd",
-			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: ""},
+			cfg:     Config{Runtime: RuntimeOpencode, Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: ""},
 			wantErr: "spawn-cmd must not be empty",
 		},
 		{
 			name:    "negative max retries",
-			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", MaxRetries: -1, ReconcileInterval: DefaultReconcileInterval},
+			cfg:     Config{Runtime: RuntimeOpencode, Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", MaxRetries: -1, ReconcileInterval: DefaultReconcileInterval},
 			wantErr: "max-retries must be non-negative",
 		},
 		{
 			name:    "reconcile interval too small",
-			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", ReconcileInterval: time.Second},
+			cfg:     Config{Runtime: RuntimeOpencode, Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", ReconcileInterval: time.Second},
 			wantErr: "reconcile-interval must be at least 5s",
 		},
 		{
 			name:    "invalid prompt dir",
-			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", ReconcileInterval: DefaultReconcileInterval, PromptDir: "/nonexistent/prompts"},
+			cfg:     Config{Runtime: RuntimeOpencode, Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", ReconcileInterval: DefaultReconcileInterval, PromptDir: "/nonexistent/prompts"},
 			wantErr: "prompt-dir",
 		},
 		{
 			name: "valid config with embedded prompts",
 			cfg: Config{
+				Runtime:           RuntimeOpencode,
 				Project:           "test",
 				PollInterval:      10 * time.Second,
 				PoolSize:          3,
 				SpawnCmd:          "opencode run",
 				MaxRetries:        3,
 				ReconcileInterval: DefaultReconcileInterval,
-				// PromptDir empty — uses embedded prompts.
 			},
 			wantErr: "",
 		},
 		{
 			name: "valid config with filesystem prompts",
 			cfg: Config{
+				Runtime:           RuntimeOpencode,
 				Project:           "test",
 				PollInterval:      10 * time.Second,
 				PoolSize:          3,
@@ -185,8 +191,22 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: "",
 		},
 		{
+			name: "valid claude runtime",
+			cfg: Config{
+				Runtime:           RuntimeClaude,
+				Project:           "test",
+				PollInterval:      10 * time.Second,
+				PoolSize:          3,
+				SpawnCmd:          DefaultSpawnCmdClaude,
+				MaxRetries:        3,
+				ReconcileInterval: DefaultReconcileInterval,
+			},
+			wantErr: "",
+		},
+		{
 			name: "zero max retries is valid",
 			cfg: Config{
+				Runtime:           RuntimeOpencode,
 				Project:           "test",
 				PollInterval:      time.Second,
 				PoolSize:          1,

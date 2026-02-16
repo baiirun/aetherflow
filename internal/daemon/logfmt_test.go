@@ -111,6 +111,62 @@ func TestFormatMs(t *testing.T) {
 	}
 }
 
+func TestFormatLogLine_ClaudeToolUse(t *testing.T) {
+	result := FormatLogLine([]byte(claudeAssistantToolUse))
+	if result == "" {
+		t.Fatal("expected non-empty result for Claude tool_use event")
+	}
+	if !strings.Contains(result, "Read") {
+		t.Errorf("result should contain tool name, got: %s", result)
+	}
+	if !strings.Contains(result, "/project/go.mod") {
+		t.Errorf("result should contain file path, got: %s", result)
+	}
+	if !strings.Contains(result, "✓") {
+		t.Errorf("result should contain success icon, got: %s", result)
+	}
+}
+
+func TestFormatLogLine_ClaudeText(t *testing.T) {
+	result := FormatLogLine([]byte(claudeAssistantText))
+	if result == "" {
+		t.Fatal("expected non-empty result for Claude text event")
+	}
+	if !strings.Contains(result, "github.com/baiirun/aetherflow") {
+		t.Errorf("result should contain text, got: %s", result)
+	}
+}
+
+func TestFormatLogLine_ClaudeResult(t *testing.T) {
+	result := FormatLogLine([]byte(claudeResultEvent))
+	if result == "" {
+		t.Fatal("expected non-empty result for Claude result event")
+	}
+	if !strings.Contains(result, "done") {
+		t.Errorf("result should contain done marker, got: %s", result)
+	}
+	if !strings.Contains(result, "5.3s") {
+		t.Errorf("result should contain duration, got: %s", result)
+	}
+	if !strings.Contains(result, "2 turns") {
+		t.Errorf("result should contain turn count, got: %s", result)
+	}
+}
+
+func TestFormatLogLine_ClaudeSystemHidden(t *testing.T) {
+	result := FormatLogLine([]byte(claudeSystemEvent))
+	if result != "" {
+		t.Errorf("Claude system event should be hidden, got: %s", result)
+	}
+}
+
+func TestFormatLogLine_ClaudeUserHidden(t *testing.T) {
+	result := FormatLogLine([]byte(claudeUserToolResult))
+	if result != "" {
+		t.Errorf("Claude user (tool result) event should be hidden, got: %s", result)
+	}
+}
+
 func TestTruncateStr(t *testing.T) {
 	if got := truncateStr("hello", 10); got != "hello" {
 		t.Errorf("short string should not truncate: %q", got)

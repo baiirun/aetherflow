@@ -10,7 +10,7 @@ import (
 // --- Embedded prompt tests (promptDir == "") ---
 
 func TestRenderPromptEmbedded(t *testing.T) {
-	got, err := RenderPrompt("", RoleWorker, "ts-abc123", false)
+	got, err := RenderPrompt("", RoleWorker, "ts-abc123", false, RuntimeOpencode)
 	if err != nil {
 		t.Fatalf("RenderPrompt (embedded) returned error: %v", err)
 	}
@@ -31,7 +31,7 @@ func TestRenderPromptEmbedded(t *testing.T) {
 }
 
 func TestRenderPromptEmbeddedPlanner(t *testing.T) {
-	got, err := RenderPrompt("", RolePlanner, "ts-plan42", false)
+	got, err := RenderPrompt("", RolePlanner, "ts-plan42", false, RuntimeOpencode)
 	if err != nil {
 		t.Fatalf("RenderPrompt (embedded planner) returned error: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestRenderPromptEmbeddedPlanner(t *testing.T) {
 }
 
 func TestRenderPromptEmbeddedUnknownRole(t *testing.T) {
-	_, err := RenderPrompt("", Role("hacker"), "ts-abc123", false)
+	_, err := RenderPrompt("", Role("hacker"), "ts-abc123", false, RuntimeOpencode)
 	if err == nil {
 		t.Fatal("expected error for unknown role, got nil")
 	}
@@ -57,7 +57,7 @@ func TestRenderPromptEmbeddedUnknownRole(t *testing.T) {
 // --- Solo vs Normal mode ---
 
 func TestRenderPromptNormalMode(t *testing.T) {
-	got, err := RenderPrompt("", RoleWorker, "ts-abc123", false)
+	got, err := RenderPrompt("", RoleWorker, "ts-abc123", false, RuntimeOpencode)
 	if err != nil {
 		t.Fatalf("RenderPrompt returned error: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestRenderPromptNormalMode(t *testing.T) {
 }
 
 func TestRenderPromptSoloMode(t *testing.T) {
-	got, err := RenderPrompt("", RoleWorker, "ts-abc123", true)
+	got, err := RenderPrompt("", RoleWorker, "ts-abc123", true, RuntimeOpencode)
 	if err != nil {
 		t.Fatalf("RenderPrompt returned error: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestRenderPromptFilesystemOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := RenderPrompt(dir, RoleWorker, "ts-abc123", false)
+	got, err := RenderPrompt(dir, RoleWorker, "ts-abc123", false, RuntimeOpencode)
 	if err != nil {
 		t.Fatalf("RenderPrompt returned error: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestRenderPromptFilesystemOverride(t *testing.T) {
 func TestRenderPromptFilesystemMissingFile(t *testing.T) {
 	dir := t.TempDir()
 
-	_, err := RenderPrompt(dir, RoleWorker, "ts-abc123", false)
+	_, err := RenderPrompt(dir, RoleWorker, "ts-abc123", false, RuntimeOpencode)
 	if err == nil {
 		t.Fatal("expected error for missing prompt file, got nil")
 	}
@@ -145,11 +145,82 @@ func TestRenderPromptFilesystemUnresolvedVariable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := RenderPrompt(dir, RoleWorker, "ts-abc123", false)
+	_, err := RenderPrompt(dir, RoleWorker, "ts-abc123", false, RuntimeOpencode)
 	if err == nil {
 		t.Fatal("expected error for unresolved template variable, got nil")
 	}
 	if !strings.Contains(err.Error(), "unresolved template variable") {
 		t.Errorf("error should mention unresolved variable, got: %v", err)
+	}
+}
+
+// --- Claude runtime tests ---
+
+func TestRenderPromptClaudeWorker(t *testing.T) {
+	got, err := RenderPrompt("", RoleWorker, "ts-abc123", false, RuntimeClaude)
+	if err != nil {
+		t.Fatalf("RenderPrompt (Claude worker) returned error: %v", err)
+	}
+
+	// Claude worker should NOT contain opencode skill references.
+	if strings.Contains(got, "skill: review-auto") {
+		t.Error("Claude worker should not reference opencode review-auto skill")
+	}
+	if strings.Contains(got, "skill: compound-auto") {
+		t.Error("Claude worker should not reference opencode compound-auto skill")
+	}
+	if strings.Contains(got, "compaction-handoff.ts") {
+		t.Error("Claude worker should not reference opencode compaction plugin")
+	}
+
+	// Claude worker SHOULD contain inline review/compound instructions.
+	if !strings.Contains(got, "Task") {
+		t.Error("Claude worker should contain Task agent instructions for review")
+	}
+	if !strings.Contains(got, "general-purpose") {
+		t.Error("Claude worker should reference general-purpose subagent type")
+	}
+
+	// Standard template variables should still be resolved.
+	if !strings.Contains(got, "ts-abc123") {
+		t.Error("Claude worker should contain the task ID")
+	}
+	if strings.Contains(got, "{{") {
+		t.Error("Claude worker should not contain unresolved template variables")
+	}
+}
+
+func TestRenderPromptClaudePlanner(t *testing.T) {
+	got, err := RenderPrompt("", RolePlanner, "ts-plan42", false, RuntimeClaude)
+	if err != nil {
+		t.Fatalf("RenderPrompt (Claude planner) returned error: %v", err)
+	}
+
+	if !strings.Contains(got, "ts-plan42") {
+		t.Error("Claude planner should contain the task ID")
+	}
+	if strings.Contains(got, "compaction-handoff.ts") {
+		t.Error("Claude planner should not reference opencode compaction plugin")
+	}
+	if strings.Contains(got, "{{") {
+		t.Error("Claude planner should not contain unresolved template variables")
+	}
+}
+
+func TestRenderPromptOpencodeWorkerHasSkills(t *testing.T) {
+	got, err := RenderPrompt("", RoleWorker, "ts-abc123", false, RuntimeOpencode)
+	if err != nil {
+		t.Fatalf("RenderPrompt (opencode worker) returned error: %v", err)
+	}
+
+	// Opencode worker should contain skill references.
+	if !strings.Contains(got, "review-auto") {
+		t.Error("opencode worker should reference review-auto skill")
+	}
+	if !strings.Contains(got, "compound-auto") {
+		t.Error("opencode worker should reference compound-auto skill")
+	}
+	if !strings.Contains(got, "compaction-handoff.ts") {
+		t.Error("opencode worker should reference compaction plugin")
 	}
 }

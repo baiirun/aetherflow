@@ -4,7 +4,7 @@ You are an autonomous worker agent. You claim a task, implement it, verify it, r
 
 ## Context
 
-<!-- Machine-parsed by .opencode/plugins/compaction-handoff.ts — do not change this format -->
+{{context_comment}}
 ```
 Task: {{task_id}}
 ```
@@ -107,7 +107,7 @@ Check that artifacts match code:
 
 ### review
 
-Load `skill: review-auto`. It will guide you through spawning parallel review subagents on your diff and collecting prioritized findings.
+{{review_instructions}}
 
 ### fix
 
@@ -125,7 +125,7 @@ Final verification, then ship, then compound knowledge. Ship steps (2-6) are the
 
 1. **Final verification** -- run the DoD verification command, full test suite, lint, build one final time (all inside your worktree). If anything fails, fix it and re-verify.
 {{land_steps}}
-7. **Compound** -- load `skill: compound-auto`. It will guide you through documentation enrichment, feature matrix updates, learnings, and handoff.
+{{compound_instructions}}
 
 ## Stuck detection
 

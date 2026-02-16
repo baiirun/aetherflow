@@ -12,9 +12,21 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Runtime identifies which agent CLI the daemon uses to spawn sessions.
+type Runtime string
+
+const (
+	// RuntimeOpencode spawns agents via opencode (the default).
+	RuntimeOpencode Runtime = "opencode"
+
+	// RuntimeClaude spawns agents via Claude Code.
+	RuntimeClaude Runtime = "claude"
+)
+
 const (
 	DefaultPoolSize          = 3
 	DefaultSpawnCmd          = "opencode run --format json"
+	DefaultSpawnCmdClaude    = "claude --print --output-format stream-json --verbose --dangerously-skip-permissions"
 	DefaultMaxRetries        = 3
 	DefaultLogDir            = ".aetherflow/logs"
 	DefaultReconcileInterval = 30 * time.Second
@@ -37,6 +49,10 @@ var validTaskID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 //  2. Config file (.aetherflow.yaml)
 //  3. Defaults (lowest priority)
 type Config struct {
+	// Runtime selects the agent CLI used to spawn sessions.
+	// Affects the default spawn command, JSONL log parsing, and prompt rendering.
+	Runtime Runtime `yaml:"runtime"`
+
 	// SocketPath is the Unix socket path for the RPC server.
 	SocketPath string `yaml:"socket_path"`
 
@@ -87,6 +103,9 @@ type Config struct {
 
 // ApplyDefaults fills in zero-valued fields with sensible defaults.
 func (c *Config) ApplyDefaults() {
+	if c.Runtime == "" {
+		c.Runtime = RuntimeOpencode
+	}
 	if c.SocketPath == "" {
 		c.SocketPath = protocol.SocketPathFor(c.Project)
 	}
@@ -97,7 +116,12 @@ func (c *Config) ApplyDefaults() {
 		c.PoolSize = DefaultPoolSize
 	}
 	if c.SpawnCmd == "" {
-		c.SpawnCmd = DefaultSpawnCmd
+		switch c.Runtime {
+		case RuntimeClaude:
+			c.SpawnCmd = DefaultSpawnCmdClaude
+		default:
+			c.SpawnCmd = DefaultSpawnCmd
+		}
 	}
 	if c.MaxRetries == 0 {
 		c.MaxRetries = DefaultMaxRetries
@@ -117,6 +141,12 @@ func (c *Config) ApplyDefaults() {
 // Validate checks that configuration values are valid.
 // Call after ApplyDefaults.
 func (c *Config) Validate() error {
+	switch c.Runtime {
+	case RuntimeOpencode, RuntimeClaude:
+	default:
+		return fmt.Errorf("runtime must be %q or %q, got %q", RuntimeOpencode, RuntimeClaude, c.Runtime)
+	}
+
 	if c.Project == "" {
 		return fmt.Errorf("project is required (use --project or set project in config file)")
 	}
@@ -199,6 +229,9 @@ func LoadConfigFile(path string, into *Config) error {
 // dst has the zero value. This means CLI flags (set on dst before merge)
 // take priority over file values.
 func mergeConfig(src, dst *Config) {
+	if dst.Runtime == "" {
+		dst.Runtime = src.Runtime
+	}
 	if dst.SocketPath == "" {
 		dst.SocketPath = src.SocketPath
 	}

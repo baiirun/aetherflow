@@ -45,8 +45,20 @@ type LogEvent struct {
 }
 
 // FormatLogLine parses a raw JSONL line and returns a human-readable string.
-// Returns empty string for events that should be hidden (e.g. step_start).
+// Auto-detects the log format (opencode vs Claude Code) and dispatches to
+// the appropriate formatter. Returns empty string for events that should
+// be hidden (e.g. step_start, system init).
 func FormatLogLine(raw []byte) string {
+	format := DetectLogFormat(raw)
+	switch format {
+	case LogFormatClaude:
+		return formatClaudeLogLine(raw)
+	default:
+		return formatOpencodeLogLine(raw)
+	}
+}
+
+func formatOpencodeLogLine(raw []byte) string {
 	var ev LogEvent
 	if err := json.Unmarshal(raw, &ev); err != nil {
 		return ""
@@ -65,6 +77,87 @@ func FormatLogLine(raw []byte) string {
 		// step_start, etc. — skip
 		return ""
 	}
+}
+
+// claudeLogEvent is the parse target for Claude Code stream-json formatting.
+type claudeLogEvent struct {
+	Type    string `json:"type"`
+	Subtype string `json:"subtype"`
+	Message struct {
+		Content []struct {
+			Type  string          `json:"type"`
+			Name  string          `json:"name"`
+			Text  string          `json:"text"`
+			Input json.RawMessage `json:"input"`
+		} `json:"content"`
+		Usage struct {
+			OutputTokens              int `json:"output_tokens"`
+			CacheReadInputTokens      int `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens  int `json:"cache_creation_input_tokens"`
+		} `json:"usage"`
+	} `json:"message"`
+	DurationMs int     `json:"duration_ms"`
+	TotalCost  float64 `json:"total_cost_usd"`
+	NumTurns   int     `json:"num_turns"`
+}
+
+func formatClaudeLogLine(raw []byte) string {
+	var ev claudeLogEvent
+	if err := json.Unmarshal(raw, &ev); err != nil {
+		return ""
+	}
+
+	ts := time.Now().Format("15:04:05")
+
+	switch ev.Type {
+	case "assistant":
+		return formatClaudeAssistant(ts, ev)
+	case "result":
+		return formatClaudeResult(ts, ev)
+	default:
+		// system, user (tool results) — skip for display
+		return ""
+	}
+}
+
+func formatClaudeAssistant(ts string, ev claudeLogEvent) string {
+	var parts []string
+
+	for _, block := range ev.Message.Content {
+		switch block.Type {
+		case "text":
+			text := strings.TrimSpace(block.Text)
+			if text != "" {
+				parts = append(parts, fmt.Sprintf("%s%s%s  %s", ansiDim, ts, ansiReset, text))
+			}
+		case "tool_use":
+			input := extractKeyInput(block.Name, block.Input)
+			statusIcon := fmt.Sprintf("%s✓%s", ansiGreen, ansiReset)
+
+			parts = append(parts, fmt.Sprintf("%s%s%s  %s%s%s %s%s",
+				ansiDim, ts, ansiReset,
+				ansiCyan, block.Name, ansiReset,
+				statusIcon,
+				truncateStr(input, 80),
+			))
+		}
+	}
+
+	return strings.Join(parts, "\n")
+}
+
+func formatClaudeResult(ts string, ev claudeLogEvent) string {
+	if ev.DurationMs == 0 && ev.NumTurns == 0 {
+		return ""
+	}
+
+	return fmt.Sprintf("%s%s  ── done ── %s  %d turns  $%.4f%s",
+		ansiDim, ts,
+		formatMs(int64(ev.DurationMs)),
+		ev.NumTurns,
+		ev.TotalCost,
+		ansiReset,
+	)
 }
 
 // ANSI color helpers for terminal output.
