@@ -22,6 +22,12 @@ clear state transitions.
 The daemon (aetherd) must be running for most commands to work.`,
 }
 
+// SetVersion sets the version string shown by --version.
+// Called from main with the value injected by goreleaser ldflags.
+func SetVersion(v string) {
+	rootCmd.Version = v
+}
+
 // Execute runs the root command.
 func Execute() error {
 	return rootCmd.Execute()

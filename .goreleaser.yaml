@@ -1,0 +1,44 @@
+version: 2
+
+builds:
+  - main: ./cmd/af
+    binary: af
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+
+release:
+  github:
+    owner: baiirun
+    name: aetherflow
+
+brews:
+  - name: aetherflow
+    repository:
+      owner: baiirun
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/baiirun/aetherflow"
+    description: "Async runtime for AI agent work scheduling"
+    license: "MIT"
+    install: |
+      bin.install "af"
