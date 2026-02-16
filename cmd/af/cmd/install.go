@@ -78,13 +78,15 @@ func runInstall(cmd *cobra.Command, args []string) {
 		if asJSON {
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
-			enc.Encode(installCheckJSON{
+			if err := enc.Encode(installCheckJSON{
 				Target:   targetDir,
 				UpToDate: writeCount == 0,
 				ToWrite:  writeCount,
 				ToSkip:   skipCount,
 				Executed: false,
-			})
+			}); err != nil {
+				Fatal("failed to encode JSON: %v", err)
+			}
 		}
 		if writeCount > 0 {
 			if !asJSON {
@@ -303,7 +305,8 @@ func emitInstallJSON(targetDir string, actions []install.FileAction, result *ins
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	enc.Encode(out)
+	// Best-effort: stdout write failures are unrecoverable in a CLI.
+	_ = enc.Encode(out)
 }
 
 func init() {

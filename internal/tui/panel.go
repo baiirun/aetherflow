@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/baiirun/aetherflow/internal/client"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/baiirun/aetherflow/internal/client"
 )
 
 // taskDetailMsg carries the result of fetching task detail from prog.

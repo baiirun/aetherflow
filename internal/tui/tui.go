@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/baiirun/aetherflow/internal/client"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/baiirun/aetherflow/internal/client"
 )
 
 // pollInterval is the default interval between daemon status polls.
@@ -46,10 +46,6 @@ var (
 
 	magentaStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("13"))
-
-	selectedStyle = lipgloss.NewStyle().
-			Bold(true).
-			Background(lipgloss.Color("237")) // subtle highlight
 
 	paneHeaderStyle = lipgloss.NewStyle().
 			Bold(true).

@@ -51,7 +51,7 @@ func ParseToolCalls(ctx context.Context, path string, limit int) ([]ToolCall, in
 		}
 		return nil, 0, fmt.Errorf("opening log file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var calls []ToolCall
 	var skipped int
@@ -160,7 +160,7 @@ func ParseSessionID(ctx context.Context, logFile string) (string, error) {
 		}
 		return "", fmt.Errorf("opening log file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
 	if !scanner.Scan() {

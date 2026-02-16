@@ -15,7 +15,7 @@ func TestReadAllLines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	lines, err := readAllLines(f)
 	if err != nil {
@@ -36,7 +36,7 @@ func TestReadAllLinesEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	lines, err := readAllLines(f)
 	if err != nil {
@@ -63,7 +63,7 @@ func TestTailFileLastN(t *testing.T) {
 
 	err := tailFile(path, 3, false, false)
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	if err != nil {
@@ -90,7 +90,7 @@ func TestTailFileAllLines(t *testing.T) {
 
 	err := tailFile(path, 100, false, false)
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	if err != nil {
@@ -152,7 +152,7 @@ func TestLogsFlagAliases(t *testing.T) {
 	}
 
 	// Reset and test --watch flag
-	f.Set("follow", "false")
+	_ = f.Set("follow", "false")
 	if err := f.Set("watch", "true"); err != nil {
 		t.Fatalf("failed to set --watch: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestLogsFlagAliases(t *testing.T) {
 	}
 
 	// Both flags should work with their shorthands
-	f.Set("watch", "false")
+	_ = f.Set("watch", "false")
 	if err := logsCmd.ParseFlags([]string{"-f"}); err != nil {
 		t.Fatalf("failed to parse -f: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestLogsFlagAliases(t *testing.T) {
 		t.Error("-f should set --follow to true")
 	}
 
-	f.Set("follow", "false")
+	_ = f.Set("follow", "false")
 	if err := logsCmd.ParseFlags([]string{"-w"}); err != nil {
 		t.Fatalf("failed to parse -w: %v", err)
 	}

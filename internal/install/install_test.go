@@ -224,7 +224,7 @@ func TestExecuteReadOnlyTarget(t *testing.T) {
 	if err := os.MkdirAll(agentsDir, 0555); err != nil {
 		t.Fatalf("failed to create read-only dir: %v", err)
 	}
-	t.Cleanup(func() { os.Chmod(agentsDir, 0755) })
+	t.Cleanup(func() { _ = os.Chmod(agentsDir, 0755) })
 
 	actions, err := Plan(target)
 	if err != nil {

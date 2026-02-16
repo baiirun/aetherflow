@@ -660,8 +660,8 @@ func TestCrashRetryCountResetsOnSuccess(t *testing.T) {
 func TestSpawnWritesToLogFile(t *testing.T) {
 	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, stdout io.Writer) (Process, error) {
 		// Simulate the process writing to stdout (like opencode --format json).
-		stdout.Write([]byte(`{"event":"tool_use"}`))
-		stdout.Write([]byte("\n"))
+		_, _ = stdout.Write([]byte(`{"event":"tool_use"}`))
+		_, _ = stdout.Write([]byte("\n"))
 		proc, _ := newFakeProcess(1234)
 		return proc, nil
 	}
@@ -822,7 +822,7 @@ func TestRespawnAppendsToSameFile(t *testing.T) {
 	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, stdout io.Writer) (Process, error) {
 		n := spawnCount.Add(1)
 		// Each spawn writes a unique marker to stdout.
-		fmt.Fprintf(stdout, `{"spawn":%d}`+"\n", n)
+		_, _ = fmt.Fprintf(stdout, `{"spawn":%d}`+"\n", n)
 		proc, release := newFakeProcess(int(n) * 100)
 		mu.Lock()
 		procs = append(procs, proc)

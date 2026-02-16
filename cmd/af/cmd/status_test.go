@@ -154,7 +154,7 @@ func TestStatusFlagAliases(t *testing.T) {
 	}
 
 	// Reset and test --follow flag
-	f.Set("watch", "false")
+	_ = f.Set("watch", "false")
 	if err := f.Set("follow", "true"); err != nil {
 		t.Fatalf("failed to set --follow: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestStatusFlagAliases(t *testing.T) {
 	}
 
 	// Both flags should work with their shorthands
-	f.Set("follow", "false")
+	_ = f.Set("follow", "false")
 	if err := statusCmd.ParseFlags([]string{"-w"}); err != nil {
 		t.Fatalf("failed to parse -w: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestStatusFlagAliases(t *testing.T) {
 		t.Error("-w should set --watch to true")
 	}
 
-	f.Set("watch", "false")
+	_ = f.Set("watch", "false")
 	if err := statusCmd.ParseFlags([]string{"-f"}); err != nil {
 		t.Fatalf("failed to parse -f: %v", err)
 	}

@@ -337,8 +337,8 @@ func writeLines(t *testing.T, path string, lines []string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	for _, line := range lines {
-		f.WriteString(line + "\n")
+		_, _ = f.WriteString(line + "\n")
 	}
 }

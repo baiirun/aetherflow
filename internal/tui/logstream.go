@@ -6,9 +6,9 @@ import (
 	"os"
 	"strings"
 
+	"github.com/baiirun/aetherflow/internal/daemon"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/baiirun/aetherflow/internal/daemon"
 )
 
 // logStreamMsg carries newly read log lines from the file.
@@ -183,7 +183,7 @@ func readLogLines(path string, offset int) (*logReadResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)

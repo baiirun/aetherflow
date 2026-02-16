@@ -81,7 +81,7 @@ func New(cfg Config) *Daemon {
 // Run starts the daemon and blocks until shutdown.
 func (d *Daemon) Run() error {
 	// Remove stale socket
-	os.Remove(d.config.SocketPath)
+	_ = os.Remove(d.config.SocketPath)
 
 	listener, err := net.Listen("unix", d.config.SocketPath)
 	if err != nil {
@@ -90,7 +90,7 @@ func (d *Daemon) Run() error {
 	// Restrict socket to owner only — prevents other local users from
 	// issuing RPC commands (especially shutdown) to this daemon.
 	if err := os.Chmod(d.config.SocketPath, 0700); err != nil {
-		listener.Close()
+		_ = listener.Close()
 		return fmt.Errorf("failed to set socket permissions on %s: %w", d.config.SocketPath, err)
 	}
 	d.listener = listener
@@ -111,7 +111,7 @@ func (d *Daemon) Run() error {
 		}
 		d.log.Info("shutting down")
 		cancel()
-		listener.Close()
+		_ = listener.Close()
 	}()
 
 	// Start poll loop and pool if a project is configured.
@@ -164,7 +164,7 @@ func (d *Daemon) Run() error {
 }
 
 func (d *Daemon) handleConnection(ctx context.Context, conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	decoder := json.NewDecoder(conn)
 	encoder := json.NewEncoder(conn)

@@ -156,8 +156,8 @@ func TestPipedOutputDisablesColors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.Pipe: %v", err)
 	}
-	defer r.Close()
-	defer w.Close()
+	defer func() { _ = r.Close() }()
+	defer func() { _ = w.Close() }()
 
 	if isTerminal(w) {
 		t.Error("isTerminal(pipe) = true, want false")

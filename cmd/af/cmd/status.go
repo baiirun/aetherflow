@@ -75,7 +75,7 @@ func runStatusOnce(c *client.Client, args []string, asJSON bool, cmd *cobra.Comm
 	if asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		enc.Encode(status)
+		_ = enc.Encode(status)
 		return
 	}
 
@@ -152,7 +152,7 @@ func runStatusAgent(c *client.Client, agentName string, asJSON bool, cmd *cobra.
 	if asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		enc.Encode(detail)
+		_ = enc.Encode(detail)
 		return
 	}
 

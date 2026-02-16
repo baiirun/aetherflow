@@ -165,7 +165,7 @@ func TestBuildAgentDetailNoLogFile(t *testing.T) {
 	})
 
 	// Delete the log file that spawn created (to simulate no log data).
-	os.Remove(filepath.Join(logDir, "ts-abc.jsonl"))
+	_ = os.Remove(filepath.Join(logDir, "ts-abc.jsonl"))
 
 	agents := pool.Status()
 	agentName := string(agents[0].ID)

@@ -41,7 +41,7 @@ func (c *Client) call(method string, params any, result any) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to aetherd: %w (is aetherd running?)", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	req := Request{Method: method, Params: params}
 	if err := json.NewEncoder(conn).Encode(req); err != nil {

@@ -307,7 +307,7 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 	// for manual recovery.
 	_, err = p.runner(ctx, "prog", "start", task.ID, "-p", p.config.Project)
 	if err != nil {
-		logFile.Close()
+		_ = logFile.Close()
 		p.log.Error("failed to claim task",
 			"task_id", task.ID,
 			"error", err,
@@ -319,7 +319,7 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 
 	proc, err := p.starter(ctx, p.config.SpawnCmd, prompt, string(agentID), logFile)
 	if err != nil {
-		logFile.Close()
+		_ = logFile.Close()
 		p.log.Error("failed to spawn agent",
 			"task_id", task.ID,
 			"agent_id", agentID,
@@ -484,7 +484,7 @@ func (p *Pool) respawn(taskID string, role Role) {
 
 	proc, err := p.starter(p.ctx, p.config.SpawnCmd, prompt, string(agentID), logFile)
 	if err != nil {
-		logFile.Close()
+		_ = logFile.Close()
 		p.log.Error("failed to respawn agent",
 			"task_id", taskID,
 			"agent_id", agentID,
@@ -627,18 +627,18 @@ func (p *Pool) SaveState(path string) error {
 	}
 
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
 		return fmt.Errorf("writing pool state: %w", err)
 	}
 
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
+		_ = os.Remove(tmp.Name())
 		return fmt.Errorf("closing temp file: %w", err)
 	}
 
 	if err := os.Rename(tmp.Name(), path); err != nil {
-		os.Remove(tmp.Name())
+		_ = os.Remove(tmp.Name())
 		return fmt.Errorf("renaming pool state: %w", err)
 	}
 

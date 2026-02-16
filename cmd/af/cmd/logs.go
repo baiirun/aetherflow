@@ -58,7 +58,7 @@ func tailFile(path string, n int, follow, pretty bool) error {
 	if err != nil {
 		return fmt.Errorf("opening log file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Read all lines to get the tail. For agent logs this is fine —
 	// they're bounded by session length and typically < 10k lines.
