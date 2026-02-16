@@ -62,7 +62,7 @@ func TestBuildAgentDetailHappyPath(t *testing.T) {
 
 	// Build the detail.
 	cfg.Runner = runner
-	detail, err := BuildAgentDetail(ctx, pool, cfg, runner, StatusAgentParams{
+	detail, err := BuildAgentDetail(ctx, pool, nil, cfg, runner, StatusAgentParams{
 		AgentName: agentName,
 	})
 	if err != nil {
@@ -113,7 +113,7 @@ func TestBuildAgentDetailAgentNotFound(t *testing.T) {
 	pool := NewPool(cfg, nil, nil, testLogger())
 	pool.ctx = context.Background()
 
-	_, err := BuildAgentDetail(context.Background(), pool, cfg, nil, StatusAgentParams{
+	_, err := BuildAgentDetail(context.Background(), pool, nil, cfg, nil, StatusAgentParams{
 		AgentName: "nonexistent_agent",
 	})
 	if err == nil {
@@ -122,7 +122,7 @@ func TestBuildAgentDetailAgentNotFound(t *testing.T) {
 }
 
 func TestBuildAgentDetailNilPool(t *testing.T) {
-	_, err := BuildAgentDetail(context.Background(), nil, Config{}, nil, StatusAgentParams{
+	_, err := BuildAgentDetail(context.Background(), nil, nil, Config{}, nil, StatusAgentParams{
 		AgentName: "some_agent",
 	})
 	if err == nil {
@@ -170,7 +170,7 @@ func TestBuildAgentDetailNoLogFile(t *testing.T) {
 	agents := pool.Status()
 	agentName := string(agents[0].ID)
 
-	detail, err := BuildAgentDetail(ctx, pool, cfg, runner, StatusAgentParams{
+	detail, err := BuildAgentDetail(ctx, pool, nil, cfg, runner, StatusAgentParams{
 		AgentName: agentName,
 	})
 	if err != nil {
@@ -228,7 +228,7 @@ func TestBuildAgentDetailProgShowFails(t *testing.T) {
 	agents := pool.Status()
 	agentName := string(agents[0].ID)
 
-	detail, err := BuildAgentDetail(ctx, pool, cfg, runner, StatusAgentParams{
+	detail, err := BuildAgentDetail(ctx, pool, nil, cfg, runner, StatusAgentParams{
 		AgentName: agentName,
 	})
 	if err != nil {

@@ -7,5 +7,5 @@ import "embed"
 // Only files passed through RenderPrompt are listed — handoff.md is
 // referenced differently (inlined by agents, not rendered by the daemon).
 //
-//go:embed prompts/worker.md prompts/planner.md
+//go:embed prompts/worker.md prompts/planner.md prompts/spawn.md
 var promptsFS embed.FS

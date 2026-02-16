@@ -222,6 +222,26 @@ func printStatus(s *client.FullStatus) {
 
 	fmt.Println()
 
+	// Show spawned agents (outside the pool).
+	if len(s.Spawns) > 0 {
+		fmt.Printf("%s %s\n", term.Bold("Spawns:"), term.Cyan(fmt.Sprintf("%d running", len(s.Spawns))))
+		width := term.Width(100)
+		promptMax := width - 2 - colID - 1 - colUptime - 2
+		if promptMax < 20 {
+			promptMax = 20
+		}
+		for _, sp := range s.Spawns {
+			uptime := formatUptime(sp.SpawnTime)
+			prompt := truncate(stripANSI(sp.Prompt), promptMax)
+			fmt.Printf("  %s %s  %s\n",
+				term.PadRight(sp.SpawnID, colID, term.Cyan),
+				term.PadLeft(uptime, colUptime, term.Green),
+				term.Dim(quote(prompt)),
+			)
+		}
+		fmt.Println()
+	}
+
 	if len(s.Queue) > 0 {
 		fmt.Printf("%s %s\n", term.Bold("Queue:"), term.Yellowf("%d pending", len(s.Queue)))
 		for _, t := range s.Queue {

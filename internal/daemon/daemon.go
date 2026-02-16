@@ -29,6 +29,7 @@ type Daemon struct {
 	listener net.Listener
 	poller   *Poller
 	pool     *Pool
+	spawns   *SpawnRegistry
 	shutdown chan struct{}
 	log      *slog.Logger
 }
@@ -73,6 +74,7 @@ func New(cfg Config) *Daemon {
 		config:   cfg,
 		poller:   poller,
 		pool:     pool,
+		spawns:   NewSpawnRegistry(),
 		shutdown: make(chan struct{}),
 		log:      log,
 	}
@@ -147,6 +149,9 @@ func (d *Daemon) Run() error {
 		}
 	}
 
+	// Sweep dead spawned agents periodically.
+	go d.sweepSpawns(ctx)
+
 	// Accept connections
 	for {
 		conn, err := listener.Accept()
@@ -160,6 +165,25 @@ func (d *Daemon) Run() error {
 			}
 		}
 		go d.handleConnection(ctx, conn)
+	}
+}
+
+// sweepSpawns periodically removes dead spawned agents from the registry.
+// This runs independently of the reconciler so spawn cleanup works even when
+// the reconciler is disabled (solo mode) or no project is configured.
+func (d *Daemon) sweepSpawns(ctx context.Context) {
+	ticker := time.NewTicker(sweepInterval) // same interval as pool sweep (pool.go)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if removed := d.spawns.SweepDead(); removed > 0 {
+				d.log.Info("spawn sweep: removed dead entries", "count", removed)
+			}
+		}
 	}
 }
 
@@ -197,6 +221,10 @@ func (d *Daemon) handleRequest(ctx context.Context, req *Request) *Response {
 		return d.handlePoolPause()
 	case "pool.resume":
 		return d.handlePoolResume()
+	case "spawn.register":
+		return d.handleSpawnRegister(req.Params)
+	case "spawn.deregister":
+		return d.handleSpawnDeregister(req.Params)
 	case "shutdown":
 		return d.handleShutdown()
 	default:
@@ -226,7 +254,7 @@ func (d *Daemon) handleStatusAgent(ctx context.Context, rawParams json.RawMessag
 	}
 
 	start := time.Now()
-	detail, err := BuildAgentDetail(ctx, d.pool, d.config, d.config.Runner, params)
+	detail, err := BuildAgentDetail(ctx, d.pool, d.spawns, d.config, d.config.Runner, params)
 	if err != nil {
 		return &Response{Success: false, Error: err.Error()}
 	}
@@ -251,7 +279,7 @@ func (d *Daemon) handleStatusAgent(ctx context.Context, rawParams json.RawMessag
 
 func (d *Daemon) handleStatusFull(ctx context.Context) *Response {
 	start := time.Now()
-	status := BuildFullStatus(ctx, d.pool, d.config, d.config.Runner)
+	status := BuildFullStatus(ctx, d.pool, d.spawns, d.config, d.config.Runner)
 
 	d.log.Info("status.full",
 		"agents", len(status.Agents),

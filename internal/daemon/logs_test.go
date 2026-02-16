@@ -94,8 +94,8 @@ func TestHandleLogsPathNilPool(t *testing.T) {
 	if resp.Success {
 		t.Fatal("expected error for nil pool")
 	}
-	if resp.Error != "no pool configured" {
-		t.Errorf("error = %q, want %q", resp.Error, "no pool configured")
+	if resp.Error != `agent "some_agent" not found` {
+		t.Errorf("error = %q, want %q", resp.Error, `agent "some_agent" not found`)
 	}
 }
 
@@ -122,6 +122,39 @@ func TestHandleLogsPathAgentNotFound(t *testing.T) {
 	resp := d.handleLogsPath(params)
 	if resp.Success {
 		t.Fatal("expected error for nonexistent agent")
+	}
+}
+
+func TestHandleLogsPathSpawnFallback(t *testing.T) {
+	spawns := NewSpawnRegistry()
+	_ = spawns.Register(SpawnEntry{
+		SpawnID: "spawn-test_agent",
+		PID:     5678,
+		Prompt:  "fix the tests",
+		LogPath: "/tmp/logs/spawn-test_agent.jsonl",
+	})
+
+	d := &Daemon{
+		config: Config{},
+		pool:   nil, // no pool — spawn registry only
+		spawns: spawns,
+		log:    testLogger(),
+	}
+
+	params, _ := json.Marshal(LogsPathParams{AgentName: "spawn-test_agent"})
+	resp := d.handleLogsPath(params)
+
+	if !resp.Success {
+		t.Fatalf("expected success, got error: %s", resp.Error)
+	}
+
+	var result LogsPathResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	if result.Path != "/tmp/logs/spawn-test_agent.jsonl" {
+		t.Errorf("path = %q, want %q", result.Path, "/tmp/logs/spawn-test_agent.jsonl")
 	}
 }
 

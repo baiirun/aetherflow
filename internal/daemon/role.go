@@ -12,6 +12,7 @@ type Role string
 const (
 	RolePlanner Role = "planner"
 	RoleWorker  Role = "worker"
+	RoleSpawn   Role = "spawn"
 )
 
 // TaskMeta holds task metadata from `prog show --json`.

@@ -291,21 +291,21 @@ func TestFullStatusIncludesPoolMode(t *testing.T) {
 	waitFor(t, func() bool { return len(pool.Status()) == 1 })
 
 	// Active mode.
-	status := BuildFullStatus(ctx, pool, cfg, runner)
+	status := BuildFullStatus(ctx, pool, nil, cfg, runner)
 	if status.PoolMode != PoolActive {
 		t.Errorf("PoolMode = %q, want %q", status.PoolMode, PoolActive)
 	}
 
 	// Drain mode.
 	pool.Drain()
-	status = BuildFullStatus(ctx, pool, cfg, runner)
+	status = BuildFullStatus(ctx, pool, nil, cfg, runner)
 	if status.PoolMode != PoolDraining {
 		t.Errorf("PoolMode = %q, want %q", status.PoolMode, PoolDraining)
 	}
 
 	// Paused mode.
 	pool.Pause()
-	status = BuildFullStatus(ctx, pool, cfg, runner)
+	status = BuildFullStatus(ctx, pool, nil, cfg, runner)
 	if status.PoolMode != PoolPaused {
 		t.Errorf("PoolMode = %q, want %q", status.PoolMode, PoolPaused)
 	}

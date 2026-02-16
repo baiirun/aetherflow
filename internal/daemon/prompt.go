@@ -45,6 +45,36 @@ const (
 
 	landDontsSolo = `- Don't leave your branch unmerged -- in solo mode you are responsible for merging to main.
 - Don't forget to delete the branch after merging -- clean up after yourself.`
+
+	// Spawn-specific landing instructions. These differ from the daemon worker
+	// versions because there's no prog task to mark — the branch/PR is the
+	// only deliverable.
+	spawnLandStepsNormal = `2. **Push your branch** -- from inside your worktree: ` + "`git push -u origin HEAD`" + `. If push fails (no remote configured), that's fine — the branch still exists locally.
+3. **Create PR** -- if push succeeded, create a PR with a clear title and description summarizing the change. If push failed, skip this step.
+4. **Clean up worktree** -- remove your worktree: ` + "`git worktree remove .aetherflow/worktrees/{{spawn_id}}`"
+
+	spawnLandStepsSolo = `2. **Pull latest main** -- before merging, ensure your local main is up to date:
+   ` + "```bash" + `
+   git checkout main
+   git pull origin main
+   ` + "```" + `
+   If pull fails (no remote), that's fine — continue with local state.
+3. **Merge to main** -- from the project root (NOT the worktree):
+   ` + "```bash" + `
+   git merge af/{{spawn_id}} --no-ff -m "Merge af/{{spawn_id}}: <brief summary>"
+   ` + "```" + `
+   If the merge has conflicts, try to resolve them. If conflicts are too complex to resolve cleanly, abort the merge and stop.
+4. **Push main** -- ` + "`git push origin main`" + `. If push fails (no remote), that's fine — the merge is local.
+5. **Clean up** -- remove the branch and worktree:
+   ` + "```bash" + `
+   git worktree remove .aetherflow/worktrees/{{spawn_id}}
+   git branch -d af/{{spawn_id}}
+   ` + "```"
+
+	spawnLandDontsNormal = `- Don't merge your PR -- just create it and let a human review.`
+
+	spawnLandDontsSolo = `- Don't leave your branch unmerged -- in solo mode you are responsible for merging to main.
+- Don't forget to delete the branch after merging -- clean up after yourself.`
 )
 
 // RenderPrompt reads a role prompt template and replaces template variables
@@ -104,6 +134,69 @@ func RenderPrompt(promptDir string, role Role, taskID string, solo bool) (string
 
 	// Catch template typos (e.g., "{{ task_id }}" with spaces) that would
 	// leave unresolved variables in the prompt.
+	if strings.Contains(rendered, "{{") {
+		source := "embedded"
+		if promptDir != "" {
+			source = filepath.Join(promptDir, filename)
+		}
+		return "", fmt.Errorf("unresolved template variable in %s", source)
+	}
+
+	return rendered, nil
+}
+
+// RenderSpawnPrompt reads the spawn prompt template and renders it with the
+// user's freeform prompt and a generated spawn ID.
+//
+// This is the spawn-mode equivalent of RenderPrompt. Instead of a task ID
+// looked up from prog, it takes a user-supplied prompt string that becomes
+// the agent's objective. The spawn ID is used for worktree/branch naming.
+//
+// Recognized variables:
+//   - {{user_prompt}} — the freeform user prompt (the agent's objective)
+//   - {{spawn_id}} — unique identifier for worktree and branch naming
+//   - {{land_steps}} — spawn-specific landing instructions (solo vs normal)
+//   - {{land_donts}} — spawn-specific "what not to do" rules for landing
+func RenderSpawnPrompt(promptDir string, userPrompt string, spawnID string, solo bool) (string, error) {
+	// Reject user prompts containing template markers before substitution.
+	// The replacement order is safe (user_prompt is last), but a prompt
+	// containing "{{" would trigger the unresolved-variable check below
+	// with a confusing error message. Catch it early with a clear message.
+	if strings.Contains(userPrompt, "{{") {
+		return "", fmt.Errorf("user prompt must not contain '{{' (conflicts with template syntax)")
+	}
+
+	const filename = "spawn.md"
+
+	var data []byte
+	var err error
+
+	if promptDir == "" {
+		data, err = fs.ReadFile(promptsFS, "prompts/"+filename)
+		if err != nil {
+			return "", fmt.Errorf("reading embedded prompt %s: %w", filename, err)
+		}
+	} else {
+		path := filepath.Join(promptDir, filename)
+		data, err = os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("reading prompt %s: %w", path, err)
+		}
+	}
+
+	landSteps := spawnLandStepsNormal
+	landDonts := spawnLandDontsNormal
+	if solo {
+		landSteps = spawnLandStepsSolo
+		landDonts = spawnLandDontsSolo
+	}
+
+	rendered := string(data)
+	rendered = strings.ReplaceAll(rendered, "{{land_steps}}", landSteps)
+	rendered = strings.ReplaceAll(rendered, "{{land_donts}}", landDonts)
+	rendered = strings.ReplaceAll(rendered, "{{spawn_id}}", spawnID)
+	rendered = strings.ReplaceAll(rendered, "{{user_prompt}}", userPrompt)
+
 	if strings.Contains(rendered, "{{") {
 		source := "embedded"
 		if promptDir != "" {

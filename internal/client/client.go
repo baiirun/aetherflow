@@ -72,8 +72,18 @@ type FullStatus struct {
 	PoolMode string        `json:"pool_mode"`
 	Project  string        `json:"project"`
 	Agents   []AgentStatus `json:"agents"`
+	Spawns   []SpawnStatus `json:"spawns,omitempty"`
 	Queue    []Task        `json:"queue"`
 	Errors   []string      `json:"errors,omitempty"`
+}
+
+// SpawnStatus is the status of a spawned agent registered with the daemon.
+type SpawnStatus struct {
+	SpawnID   string    `json:"spawn_id"`
+	PID       int       `json:"pid"`
+	Prompt    string    `json:"prompt"`
+	LogPath   string    `json:"log_path"`
+	SpawnTime time.Time `json:"spawn_time"`
 }
 
 // AgentStatus is a single agent's enriched status.
@@ -188,6 +198,29 @@ func (c *Client) PoolResume() (*PoolModeResult, error) {
 		return nil, err
 	}
 	return &result, nil
+}
+
+// SpawnRegisterParams are the parameters for the spawn.register RPC.
+// LogPath is intentionally omitted — the daemon derives it server-side
+// from the spawn ID and its configured log directory.
+type SpawnRegisterParams struct {
+	SpawnID string `json:"spawn_id"`
+	PID     int    `json:"pid"`
+	Prompt  string `json:"prompt"`
+}
+
+// SpawnRegister registers a spawned agent with the daemon for observability.
+// This is best-effort — if the daemon isn't running, the error is returned
+// and the caller can proceed without registration.
+func (c *Client) SpawnRegister(params SpawnRegisterParams) error {
+	return c.call("spawn.register", params, nil)
+}
+
+// SpawnDeregister removes a spawned agent from the daemon's registry.
+func (c *Client) SpawnDeregister(spawnID string) error {
+	return c.call("spawn.deregister", struct {
+		SpawnID string `json:"spawn_id"`
+	}{SpawnID: spawnID}, nil)
 }
 
 // Shutdown stops the daemon.

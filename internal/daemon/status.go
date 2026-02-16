@@ -16,8 +16,18 @@ type FullStatus struct {
 	PoolMode PoolMode      `json:"pool_mode"`
 	Project  string        `json:"project"`
 	Agents   []AgentStatus `json:"agents"`
+	Spawns   []SpawnStatus `json:"spawns,omitempty"`
 	Queue    []Task        `json:"queue"`
 	Errors   []string      `json:"errors,omitempty"`
+}
+
+// SpawnStatus is the status of a spawned agent registered with the daemon.
+type SpawnStatus struct {
+	SpawnID   string    `json:"spawn_id"`
+	PID       int       `json:"pid"`
+	Prompt    string    `json:"prompt"`
+	LogPath   string    `json:"log_path"`
+	SpawnTime time.Time `json:"spawn_time"`
 }
 
 // AgentStatus enriches an Agent with task metadata from prog.
@@ -46,7 +56,7 @@ type taskShowResponse struct {
 // with task metadata from prog. Each prog show call runs in its own goroutine
 // with a per-call timeout. Partial failures are captured in the Errors slice
 // rather than failing the entire request.
-func BuildFullStatus(ctx context.Context, pool *Pool, cfg Config, runner CommandRunner) FullStatus {
+func BuildFullStatus(ctx context.Context, pool *Pool, spawns *SpawnRegistry, cfg Config, runner CommandRunner) FullStatus {
 	status := FullStatus{
 		PoolSize: cfg.PoolSize,
 		Project:  cfg.Project,
@@ -124,6 +134,22 @@ func BuildFullStatus(ctx context.Context, pool *Pool, cfg Config, runner Command
 	}
 	status.Queue = queue
 
+	// Include spawned agents from the registry.
+	if spawns != nil {
+		entries := spawns.List()
+		if len(entries) > 0 {
+			spawned := make([]SpawnStatus, len(entries))
+			for i, e := range entries {
+				spawned[i] = SpawnStatus(e)
+			}
+			// Sort by spawn time, oldest first.
+			sort.Slice(spawned, func(i, j int) bool {
+				return spawned[i].SpawnTime.Before(spawned[j].SpawnTime)
+			})
+			status.Spawns = spawned
+		}
+	}
+
 	return status
 }
 
@@ -145,22 +171,28 @@ const defaultToolCallLimit = 20
 
 // BuildAgentDetail assembles detailed status for a single agent.
 // It fetches task metadata from prog and parses tool calls from the JSONL log.
-func BuildAgentDetail(ctx context.Context, pool *Pool, cfg Config, runner CommandRunner, params StatusAgentParams) (*AgentDetail, error) {
-	if pool == nil {
-		return nil, fmt.Errorf("no pool configured")
-	}
-
+func BuildAgentDetail(ctx context.Context, pool *Pool, spawns *SpawnRegistry, cfg Config, runner CommandRunner, params StatusAgentParams) (*AgentDetail, error) {
 	// Find the agent in the pool by name.
-	agents := pool.Status()
 	var agent *Agent
-	for i := range agents {
-		if string(agents[i].ID) == params.AgentName {
-			agent = &agents[i]
-			break
+	if pool != nil {
+		agents := pool.Status()
+		for i := range agents {
+			if string(agents[i].ID) == params.AgentName {
+				agent = &agents[i]
+				break
+			}
 		}
 	}
+
+	// Check the spawn registry if not found in pool.
+	if agent == nil && spawns != nil {
+		if entry := spawns.Get(params.AgentName); entry != nil {
+			return buildSpawnDetail(ctx, entry, cfg, params)
+		}
+	}
+
 	if agent == nil {
-		return nil, fmt.Errorf("agent %q not found in pool", params.AgentName)
+		return nil, fmt.Errorf("agent %q not found in pool or spawn registry", params.AgentName)
 	}
 
 	detail := &AgentDetail{
@@ -238,6 +270,65 @@ func BuildAgentDetail(ctx context.Context, pool *Pool, cfg Config, runner Comman
 	detail.Errors = errors
 
 	return detail, nil
+}
+
+// maxTitleDisplayRunes is the maximum rune length for prompt display in status views.
+const maxTitleDisplayRunes = 80
+
+// buildSpawnDetail assembles a detail view for a spawned agent.
+// Unlike pool agents, spawned agents don't have a prog task — the prompt is the spec.
+func buildSpawnDetail(ctx context.Context, entry *SpawnEntry, cfg Config, params StatusAgentParams) (*AgentDetail, error) {
+	detail := &AgentDetail{
+		AgentStatus: AgentStatus{
+			ID:        entry.SpawnID,
+			TaskID:    "",
+			Role:      string(RoleSpawn),
+			PID:       entry.PID,
+			SpawnTime: entry.SpawnTime,
+			TaskTitle: truncatePrompt(entry.Prompt, maxTitleDisplayRunes),
+		},
+	}
+
+	limit := params.Limit
+	if limit <= 0 {
+		limit = defaultToolCallLimit
+	}
+
+	// Parse tool calls from JSONL log with a dedicated timeout.
+	toolCtx, toolCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer toolCancel()
+
+	calls, skipped, err := ParseToolCalls(toolCtx, entry.LogPath, limit)
+	if err != nil {
+		detail.Errors = append(detail.Errors, fmt.Sprintf("parsing log %s: %v", entry.LogPath, err))
+	} else {
+		if skipped > 0 {
+			detail.Errors = append(detail.Errors, fmt.Sprintf("skipped %d malformed lines in %s", skipped, entry.LogPath))
+		}
+		detail.ToolCalls = calls
+	}
+
+	// Parse session ID with its own timeout — don't share the tool call timeout.
+	sessCtx, sessCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer sessCancel()
+
+	sessionID, err := ParseSessionID(sessCtx, entry.LogPath)
+	if err != nil {
+		detail.Errors = append(detail.Errors, fmt.Sprintf("parsing session ID from %s: %v", entry.LogPath, err))
+	} else {
+		detail.SessionID = sessionID
+	}
+
+	return detail, nil
+}
+
+// truncatePrompt shortens a user prompt for display in status views.
+func truncatePrompt(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max-1]) + "\u2026"
 }
 
 // fetchTaskSummary calls prog show --json and extracts the title and last log message.

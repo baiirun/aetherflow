@@ -79,7 +79,7 @@ func TestBuildFullStatus(t *testing.T) {
 	cfg := Config{Project: "testproject", PoolSize: 3}
 	runner := statusRunner(showResponses, readyOutput)
 
-	status := BuildFullStatus(context.Background(), pool, cfg, runner)
+	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
 
 	if status.PoolSize != 3 {
 		t.Errorf("PoolSize = %d, want 3", status.PoolSize)
@@ -131,7 +131,7 @@ func TestBuildFullStatusNoAgents(t *testing.T) {
 	readyOutput := "ID           PRI  TITLE\nts-aaa    1    Some task\n"
 	runner := statusRunner(nil, readyOutput)
 
-	status := BuildFullStatus(context.Background(), pool, cfg, runner)
+	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
 
 	if len(status.Agents) != 0 {
 		t.Errorf("Agents count = %d, want 0", len(status.Agents))
@@ -163,7 +163,7 @@ func TestBuildFullStatusProgShowFails(t *testing.T) {
 	pool := statusPool(t, agents)
 	cfg := Config{Project: "testproject", PoolSize: 3}
 
-	status := BuildFullStatus(context.Background(), pool, cfg, runner)
+	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
 
 	// Agent should still appear, but with empty title/log.
 	if len(status.Agents) != 1 {
@@ -218,7 +218,7 @@ func TestBuildFullStatusProgReadyFails(t *testing.T) {
 	pool := statusPool(t, agents)
 	cfg := Config{Project: "testproject", PoolSize: 3}
 
-	status := BuildFullStatus(context.Background(), pool, cfg, runner)
+	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
 
 	// Agents should still be populated.
 	if len(status.Agents) != 1 {
@@ -259,7 +259,7 @@ func TestBuildFullStatusNoLogs(t *testing.T) {
 	pool := statusPool(t, agents)
 	cfg := Config{Project: "testproject", PoolSize: 3}
 
-	status := BuildFullStatus(context.Background(), pool, cfg, runner)
+	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
 
 	if len(status.Agents) != 1 {
 		t.Fatalf("Agents count = %d, want 1", len(status.Agents))
@@ -272,11 +272,50 @@ func TestBuildFullStatusNoLogs(t *testing.T) {
 	}
 }
 
+func TestBuildFullStatusWithSpawns(t *testing.T) {
+	pool := statusPool(t, nil)
+	cfg := Config{Project: "testproject", PoolSize: 3}
+	runner := statusRunner(nil, "ID           PRI  TITLE\n")
+
+	spawns := NewSpawnRegistry()
+	_ = spawns.Register(SpawnEntry{
+		SpawnID:   "spawn-ghost_wolf",
+		PID:       9999,
+		Prompt:    "refactor auth module",
+		LogPath:   "/tmp/logs/spawn-ghost_wolf.jsonl",
+		SpawnTime: time.Now().Add(-5 * time.Minute),
+	})
+	_ = spawns.Register(SpawnEntry{
+		SpawnID:   "spawn-neon_fox",
+		PID:       8888,
+		Prompt:    "fix flaky test",
+		LogPath:   "/tmp/logs/spawn-neon_fox.jsonl",
+		SpawnTime: time.Now().Add(-2 * time.Minute),
+	})
+
+	status := BuildFullStatus(context.Background(), pool, spawns, cfg, runner)
+
+	if len(status.Spawns) != 2 {
+		t.Fatalf("Spawns count = %d, want 2", len(status.Spawns))
+	}
+
+	// Should be sorted by spawn time (oldest first).
+	if status.Spawns[0].SpawnID != "spawn-ghost_wolf" {
+		t.Errorf("Spawns[0].SpawnID = %q, want %q", status.Spawns[0].SpawnID, "spawn-ghost_wolf")
+	}
+	if status.Spawns[0].Prompt != "refactor auth module" {
+		t.Errorf("Spawns[0].Prompt = %q, want %q", status.Spawns[0].Prompt, "refactor auth module")
+	}
+	if status.Spawns[1].SpawnID != "spawn-neon_fox" {
+		t.Errorf("Spawns[1].SpawnID = %q, want %q", status.Spawns[1].SpawnID, "spawn-neon_fox")
+	}
+}
+
 func TestBuildFullStatusNilPool(t *testing.T) {
 	cfg := Config{Project: "testproject", PoolSize: 3}
 	runner := statusRunner(nil, "")
 
-	status := BuildFullStatus(context.Background(), nil, cfg, runner)
+	status := BuildFullStatus(context.Background(), nil, nil, cfg, runner)
 
 	if len(status.Agents) != 0 {
 		t.Errorf("Agents count = %d, want 0", len(status.Agents))
