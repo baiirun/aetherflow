@@ -1,4 +1,4 @@
-module github.com/geobrowser/aetherflow
+module github.com/baiirun/aetherflow
 
 go 1.25.5
 

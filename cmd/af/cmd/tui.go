@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/geobrowser/aetherflow/internal/tui"
+	"github.com/baiirun/aetherflow/internal/tui"
 	"github.com/spf13/cobra"
 )
 

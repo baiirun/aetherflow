@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/geobrowser/aetherflow/internal/protocol"
-	"github.com/geobrowser/aetherflow/internal/term"
+	"github.com/baiirun/aetherflow/internal/protocol"
+	"github.com/baiirun/aetherflow/internal/term"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )

@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/geobrowser/aetherflow/internal/install"
-	"github.com/geobrowser/aetherflow/internal/term"
+	"github.com/baiirun/aetherflow/internal/install"
+	"github.com/baiirun/aetherflow/internal/term"
 	"github.com/spf13/cobra"
 )
 

@@ -8,7 +8,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/geobrowser/aetherflow/internal/daemon"
+	"github.com/baiirun/aetherflow/internal/daemon"
 )
 
 // logStreamMsg carries newly read log lines from the file.

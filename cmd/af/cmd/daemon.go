@@ -6,8 +6,8 @@ import (
 	"os/exec"
 	"syscall"
 
-	"github.com/geobrowser/aetherflow/internal/client"
-	"github.com/geobrowser/aetherflow/internal/daemon"
+	"github.com/baiirun/aetherflow/internal/client"
+	"github.com/baiirun/aetherflow/internal/daemon"
 	"github.com/spf13/cobra"
 )
 

@@ -13,7 +13,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/geobrowser/aetherflow/internal/client"
+	"github.com/baiirun/aetherflow/internal/client"
 )
 
 // pollInterval is the default interval between daemon status polls.

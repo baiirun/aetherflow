@@ -7,7 +7,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/geobrowser/aetherflow/internal/protocol"
+	"github.com/baiirun/aetherflow/internal/protocol"
 )
 
 // Client communicates with the aetherd daemon.

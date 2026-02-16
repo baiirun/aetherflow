@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/geobrowser/aetherflow/internal/protocol"
+	"github.com/baiirun/aetherflow/internal/protocol"
 )
 
 // PoolMode controls pool scheduling behavior.

@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/geobrowser/aetherflow/internal/protocol"
+	"github.com/baiirun/aetherflow/internal/protocol"
 	"gopkg.in/yaml.v3"
 )
 

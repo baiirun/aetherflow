@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geobrowser/aetherflow/internal/protocol"
+	"github.com/baiirun/aetherflow/internal/protocol"
 )
 
 // testConfigPromptDir creates a temp directory with worker.md for config validation tests

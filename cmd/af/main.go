@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/geobrowser/aetherflow/cmd/af/cmd"
+	"github.com/baiirun/aetherflow/cmd/af/cmd"
 )
 
 // version is set by goreleaser via ldflags at build time.

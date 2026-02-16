@@ -7,7 +7,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/geobrowser/aetherflow/internal/client"
+	"github.com/baiirun/aetherflow/internal/client"
 )
 
 // taskDetailMsg carries the result of fetching task detail from prog.

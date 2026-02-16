@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/geobrowser/aetherflow/internal/client"
-	"github.com/geobrowser/aetherflow/internal/term"
+	"github.com/baiirun/aetherflow/internal/client"
+	"github.com/baiirun/aetherflow/internal/term"
 	"github.com/spf13/cobra"
 )
 
