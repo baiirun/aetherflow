@@ -47,6 +47,85 @@ Introduce a server-first session model in phases:
 - `af resume` already exists for pool mode control: `cmd/af/cmd/pool_control.go:54`.
 - Prog coupling hotspots: `internal/daemon/poll.go:151`, `internal/daemon/reconcile.go:85`, `internal/daemon/reconcile.go:131`, `internal/daemon/status.go:343`.
 
+### Server-first observability findings (2026-02-16 spike)
+
+Tested opencode 1.2.6 in `serve` mode on `http://127.0.0.1:4097`.
+
+#### JSONL stdout is dead in attach mode
+
+`opencode run --attach <url> --format json "prompt"` produces **zero bytes to stdout**. The `--format json` flag has no effect when `--attach` is used. This means:
+
+- `ParseSessionID` (polls JSONL log file for `sessionID`) never finds data.
+- `ParseToolCalls` (reads JSONL for tool_use events) returns empty.
+- `FormatLogLine` (used by `af logs` and TUI log stream) has nothing to format.
+- `captureSessionFromLog` (goroutine polling log file) exhausts retries silently.
+
+All event data is delivered exclusively through the server's SSE stream and REST API.
+
+#### SSE event stream (`GET /event`)
+
+Server-scoped (not session-scoped). Returns `text/event-stream` with these event types:
+
+| Event type | Payload | Frequency |
+|---|---|---|
+| `server.connected` | `{}` | Once on connect |
+| `session.created` | `properties.info.id`, full session metadata | Once per session |
+| `session.updated` | Full session metadata (title, summary, etc.) | Multiple per session |
+| `session.status` | `properties.sessionID`, `status.type` (`busy`, `idle`, `retry`) | Frequent |
+| `message.updated` | Full message info (role, tokens, cost, model) | Per message |
+| `message.part.updated` | `properties.part` (text, tool call data) | Per part |
+| `session.diff` | File diff data | Per step |
+
+Session ID appears in the first `session.created` event as `properties.info.id` (format: `ses_<id>`).
+
+**Limitations:** No backfill — only events after the SSE connection opens. No per-session filtering — all sessions on the server emit to the same stream.
+
+#### REST API endpoints
+
+The server exposes a REST API alongside the web UI (SPA fallback catches unknown routes):
+
+| Endpoint | Method | Returns |
+|---|---|---|
+| `/session` | GET | List all sessions (JSON array) |
+| `/session/:id` | GET | Session metadata (title, timestamps, permissions) |
+| `/session/:id/message` | GET | Full message tree with parts (text, tool, step-finish) |
+| `/session` | POST | Create session, returns `{id, slug, ...}` |
+| `/event` | GET | SSE event stream |
+
+`GET /session/:id/message` returns the same structured data as the SQLite `part.data` column. Tool parts include: `tool`, `state.status`, `state.input`, `state.output`, `state.time.start/end`, `state.title`. This is equivalent to what `ParseToolCalls` extracts from JSONL, but richer (includes output text).
+
+Tested with historical sessions: a 375-tool-call session returned 4.5MB of JSON. Response size is proportional to session activity.
+
+**Endpoints that return SPA fallback (not API):** `/health`, `/stats`, `/config`, `/session/:id/status`, `/session/:id/summary`, `/session/:id/export`, `/session/:id/part`.
+
+#### SQLite database (`~/.local/share/opencode/opencode.db`)
+
+Schema: `session`, `message`, `part`, `project`, `permission`, `todo`, `control_account`, `session_share`.
+
+- `part.data` is a JSON column with `type` field: `text`, `tool`, `step-start`, `step-finish`, `patch`, `file`, `compaction`, `reasoning`, `agent`, `subtask`.
+- Tool parts match the REST API shape exactly (the server reads from this DB).
+- WAL mode, safe for concurrent reads.
+- Global scope — all projects on the machine share one DB.
+- `opencode export <session-id>` CLI reads this DB directly (works without a running server).
+
+#### CLI mechanisms
+
+- `opencode export <session-id>` — dumps session as JSON (same shape as `/session/:id/message`). No server needed.
+- `opencode session list` — lists sessions. No server needed.
+- `opencode attach <url>` — TUI attached to a running server. Supports `--session <id>` for resuming.
+
+#### Observability mechanism comparison
+
+| Need | JSONL (current) | SSE | REST API | SQLite |
+|---|---|---|---|---|
+| Session ID capture | Dead in attach mode | `session.created` event | `POST /session` response | Query by recency |
+| Live tool call stream | Dead in attach mode | `message.part.updated` | Poll `/session/:id/message` | Poll query |
+| Tool call history | N/A | No backfill | Full history | Full history |
+| Session status | Dead in attach mode | `session.status` events | `GET /session/:id` | Query DB |
+| Cost/tokens | Dead in attach mode | `message.updated` events | In message info | In message data |
+
+**Recommendation:** Use the REST API as the primary observability mechanism. It provides both real-time polling and historical data, is session-scoped, and returns structured tool data matching what `ParseToolCalls` and `FormatLogLine` already consume. SSE supplements for truly real-time streaming (TUI follow mode). JSONL log files should be retired from the observability path.
+
 ### External decision
 
 No additional external research required for this plan. We already validated opencode behavior directly with local spikes and have a matching architecture reference from Ramp's background agent writeup.
@@ -125,7 +204,7 @@ Add daemon-managed opencode server lifecycle support:
 
 Replace ad-hoc `spawn_cmd` string handling with a structured launch builder that supports:
 
-- Server-first launch: `opencode run --attach <url> --format json`
+- Server-first launch: `opencode run --attach <url>` (note: `--format json` has no effect in attach mode — stdout is empty; observability comes from the server's REST API and SSE stream instead)
 - Resume path: add `--session <id>` when needed
 
 This reduces brittle command mutation in `pool.go` and `spawn.go`.
@@ -141,12 +220,12 @@ Keep prog as the first adapter implementation.
 
 Goal: ship user-visible value quickly with low complexity.
 
-- Replace daemon/spawn launch paths with server-first attach launch (`opencode run --attach <url> --format json`).
+- Replace daemon/spawn launch paths with server-first attach launch (`opencode run --attach <url>`).
 - Remove legacy standalone launch path from daemon/spawn flows.
 - Add minimal global session registry package and persistence.
-- Register sessions from launch handshake/output events; JSONL remains observability fallback only.
+- Capture session ID from `session.created` SSE event or `POST /session` API response (JSONL stdout is empty in attach mode — cannot be used as a fallback).
+- Replace JSONL-based observability (`ParseToolCalls`, `ParseSessionID`, `FormatLogLine`, `af logs` file tailing, TUI `readLogLines`) with server REST API queries (`GET /session/:id/message`). SSE stream supplements for real-time follow mode.
 - Add `af sessions` + `af session attach <session-id>` (plus disambiguation when `session_id` collides across `server_ref`).
-- Keep JSONL log capture and status/log display behavior compatible.
 
 Acceptance target: users can discover and attach/detach sessions while server-first is the only runtime path.
 
@@ -165,9 +244,9 @@ Acceptance target: server-first runtime is robust under failure, multi-actor acc
 - [x] Global session registry persists and resolves routing metadata with canonical key `{server_ref, session_id}`.
 - [x] Registry writes are atomic and safe under concurrent daemon/CLI access.
 - [x] Server-first launch is the only runtime path for daemon and spawn flows.
-- [x] JSONL-based status/logs continue to work with server-first launch.
+- [ ] Status/logs (`af status`, `af logs`, TUI) work with server-first launch via REST API polling (`GET /session/:id/message`) replacing JSONL log file reads. (JSONL stdout is empty in attach mode — original assumption was wrong.)
 - [x] Attach/detach works on active sessions without ending the underlying session.
-- [x] Session identity is captured from launch handshake/output events, with tolerant fallback parsing when needed.
+- [ ] Session identity is captured from server API (`session.created` SSE event or `POST /session` response) rather than JSONL log parsing. (JSONL-based `ParseSessionID` cannot work in attach mode.)
 - [x] Minimal WorkSource boundary is in place before deeper session lifecycle refactors.
 - [ ] Security controls exist for attach targets and credentials (permissions, redaction, validation, URL trust policy).
 - [ ] Plan defines explicit release rollback path.
@@ -189,6 +268,11 @@ Acceptance target: server-first runtime is robust under failure, multi-actor acc
 ### Remote server auth/config leakage
 
 - Mitigation: strict redaction in logs, secure file modes (`0700` dirs, `0600` files), env-based secret ingestion, trusted URL policy.
+
+### Server API unavailability for observability
+
+- Since status/logs now depend on the opencode server API instead of local log files, a server crash or network issue makes observability data unavailable.
+- Mitigation: the daemon should cache the last-known session state and tool call summary in memory. If the server API is unreachable, `af status` falls back to cached data with a staleness indicator. Historical data remains available via SQLite (`~/.local/share/opencode/opencode.db`) as a last resort.
 
 ### UX ambiguity from command collisions
 
@@ -235,6 +319,17 @@ Acceptance target: server-first runtime is robust under failure, multi-actor acc
 - `cmd/af/cmd/pool_control.go:54`
 - `internal/daemon/poll.go:151`
 - `internal/daemon/reconcile.go:85`
+
+Observability code affected by JSONL→API migration:
+
+- `internal/daemon/jsonl.go` — `ParseSessionID`, `ParseToolCalls` (both dead in attach mode)
+- `internal/daemon/logfmt.go` — `FormatLogLine` (needs input from API instead of JSONL)
+- `internal/daemon/status.go:239-268` — `BuildAgentDetail` calls `ParseToolCalls` + `ParseSessionID` on log files
+- `internal/daemon/status.go:300-326` — `buildSpawnDetail` same pattern
+- `internal/daemon/pool.go:556-616` — `captureSessionFromLog` polls log file for session ID
+- `internal/daemon/spawn_rpc.go:112-149` — `captureSpawnSession` same pattern
+- `cmd/af/cmd/logs.go` — `tailFile` reads/follows JSONL log file directly
+- `internal/tui/logstream.go` — `readLogLines` reads JSONL log file for TUI
 
 ### External
 
