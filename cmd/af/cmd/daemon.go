@@ -21,11 +21,13 @@ var daemonCmd = &cobra.Command{
 		status, err := c.StatusFull()
 		if err != nil {
 			fmt.Println("not running")
-			fmt.Println("\nTo start: af daemon start --project <name>")
+			fmt.Println("\nTo start:")
+			fmt.Println("  af daemon start --project <name>                 # auto mode")
+			fmt.Println("  af daemon start --spawn-policy manual --socket <path>  # manual mode")
 			return
 		}
 
-		fmt.Printf("running (pool: %d, project: %s)\n", status.PoolSize, status.Project)
+		fmt.Printf("running (pool: %d, project: %s, spawn-policy: %s)\n", status.PoolSize, status.Project, status.SpawnPolicy)
 	},
 }
 
@@ -76,6 +78,10 @@ func buildConfig(cmd *cobra.Command) daemon.Config {
 	if cmd.Flags().Changed("spawn-cmd") {
 		cfg.SpawnCmd, _ = cmd.Flags().GetString("spawn-cmd")
 	}
+	if cmd.Flags().Changed("spawn-policy") {
+		policy, _ := cmd.Flags().GetString("spawn-policy")
+		cfg.SpawnPolicy = daemon.SpawnPolicy(policy)
+	}
 	if cmd.Flags().Changed("max-retries") {
 		cfg.MaxRetries, _ = cmd.Flags().GetInt("max-retries")
 	}
@@ -110,7 +116,7 @@ func startDetached(cmd *cobra.Command) {
 
 	// Forward all flags except --detach.
 	reArgs := []string{"daemon", "start"}
-	for _, name := range []string{"project", "socket", "poll-interval", "pool-size", "spawn-cmd", "max-retries", "solo", "config"} {
+	for _, name := range []string{"project", "socket", "poll-interval", "pool-size", "spawn-cmd", "spawn-policy", "max-retries", "solo", "config"} {
 		if cmd.Flags().Changed(name) {
 			val, _ := cmd.Flags().GetString(name)
 			// Duration and int flags also work with GetString via pflag.
@@ -153,10 +159,11 @@ func init() {
 
 	f := daemonStartCmd.Flags()
 	f.BoolP("detach", "d", false, "Run in background")
-	f.StringP("project", "p", "", "Project to watch for tasks (required)")
+	f.StringP("project", "p", "", "Project to watch for tasks (required for --spawn-policy=auto)")
 	f.Duration("poll-interval", daemon.DefaultPollInterval, "How often to poll prog for tasks")
 	f.Int("pool-size", daemon.DefaultPoolSize, "Maximum concurrent agent slots")
 	f.String("spawn-cmd", daemon.DefaultSpawnCmd, "Command to launch agent sessions")
+	f.String("spawn-policy", string(daemon.DefaultSpawnPolicy), "Daemon spawn policy: auto (schedule from prog) or manual (spawn-only)")
 	f.Int("max-retries", daemon.DefaultMaxRetries, "Max crash respawns per task")
 	f.Bool("solo", false, "Solo mode: agents merge to main directly instead of creating PRs")
 	f.String("config", "", "Config file path (default: .aetherflow.yaml)")

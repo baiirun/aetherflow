@@ -12,13 +12,14 @@ import (
 // FullStatus is the response for the status.full RPC method.
 // It enriches the live pool data with task metadata from prog.
 type FullStatus struct {
-	PoolSize int           `json:"pool_size"`
-	PoolMode PoolMode      `json:"pool_mode"`
-	Project  string        `json:"project"`
-	Agents   []AgentStatus `json:"agents"`
-	Spawns   []SpawnStatus `json:"spawns,omitempty"`
-	Queue    []Task        `json:"queue"`
-	Errors   []string      `json:"errors,omitempty"`
+	PoolSize    int           `json:"pool_size"`
+	PoolMode    PoolMode      `json:"pool_mode"`
+	Project     string        `json:"project"`
+	SpawnPolicy SpawnPolicy   `json:"spawn_policy"`
+	Agents      []AgentStatus `json:"agents"`
+	Spawns      []SpawnStatus `json:"spawns,omitempty"`
+	Queue       []Task        `json:"queue"`
+	Errors      []string      `json:"errors,omitempty"`
 }
 
 // SpawnStatus is the status of a spawned agent registered with the daemon.
@@ -57,82 +58,86 @@ type taskShowResponse struct {
 // with a per-call timeout. Partial failures are captured in the Errors slice
 // rather than failing the entire request.
 func BuildFullStatus(ctx context.Context, pool *Pool, spawns *SpawnRegistry, cfg Config, runner CommandRunner) FullStatus {
+	policy := cfg.SpawnPolicy
+	if policy == "" {
+		policy = DefaultSpawnPolicy
+	}
+
 	status := FullStatus{
-		PoolSize: cfg.PoolSize,
-		Project:  cfg.Project,
+		PoolSize:    cfg.PoolSize,
+		Project:     cfg.Project,
+		SpawnPolicy: policy,
 	}
 
-	if pool == nil {
-		return status
-	}
+	if pool != nil {
+		status.PoolMode = pool.Mode()
 
-	status.PoolMode = pool.Mode()
-
-	agents := pool.Status()
-
-	// Enrich each agent with task metadata from prog, and fetch the
-	// pending queue, all in parallel. Partial failures are collected
-	// in the errors slice rather than failing the entire request.
-	enriched := make([]AgentStatus, len(agents))
-	var mu sync.Mutex
-	var errors []string
-	var wg sync.WaitGroup
-
-	for i, agent := range agents {
-		enriched[i] = AgentStatus{
-			ID:        string(agent.ID),
-			TaskID:    agent.TaskID,
-			Role:      string(agent.Role),
-			PID:       agent.PID,
-			SpawnTime: agent.SpawnTime,
+		agents := pool.Status()
+		enriched := make([]AgentStatus, len(agents))
+		for i, agent := range agents {
+			enriched[i] = AgentStatus{
+				ID:        string(agent.ID),
+				TaskID:    agent.TaskID,
+				Role:      string(agent.Role),
+				PID:       agent.PID,
+				SpawnTime: agent.SpawnTime,
+			}
 		}
 
-		wg.Add(1)
-		go func(idx int, taskID string) {
-			defer wg.Done()
+		// In manual mode, status must be prog-optional. Return pool snapshots
+		// only and skip all prog-dependent enrichment/queue calls.
+		if policy != SpawnPolicyManual {
+			var mu sync.Mutex
+			var errors []string
+			var wg sync.WaitGroup
 
-			callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			defer cancel()
+			for i, agent := range agents {
+				wg.Add(1)
+				go func(idx int, taskID string) {
+					defer wg.Done()
 
-			title, lastLog, err := fetchTaskSummary(callCtx, taskID, cfg.Project, runner)
-			if err != nil {
-				mu.Lock()
-				errors = append(errors, fmt.Sprintf("prog show %s: %v", taskID, err))
-				mu.Unlock()
-				return
+					callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+					defer cancel()
+
+					title, lastLog, err := fetchTaskSummary(callCtx, taskID, cfg.Project, runner)
+					if err != nil {
+						mu.Lock()
+						errors = append(errors, fmt.Sprintf("prog show %s: %v", taskID, err))
+						mu.Unlock()
+						return
+					}
+
+					// No lock needed — each goroutine writes to its own index.
+					enriched[idx].TaskTitle = title
+					enriched[idx].LastLog = lastLog
+				}(i, agent.TaskID)
 			}
 
-			// No lock needed — each goroutine writes to its own index.
-			enriched[idx].TaskTitle = title
-			enriched[idx].LastLog = lastLog
-		}(i, agent.TaskID)
+			// Fetch the pending queue concurrently with agent enrichment.
+			var queue []Task
+			var queueErr error
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				queueCtx, queueCancel := context.WithTimeout(ctx, 5*time.Second)
+				defer queueCancel()
+				queue, queueErr = fetchQueue(queueCtx, cfg.Project, runner)
+			}()
+
+			wg.Wait()
+			status.Errors = errors
+			if queueErr != nil {
+				status.Errors = append(status.Errors, fmt.Sprintf("prog ready: %v", queueErr))
+			}
+			status.Queue = queue
+		}
+
+		// Sort by spawn time, oldest first — stable ordering for humans.
+		sort.Slice(enriched, func(i, j int) bool {
+			return enriched[i].SpawnTime.Before(enriched[j].SpawnTime)
+		})
+		status.Agents = enriched
 	}
-
-	// Fetch the pending queue concurrently with agent enrichment.
-	var queue []Task
-	var queueErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		queueCtx, queueCancel := context.WithTimeout(ctx, 5*time.Second)
-		defer queueCancel()
-		queue, queueErr = fetchQueue(queueCtx, cfg.Project, runner)
-	}()
-
-	wg.Wait()
-
-	// Sort by spawn time, oldest first — stable ordering for humans.
-	sort.Slice(enriched, func(i, j int) bool {
-		return enriched[i].SpawnTime.Before(enriched[j].SpawnTime)
-	})
-
-	status.Agents = enriched
-	status.Errors = errors
-
-	if queueErr != nil {
-		status.Errors = append(status.Errors, fmt.Sprintf("prog ready: %v", queueErr))
-	}
-	status.Queue = queue
 
 	// Include spawned agents from the registry.
 	if spawns != nil {

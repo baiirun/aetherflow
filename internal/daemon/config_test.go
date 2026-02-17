@@ -37,6 +37,9 @@ func TestConfigApplyDefaults(t *testing.T) {
 	if cfg.SpawnCmd != DefaultSpawnCmd {
 		t.Errorf("SpawnCmd = %q, want %q", cfg.SpawnCmd, DefaultSpawnCmd)
 	}
+	if cfg.SpawnPolicy != DefaultSpawnPolicy {
+		t.Errorf("SpawnPolicy = %q, want %q", cfg.SpawnPolicy, DefaultSpawnPolicy)
+	}
 	if cfg.MaxRetries != DefaultMaxRetries {
 		t.Errorf("MaxRetries = %d, want %d", cfg.MaxRetries, DefaultMaxRetries)
 	}
@@ -65,6 +68,7 @@ func TestConfigApplyDefaultsPreservesExisting(t *testing.T) {
 		PollInterval: 30 * time.Second,
 		PoolSize:     5,
 		SpawnCmd:     "custom-cmd",
+		SpawnPolicy:  SpawnPolicyManual,
 		MaxRetries:   10,
 		PromptDir:    "/custom/prompts",
 	}
@@ -81,6 +85,9 @@ func TestConfigApplyDefaultsPreservesExisting(t *testing.T) {
 	}
 	if cfg.SpawnCmd != "custom-cmd" {
 		t.Errorf("SpawnCmd = %q, want %q", cfg.SpawnCmd, "custom-cmd")
+	}
+	if cfg.SpawnPolicy != SpawnPolicyManual {
+		t.Errorf("SpawnPolicy = %q, want %q", cfg.SpawnPolicy, SpawnPolicyManual)
 	}
 	if cfg.MaxRetries != 10 {
 		t.Errorf("MaxRetries = %d, want %d", cfg.MaxRetries, 10)
@@ -99,9 +106,32 @@ func TestConfigValidate(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "missing project",
-			cfg:     Config{PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
-			wantErr: "project is required",
+			name:    "missing project in auto mode",
+			cfg:     Config{PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", SpawnPolicy: SpawnPolicyAuto},
+			wantErr: "project is required when spawn-policy is",
+		},
+		{
+			name: "missing project in manual mode without socket",
+			cfg: Config{
+				PollInterval:      time.Second,
+				PoolSize:          1,
+				SpawnCmd:          "cmd",
+				SpawnPolicy:       SpawnPolicyManual,
+				ReconcileInterval: DefaultReconcileInterval,
+			},
+			wantErr: "socket-path is required when spawn-policy is",
+		},
+		{
+			name: "missing project in manual mode with explicit socket",
+			cfg: Config{
+				SocketPath:        "/tmp/aetherd-manual-test.sock",
+				PollInterval:      time.Second,
+				PoolSize:          1,
+				SpawnCmd:          "cmd",
+				SpawnPolicy:       SpawnPolicyManual,
+				ReconcileInterval: DefaultReconcileInterval,
+			},
+			wantErr: "",
 		},
 		{
 			name:    "project with slashes",
@@ -144,6 +174,11 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: "spawn-cmd must not be empty",
 		},
 		{
+			name:    "invalid spawn policy",
+			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", SpawnPolicy: "sometimes"},
+			wantErr: "spawn-policy must be one of",
+		},
+		{
 			name:    "negative max retries",
 			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", MaxRetries: -1, ReconcileInterval: DefaultReconcileInterval},
 			wantErr: "max-retries must be non-negative",
@@ -165,6 +200,7 @@ func TestConfigValidate(t *testing.T) {
 				PollInterval:      10 * time.Second,
 				PoolSize:          3,
 				SpawnCmd:          "opencode run",
+				SpawnPolicy:       SpawnPolicyAuto,
 				MaxRetries:        3,
 				ReconcileInterval: DefaultReconcileInterval,
 				// PromptDir empty — uses embedded prompts.
@@ -178,6 +214,7 @@ func TestConfigValidate(t *testing.T) {
 				PollInterval:      10 * time.Second,
 				PoolSize:          3,
 				SpawnCmd:          "opencode run",
+				SpawnPolicy:       SpawnPolicyManual,
 				MaxRetries:        3,
 				ReconcileInterval: DefaultReconcileInterval,
 				PromptDir:         promptDir,
@@ -191,6 +228,7 @@ func TestConfigValidate(t *testing.T) {
 				PollInterval:      time.Second,
 				PoolSize:          1,
 				SpawnCmd:          "cmd",
+				SpawnPolicy:       SpawnPolicyAuto,
 				MaxRetries:        0,
 				ReconcileInterval: DefaultReconcileInterval,
 			},
@@ -229,6 +267,17 @@ func TestConfigValidateAfterDefaults(t *testing.T) {
 	}
 }
 
+func TestConfigValidateManualWithoutProjectRequiresSocket(t *testing.T) {
+	cfg := Config{
+		SpawnPolicy: SpawnPolicyManual,
+	}
+	cfg.ApplyDefaults()
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for manual mode without project/socket, got nil")
+	}
+}
+
 func TestLoadConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".aetherflow.yaml")
@@ -238,6 +287,7 @@ socket_path: /tmp/custom.sock
 poll_interval: 30s
 pool_size: 5
 spawn_cmd: custom-agent
+spawn_policy: manual
 max_retries: 7
 prompt_dir: /custom/prompts
 `
@@ -265,6 +315,9 @@ prompt_dir: /custom/prompts
 	if cfg.SpawnCmd != "custom-agent" {
 		t.Errorf("SpawnCmd = %q, want %q", cfg.SpawnCmd, "custom-agent")
 	}
+	if cfg.SpawnPolicy != SpawnPolicyManual {
+		t.Errorf("SpawnPolicy = %q, want %q", cfg.SpawnPolicy, SpawnPolicyManual)
+	}
 	if cfg.MaxRetries != 7 {
 		t.Errorf("MaxRetries = %d, want %d", cfg.MaxRetries, 7)
 	}
@@ -280,6 +333,7 @@ func TestLoadConfigFileFlagOverride(t *testing.T) {
 	yaml := `project: from-file
 pool_size: 10
 spawn_cmd: file-cmd
+spawn_policy: manual
 `
 	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
 		t.Fatal(err)
@@ -306,6 +360,9 @@ spawn_cmd: file-cmd
 	// File values should fill gaps.
 	if cfg.SpawnCmd != "file-cmd" {
 		t.Errorf("SpawnCmd = %q, want %q (should come from file)", cfg.SpawnCmd, "file-cmd")
+	}
+	if cfg.SpawnPolicy != SpawnPolicyManual {
+		t.Errorf("SpawnPolicy = %q, want %q (should come from file)", cfg.SpawnPolicy, SpawnPolicyManual)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -87,6 +88,9 @@ func TestBuildFullStatus(t *testing.T) {
 	if status.Project != "testproject" {
 		t.Errorf("Project = %q, want %q", status.Project, "testproject")
 	}
+	if status.SpawnPolicy != SpawnPolicyAuto {
+		t.Errorf("SpawnPolicy = %q, want %q", status.SpawnPolicy, SpawnPolicyAuto)
+	}
 	if len(status.Agents) != 2 {
 		t.Fatalf("Agents count = %d, want 2", len(status.Agents))
 	}
@@ -139,8 +143,70 @@ func TestBuildFullStatusNoAgents(t *testing.T) {
 	if len(status.Queue) != 1 {
 		t.Fatalf("Queue count = %d, want 1", len(status.Queue))
 	}
+	if status.SpawnPolicy != SpawnPolicyAuto {
+		t.Errorf("SpawnPolicy = %q, want %q", status.SpawnPolicy, SpawnPolicyAuto)
+	}
 	if status.Queue[0].ID != "ts-aaa" {
 		t.Errorf("Queue[0].ID = %q, want %q", status.Queue[0].ID, "ts-aaa")
+	}
+}
+
+func TestBuildFullStatusManualPolicy(t *testing.T) {
+	pool := statusPool(t, nil)
+	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyManual}
+	runner := statusRunner(nil, "ID           PRI  TITLE\n")
+
+	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
+	if status.SpawnPolicy != SpawnPolicyManual {
+		t.Errorf("SpawnPolicy = %q, want %q", status.SpawnPolicy, SpawnPolicyManual)
+	}
+}
+
+func TestBuildFullStatusManualSkipsProgCalls(t *testing.T) {
+	now := time.Now()
+	agents := map[string]*Agent{
+		"ts-abc": {
+			ID:        "blur_knife",
+			TaskID:    "ts-abc",
+			Role:      RoleWorker,
+			PID:       1234,
+			SpawnTime: now,
+			State:     AgentRunning,
+		},
+	}
+	pool := statusPool(t, agents)
+	cfg := Config{PoolSize: 3, SpawnPolicy: SpawnPolicyManual}
+
+	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return nil, fmt.Errorf("unexpected runner call in manual mode: %s %s", name, strings.Join(args, " "))
+	}
+
+	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
+	if len(status.Errors) != 0 {
+		t.Fatalf("Errors = %v, want empty", status.Errors)
+	}
+	if len(status.Agents) != 1 {
+		t.Fatalf("Agents count = %d, want 1", len(status.Agents))
+	}
+	if len(status.Queue) != 0 {
+		t.Fatalf("Queue count = %d, want 0", len(status.Queue))
+	}
+}
+
+func TestBuildFullStatusIncludesSpawnsWithoutPool(t *testing.T) {
+	spawns := NewSpawnRegistry()
+	spawns.Register(SpawnEntry{
+		SpawnID:   "spawn-1",
+		PID:       999,
+		Prompt:    "test prompt",
+		LogPath:   "/tmp/spawn-1.jsonl",
+		SpawnTime: time.Now(),
+	})
+
+	cfg := Config{PoolSize: 3, SpawnPolicy: SpawnPolicyManual}
+	status := BuildFullStatus(context.Background(), nil, spawns, cfg, nil)
+	if len(status.Spawns) != 1 {
+		t.Fatalf("Spawns count = %d, want 1", len(status.Spawns))
 	}
 }
 

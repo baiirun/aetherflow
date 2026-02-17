@@ -185,6 +185,9 @@ func printStatus(s *client.FullStatus) {
 	if s.PoolMode != "" && s.PoolMode != "active" {
 		fmt.Printf("  %s", term.Yellowf("[%s]", s.PoolMode))
 	}
+	if s.SpawnPolicy != "" && s.SpawnPolicy != "auto" {
+		fmt.Printf("  %s", term.Yellowf("[spawn:%s]", s.SpawnPolicy))
+	}
 	if s.Project != "" {
 		fmt.Printf("  %s", term.Dimf("(%s)", s.Project))
 	}

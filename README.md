@@ -62,7 +62,7 @@ af status -w
 af tui
 ```
 
-The daemon polls prog for ready tasks, spawns opencode agents in isolated git worktrees, and monitors their lifecycle. Each agent follows a structured protocol: orient, implement, verify, review, fix, land.
+The daemon polls prog for ready tasks (or runs in spawn-only manual mode), spawns opencode agents in isolated git worktrees, and monitors their lifecycle. Each agent follows a structured protocol: orient, implement, verify, review, fix, land.
 
 ## How It Works With prog
 
@@ -419,6 +419,7 @@ project: myapp
 # poll_interval: 10s
 # pool_size: 3
 # spawn_cmd: opencode run --format json
+# spawn_policy: auto          # auto | manual (manual = no prog polling / auto-spawn)
 # max_retries: 3
 # solo: false
 # reconcile_interval: 30s
@@ -434,16 +435,20 @@ CLI flags override config file values. Config file overrides defaults.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--project` | *(required)* | Prog project to watch for tasks |
+| `--project` | *(required for auto)* | Prog project to watch for tasks |
 | `--poll-interval` | `10s` | How often to poll prog for tasks |
 | `--pool-size` | `3` | Maximum concurrent agent slots |
 | `--spawn-cmd` | `opencode run --format json` | Command to launch agent sessions |
+| `--spawn-policy` | `auto` | `auto` polls/schedules from prog, `manual` is spawn-only |
 | `--max-retries` | `3` | Max crash respawns per task |
 | `--solo` | `false` | Agents merge to main directly instead of creating PRs |
 | `--reconcile-interval` | `30s` | How often to check if reviewing tasks are merged |
 | `-d` / `--detach` | `false` | Run in background |
 
 Socket paths are derived automatically from the project name. Each project gets an isolated socket so multiple daemons can run side-by-side.
+
+`--project` is required when `--spawn-policy=auto`, and optional when `--spawn-policy=manual`.
+When using manual mode without a project, set `--socket` (or `socket_path` in config) to avoid sharing the global default socket.
 
 ## CLI Reference
 

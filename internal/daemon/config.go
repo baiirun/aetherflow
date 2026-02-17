@@ -16,8 +16,19 @@ const (
 	DefaultPoolSize          = 3
 	DefaultSpawnCmd          = "opencode run --format json"
 	DefaultMaxRetries        = 3
+	DefaultSpawnPolicy       = SpawnPolicyAuto
 	DefaultLogDir            = ".aetherflow/logs"
 	DefaultReconcileInterval = 30 * time.Second
+)
+
+// SpawnPolicy controls whether the daemon auto-spawns pool agents from prog.
+type SpawnPolicy string
+
+const (
+	// SpawnPolicyAuto continuously polls prog and auto-schedules pool agents.
+	SpawnPolicyAuto SpawnPolicy = "auto"
+	// SpawnPolicyManual disables auto-scheduling; daemon only tracks manual spawns.
+	SpawnPolicyManual SpawnPolicy = "manual"
 )
 
 // validProjectName restricts project names to safe characters for use in
@@ -40,7 +51,8 @@ type Config struct {
 	// SocketPath is the Unix socket path for the RPC server.
 	SocketPath string `yaml:"socket_path"`
 
-	// Project is the prog project to watch for tasks. Required.
+	// Project is the prog project to watch for tasks.
+	// Required in auto mode; optional in manual mode.
 	Project string `yaml:"project"`
 
 	// PollInterval is how often to check prog for ready tasks.
@@ -51,6 +63,10 @@ type Config struct {
 
 	// SpawnCmd is the command used to launch agent sessions.
 	SpawnCmd string `yaml:"spawn_cmd"`
+
+	// SpawnPolicy controls daemon auto-scheduling behavior.
+	// "auto" polls prog and fills the pool; "manual" disables auto-spawn.
+	SpawnPolicy SpawnPolicy `yaml:"spawn_policy"`
 
 	// MaxRetries is the maximum number of crash respawns per task.
 	MaxRetries int `yaml:"max_retries"`
@@ -99,6 +115,9 @@ func (c *Config) ApplyDefaults() {
 	if c.SpawnCmd == "" {
 		c.SpawnCmd = DefaultSpawnCmd
 	}
+	if c.SpawnPolicy == "" {
+		c.SpawnPolicy = DefaultSpawnPolicy
+	}
 	if c.MaxRetries == 0 {
 		c.MaxRetries = DefaultMaxRetries
 	}
@@ -117,12 +136,6 @@ func (c *Config) ApplyDefaults() {
 // Validate checks that configuration values are valid.
 // Call after ApplyDefaults.
 func (c *Config) Validate() error {
-	if c.Project == "" {
-		return fmt.Errorf("project is required (use --project or set project in config file)")
-	}
-	if !validProjectName.MatchString(c.Project) {
-		return fmt.Errorf("project name %q contains invalid characters (allowed: letters, digits, hyphens, underscores, dots)", c.Project)
-	}
 	if c.PollInterval <= 0 {
 		return fmt.Errorf("poll-interval must be positive, got %v", c.PollInterval)
 	}
@@ -131,6 +144,29 @@ func (c *Config) Validate() error {
 	}
 	if c.SpawnCmd == "" {
 		return fmt.Errorf("spawn-cmd must not be empty")
+	}
+	if c.SpawnPolicy == "" {
+		c.SpawnPolicy = DefaultSpawnPolicy
+	}
+	switch c.SpawnPolicy {
+	case SpawnPolicyAuto, SpawnPolicyManual:
+		// valid
+	default:
+		return fmt.Errorf("spawn-policy must be one of [%s, %s], got %q", SpawnPolicyAuto, SpawnPolicyManual, c.SpawnPolicy)
+	}
+	// Project is required in auto mode (daemon polls prog), optional in manual mode.
+	if c.SpawnPolicy == SpawnPolicyAuto && c.Project == "" {
+		return fmt.Errorf("project is required when spawn-policy is %q (use --project or set project in config file)", SpawnPolicyAuto)
+	}
+	// In manual mode without a project, require an explicit socket path so users
+	// don't accidentally share the global default socket across daemons.
+	if c.SpawnPolicy == SpawnPolicyManual && c.Project == "" {
+		if c.SocketPath == "" || c.SocketPath == protocol.DefaultSocketPath {
+			return fmt.Errorf("socket-path is required when spawn-policy is %q and project is empty (use --socket or set socket_path in config file)", SpawnPolicyManual)
+		}
+	}
+	if c.Project != "" && !validProjectName.MatchString(c.Project) {
+		return fmt.Errorf("project name %q contains invalid characters (allowed: letters, digits, hyphens, underscores, dots)", c.Project)
 	}
 	if c.MaxRetries < 0 {
 		return fmt.Errorf("max-retries must be non-negative, got %d", c.MaxRetries)
@@ -213,6 +249,9 @@ func mergeConfig(src, dst *Config) {
 	}
 	if dst.SpawnCmd == "" {
 		dst.SpawnCmd = src.SpawnCmd
+	}
+	if dst.SpawnPolicy == "" {
+		dst.SpawnPolicy = src.SpawnPolicy
 	}
 	if dst.MaxRetries == 0 {
 		dst.MaxRetries = src.MaxRetries

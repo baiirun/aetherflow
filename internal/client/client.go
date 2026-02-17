@@ -68,13 +68,14 @@ func (c *Client) call(method string, params any, result any) error {
 
 // FullStatus is the enriched swarm status returned by the status.full RPC.
 type FullStatus struct {
-	PoolSize int           `json:"pool_size"`
-	PoolMode string        `json:"pool_mode"`
-	Project  string        `json:"project"`
-	Agents   []AgentStatus `json:"agents"`
-	Spawns   []SpawnStatus `json:"spawns,omitempty"`
-	Queue    []Task        `json:"queue"`
-	Errors   []string      `json:"errors,omitempty"`
+	PoolSize    int           `json:"pool_size"`
+	PoolMode    string        `json:"pool_mode"`
+	Project     string        `json:"project"`
+	SpawnPolicy string        `json:"spawn_policy"`
+	Agents      []AgentStatus `json:"agents"`
+	Spawns      []SpawnStatus `json:"spawns,omitempty"`
+	Queue       []Task        `json:"queue"`
+	Errors      []string      `json:"errors,omitempty"`
 }
 
 // SpawnStatus is the status of a spawned agent registered with the daemon.

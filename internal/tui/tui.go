@@ -375,6 +375,9 @@ func (m Model) viewHeader() string {
 	case "paused":
 		mode = "  " + redStyle.Render("[paused]")
 	}
+	if s.SpawnPolicy == "manual" {
+		mode += "  " + yellowStyle.Render("[spawn:manual]")
+	}
 
 	project := ""
 	if s.Project != "" {
