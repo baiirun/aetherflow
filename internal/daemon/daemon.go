@@ -82,8 +82,43 @@ func New(cfg Config) *Daemon {
 
 // Run starts the daemon and blocks until shutdown.
 func (d *Daemon) Run() error {
-	// Remove stale socket
-	_ = os.Remove(d.config.SocketPath)
+	// Defend against callers that bypass config validation.
+	// Fail fast instead of silently starting in a degraded mode.
+	policy := d.config.SpawnPolicy.Normalized()
+	switch policy {
+	case SpawnPolicyAuto:
+		if d.config.Project == "" {
+			return fmt.Errorf("invalid config: spawn-policy %q requires project", SpawnPolicyAuto)
+		}
+		if d.poller == nil || d.pool == nil {
+			return fmt.Errorf("invariant violated: spawn-policy %q requires poller and pool", SpawnPolicyAuto)
+		}
+	case SpawnPolicyManual:
+		// valid
+	default:
+		return fmt.Errorf("invalid config: unknown spawn-policy %q", policy)
+	}
+	if (d.poller == nil) != (d.pool == nil) {
+		return fmt.Errorf("invariant violated: poller and pool must be both nil or both non-nil")
+	}
+
+	conn, err := net.DialTimeout("unix", d.config.SocketPath, 200*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+		return fmt.Errorf("daemon already running on %s", d.config.SocketPath)
+	}
+
+	// Remove stale socket if no daemon is accepting connections.
+	if info, statErr := os.Lstat(d.config.SocketPath); statErr == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			return fmt.Errorf("socket path exists and is not a unix socket: %s", d.config.SocketPath)
+		}
+		if rmErr := os.Remove(d.config.SocketPath); rmErr != nil {
+			return fmt.Errorf("failed to remove stale socket %s: %w", d.config.SocketPath, rmErr)
+		}
+	} else if !os.IsNotExist(statErr) {
+		return fmt.Errorf("failed to stat socket path %s: %w", d.config.SocketPath, statErr)
+	}
 
 	listener, err := net.Listen("unix", d.config.SocketPath)
 	if err != nil {
@@ -118,7 +153,7 @@ func (d *Daemon) Run() error {
 
 	// Start poll loop and pool if a project is configured and auto-spawn is enabled.
 	if d.poller != nil && d.pool != nil {
-		if d.config.SpawnPolicy == SpawnPolicyManual {
+		if !policy.AutoSchedulingEnabled() {
 			d.log.Info("spawn policy manual: auto-scheduling disabled")
 		} else {
 			// Set pool context before launching goroutines so both Run and

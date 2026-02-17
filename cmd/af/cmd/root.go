@@ -36,7 +36,6 @@ func Execute() error {
 func init() {
 	rootCmd.PersistentFlags().StringP("config", "c", "", "config file (default is $HOME/.aetherflow.yaml)")
 	rootCmd.PersistentFlags().StringP("project", "p", "", "Project name (derives socket path, overrides config file)")
-	rootCmd.PersistentFlags().String("socket", "", "Unix socket path (overrides --project and config)")
 	rootCmd.PersistentFlags().Bool("no-color", false, "Disable colored output")
 
 	// Wire --no-color to the term package. OnInitialize runs before any
@@ -51,16 +50,10 @@ func init() {
 
 // resolveSocketPath determines the daemon socket path from the CLI flag,
 // config file, or default convention. Priority:
-//  1. Explicit --socket flag (full path)
-//  2. Explicit --project flag → project-scoped socket path
-//  3. Project from config file → project-scoped socket path
-//  4. DefaultSocketPath fallback
+//  1. Explicit --project flag -> project-scoped socket path
+//  2. Project from config file -> project-scoped socket path
+//  3. DefaultSocketPath fallback
 func resolveSocketPath(cmd *cobra.Command) string {
-	if cmd.Flags().Changed("socket") {
-		s, _ := cmd.Flags().GetString("socket")
-		return s
-	}
-
 	if cmd.Flags().Changed("project") {
 		p, _ := cmd.Flags().GetString("project")
 		return protocol.SocketPathFor(p)

@@ -58,10 +58,7 @@ type taskShowResponse struct {
 // with a per-call timeout. Partial failures are captured in the Errors slice
 // rather than failing the entire request.
 func BuildFullStatus(ctx context.Context, pool *Pool, spawns *SpawnRegistry, cfg Config, runner CommandRunner) FullStatus {
-	policy := cfg.SpawnPolicy
-	if policy == "" {
-		policy = DefaultSpawnPolicy
-	}
+	policy := cfg.SpawnPolicy.Normalized()
 
 	status := FullStatus{
 		PoolSize:    cfg.PoolSize,
@@ -86,7 +83,7 @@ func BuildFullStatus(ctx context.Context, pool *Pool, spawns *SpawnRegistry, cfg
 
 		// In manual mode, status must be prog-optional. Return pool snapshots
 		// only and skip all prog-dependent enrichment/queue calls.
-		if policy != SpawnPolicyManual {
+		if policy.ProgEnrichmentEnabled() {
 			var mu sync.Mutex
 			var errors []string
 			var wg sync.WaitGroup

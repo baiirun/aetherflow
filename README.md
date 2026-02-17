@@ -272,6 +272,8 @@ prog ready              daemon                    opencode
 
 The daemon runs several concurrent loops:
 
+In `--spawn-policy=manual`, auto task lifecycle loops are intentionally disabled (poll/reclaim/reconcile). Manual mode is spawn-only and does not perform automatic task-state recovery.
+
 **Poller** -- calls `prog ready -p <project>` on an interval to discover unblocked tasks. Returns a list of task IDs and titles. The poller runs in its own goroutine and sends batches to the pool via a channel.
 
 **Pool** -- manages a fixed number of agent slots (`--pool-size`, default 3). When a batch of ready tasks arrives from the poller, the pool assigns them to free slots. Each slot runs one opencode session. The pool tracks agents by task ID, not by process, so it knows which task each agent is working on.
@@ -445,10 +447,10 @@ CLI flags override config file values. Config file overrides defaults.
 | `--reconcile-interval` | `30s` | How often to check if reviewing tasks are merged |
 | `-d` / `--detach` | `false` | Run in background |
 
-Socket paths are derived automatically from the project name. Each project gets an isolated socket so multiple daemons can run side-by-side.
+Socket paths are derived automatically from the project name. Each project gets an isolated socket so multiple daemons can run side-by-side. Custom socket paths are not user-configurable.
 
 `--project` is required when `--spawn-policy=auto`, and optional when `--spawn-policy=manual`.
-When using manual mode without a project, set `--socket` (or `socket_path` in config) to avoid sharing the global default socket.
+Manual mode without a project uses the global default socket path. Starting a second daemon on the same socket fails fast.
 
 ## CLI Reference
 

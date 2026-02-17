@@ -23,7 +23,7 @@ var daemonCmd = &cobra.Command{
 			fmt.Println("not running")
 			fmt.Println("\nTo start:")
 			fmt.Println("  af daemon start --project <name>                 # auto mode")
-			fmt.Println("  af daemon start --spawn-policy manual --socket <path>  # manual mode")
+			fmt.Println("  af daemon start --spawn-policy manual            # manual mode")
 			return
 		}
 
@@ -65,9 +65,6 @@ func buildConfig(cmd *cobra.Command) daemon.Config {
 	// Read CLI flags into config. Only non-default values override.
 	if cmd.Flags().Changed("project") {
 		cfg.Project, _ = cmd.Flags().GetString("project")
-	}
-	if cmd.Flags().Changed("socket") {
-		cfg.SocketPath, _ = cmd.Flags().GetString("socket")
 	}
 	if cmd.Flags().Changed("poll-interval") {
 		cfg.PollInterval, _ = cmd.Flags().GetDuration("poll-interval")
@@ -116,7 +113,7 @@ func startDetached(cmd *cobra.Command) {
 
 	// Forward all flags except --detach.
 	reArgs := []string{"daemon", "start"}
-	for _, name := range []string{"project", "socket", "poll-interval", "pool-size", "spawn-cmd", "spawn-policy", "max-retries", "solo", "config"} {
+	for _, name := range []string{"project", "poll-interval", "pool-size", "spawn-cmd", "spawn-policy", "max-retries", "solo", "config"} {
 		if cmd.Flags().Changed(name) {
 			val, _ := cmd.Flags().GetString(name)
 			// Duration and int flags also work with GetString via pflag.

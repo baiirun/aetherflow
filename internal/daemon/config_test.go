@@ -119,7 +119,7 @@ func TestConfigValidate(t *testing.T) {
 				SpawnPolicy:       SpawnPolicyManual,
 				ReconcileInterval: DefaultReconcileInterval,
 			},
-			wantErr: "socket-path is required when spawn-policy is",
+			wantErr: "",
 		},
 		{
 			name: "missing project in manual mode with explicit socket",
@@ -267,14 +267,17 @@ func TestConfigValidateAfterDefaults(t *testing.T) {
 	}
 }
 
-func TestConfigValidateManualWithoutProjectRequiresSocket(t *testing.T) {
+func TestConfigValidateManualWithoutProjectUsesDefaultSocket(t *testing.T) {
 	cfg := Config{
 		SpawnPolicy: SpawnPolicyManual,
 	}
 	cfg.ApplyDefaults()
 
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error for manual mode without project/socket, got nil")
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected manual mode without project/socket to be valid, got: %v", err)
+	}
+	if cfg.SocketPath != protocol.DefaultSocketPath {
+		t.Fatalf("SocketPath = %q, want %q", cfg.SocketPath, protocol.DefaultSocketPath)
 	}
 }
 
@@ -283,7 +286,6 @@ func TestLoadConfigFile(t *testing.T) {
 	path := filepath.Join(dir, ".aetherflow.yaml")
 
 	yaml := `project: from-file
-socket_path: /tmp/custom.sock
 poll_interval: 30s
 pool_size: 5
 spawn_cmd: custom-agent
@@ -303,8 +305,8 @@ prompt_dir: /custom/prompts
 	if cfg.Project != "from-file" {
 		t.Errorf("Project = %q, want %q", cfg.Project, "from-file")
 	}
-	if cfg.SocketPath != "/tmp/custom.sock" {
-		t.Errorf("SocketPath = %q, want %q", cfg.SocketPath, "/tmp/custom.sock")
+	if cfg.SocketPath != "" {
+		t.Errorf("SocketPath = %q, want empty (not loaded from config file)", cfg.SocketPath)
 	}
 	if cfg.PollInterval != 30*time.Second {
 		t.Errorf("PollInterval = %v, want %v", cfg.PollInterval, 30*time.Second)

@@ -31,6 +31,24 @@ const (
 	SpawnPolicyManual SpawnPolicy = "manual"
 )
 
+// Normalized returns p, defaulting empty values to the default policy.
+func (p SpawnPolicy) Normalized() SpawnPolicy {
+	if p == "" {
+		return DefaultSpawnPolicy
+	}
+	return p
+}
+
+// AutoSchedulingEnabled reports whether daemon auto-scheduling loops should run.
+func (p SpawnPolicy) AutoSchedulingEnabled() bool {
+	return p.Normalized() == SpawnPolicyAuto
+}
+
+// ProgEnrichmentEnabled reports whether status paths should call prog.
+func (p SpawnPolicy) ProgEnrichmentEnabled() bool {
+	return p.Normalized() != SpawnPolicyManual
+}
+
 // validProjectName restricts project names to safe characters for use in
 // socket paths and log file paths. Rejects slashes, spaces, and other
 // characters that could cause path traversal or shell interpretation issues.
@@ -49,7 +67,8 @@ var validTaskID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 //  3. Defaults (lowest priority)
 type Config struct {
 	// SocketPath is the Unix socket path for the RPC server.
-	SocketPath string `yaml:"socket_path"`
+	// It is derived from project/default and not user-configurable.
+	SocketPath string `yaml:"-"`
 
 	// Project is the prog project to watch for tasks.
 	// Required in auto mode; optional in manual mode.
@@ -158,13 +177,6 @@ func (c *Config) Validate() error {
 	if c.SpawnPolicy == SpawnPolicyAuto && c.Project == "" {
 		return fmt.Errorf("project is required when spawn-policy is %q (use --project or set project in config file)", SpawnPolicyAuto)
 	}
-	// In manual mode without a project, require an explicit socket path so users
-	// don't accidentally share the global default socket across daemons.
-	if c.SpawnPolicy == SpawnPolicyManual && c.Project == "" {
-		if c.SocketPath == "" || c.SocketPath == protocol.DefaultSocketPath {
-			return fmt.Errorf("socket-path is required when spawn-policy is %q and project is empty (use --socket or set socket_path in config file)", SpawnPolicyManual)
-		}
-	}
 	if c.Project != "" && !validProjectName.MatchString(c.Project) {
 		return fmt.Errorf("project name %q contains invalid characters (allowed: letters, digits, hyphens, underscores, dots)", c.Project)
 	}
@@ -235,9 +247,6 @@ func LoadConfigFile(path string, into *Config) error {
 // dst has the zero value. This means CLI flags (set on dst before merge)
 // take priority over file values.
 func mergeConfig(src, dst *Config) {
-	if dst.SocketPath == "" {
-		dst.SocketPath = src.SocketPath
-	}
 	if dst.Project == "" {
 		dst.Project = src.Project
 	}

@@ -78,6 +78,24 @@ type FullStatus struct {
 	Errors      []string      `json:"errors,omitempty"`
 }
 
+const (
+	SpawnPolicyAuto   = "auto"
+	SpawnPolicyManual = "manual"
+)
+
+// NormalizedSpawnPolicy returns the effective spawn policy for status display.
+func (s *FullStatus) NormalizedSpawnPolicy() string {
+	if s.SpawnPolicy == "" {
+		return SpawnPolicyAuto
+	}
+	return s.SpawnPolicy
+}
+
+// IsManualSpawnPolicy reports whether status is in manual spawn policy mode.
+func (s *FullStatus) IsManualSpawnPolicy() bool {
+	return s.NormalizedSpawnPolicy() == SpawnPolicyManual
+}
+
 // SpawnStatus is the status of a spawned agent registered with the daemon.
 type SpawnStatus struct {
 	SpawnID   string    `json:"spawn_id"`
