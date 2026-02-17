@@ -3,9 +3,11 @@ package daemon
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/baiirun/aetherflow/internal/protocol"
@@ -14,7 +16,8 @@ import (
 
 const (
 	DefaultPoolSize          = 3
-	DefaultSpawnCmd          = "opencode run --format json"
+	DefaultServerURL         = "http://127.0.0.1:4096"
+	DefaultSpawnCmd          = "opencode run --attach " + DefaultServerURL + " --format json"
 	DefaultMaxRetries        = 3
 	DefaultSpawnPolicy       = SpawnPolicyAuto
 	DefaultLogDir            = ".aetherflow/logs"
@@ -83,6 +86,10 @@ type Config struct {
 	// SpawnCmd is the command used to launch agent sessions.
 	SpawnCmd string `yaml:"spawn_cmd"`
 
+	// ServerURL is the opencode server target for server-first session launches.
+	// Expected format: http://host:port
+	ServerURL string `yaml:"server_url"`
+
 	// SpawnPolicy controls daemon auto-scheduling behavior.
 	// "auto" polls prog and fills the pool; "manual" disables auto-spawn.
 	SpawnPolicy SpawnPolicy `yaml:"spawn_policy"`
@@ -103,6 +110,10 @@ type Config struct {
 	// LogDir is the directory for agent JSONL log files.
 	// Each task gets a <taskID>.jsonl file in this directory.
 	LogDir string `yaml:"log_dir"`
+
+	// SessionDir is the global session registry directory.
+	// Empty uses ~/.config/aetherflow/sessions.
+	SessionDir string `yaml:"session_dir"`
 
 	// ReconcileInterval is how often the daemon checks if reviewing tasks
 	// have been merged to main. When a task's af/<task-id> branch is an
@@ -134,6 +145,9 @@ func (c *Config) ApplyDefaults() {
 	if c.SpawnCmd == "" {
 		c.SpawnCmd = DefaultSpawnCmd
 	}
+	if c.ServerURL == "" {
+		c.ServerURL = DefaultServerURL
+	}
 	if c.SpawnPolicy == "" {
 		c.SpawnPolicy = DefaultSpawnPolicy
 	}
@@ -163,6 +177,15 @@ func (c *Config) Validate() error {
 	}
 	if c.SpawnCmd == "" {
 		return fmt.Errorf("spawn-cmd must not be empty")
+	}
+	if c.ServerURL == "" {
+		c.ServerURL = DefaultServerURL
+	}
+	if _, err := url.ParseRequestURI(c.ServerURL); err != nil {
+		return fmt.Errorf("invalid server-url %q: %w", c.ServerURL, err)
+	}
+	if !strings.Contains(c.SpawnCmd, "--attach") {
+		c.SpawnCmd = EnsureAttachSpawnCmd(c.SpawnCmd, c.ServerURL)
 	}
 	if c.SpawnPolicy == "" {
 		c.SpawnPolicy = DefaultSpawnPolicy
@@ -259,6 +282,9 @@ func mergeConfig(src, dst *Config) {
 	if dst.SpawnCmd == "" {
 		dst.SpawnCmd = src.SpawnCmd
 	}
+	if dst.ServerURL == "" {
+		dst.ServerURL = src.ServerURL
+	}
 	if dst.SpawnPolicy == "" {
 		dst.SpawnPolicy = src.SpawnPolicy
 	}
@@ -278,5 +304,8 @@ func mergeConfig(src, dst *Config) {
 	}
 	if dst.LogDir == "" {
 		dst.LogDir = src.LogDir
+	}
+	if dst.SessionDir == "" {
+		dst.SessionDir = src.SessionDir
 	}
 }

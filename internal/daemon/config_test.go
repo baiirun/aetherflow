@@ -37,6 +37,9 @@ func TestConfigApplyDefaults(t *testing.T) {
 	if cfg.SpawnCmd != DefaultSpawnCmd {
 		t.Errorf("SpawnCmd = %q, want %q", cfg.SpawnCmd, DefaultSpawnCmd)
 	}
+	if cfg.ServerURL != DefaultServerURL {
+		t.Errorf("ServerURL = %q, want %q", cfg.ServerURL, DefaultServerURL)
+	}
 	if cfg.SpawnPolicy != DefaultSpawnPolicy {
 		t.Errorf("SpawnPolicy = %q, want %q", cfg.SpawnPolicy, DefaultSpawnPolicy)
 	}
@@ -71,6 +74,7 @@ func TestConfigApplyDefaultsPreservesExisting(t *testing.T) {
 		SpawnPolicy:  SpawnPolicyManual,
 		MaxRetries:   10,
 		PromptDir:    "/custom/prompts",
+		ServerURL:    "http://127.0.0.1:5000",
 	}
 	cfg.ApplyDefaults()
 
@@ -94,6 +98,9 @@ func TestConfigApplyDefaultsPreservesExisting(t *testing.T) {
 	}
 	if cfg.PromptDir != "/custom/prompts" {
 		t.Errorf("PromptDir = %q, want %q", cfg.PromptDir, "/custom/prompts")
+	}
+	if cfg.ServerURL != "http://127.0.0.1:5000" {
+		t.Errorf("ServerURL = %q, want %q", cfg.ServerURL, "http://127.0.0.1:5000")
 	}
 }
 
@@ -172,6 +179,11 @@ func TestConfigValidate(t *testing.T) {
 			name:    "empty spawn cmd",
 			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: ""},
 			wantErr: "spawn-cmd must not be empty",
+		},
+		{
+			name:    "invalid server url",
+			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "opencode run", ServerURL: "://bad"},
+			wantErr: "invalid server-url",
 		},
 		{
 			name:    "invalid spawn policy",
@@ -319,6 +331,9 @@ prompt_dir: /custom/prompts
 	}
 	if cfg.SpawnPolicy != SpawnPolicyManual {
 		t.Errorf("SpawnPolicy = %q, want %q", cfg.SpawnPolicy, SpawnPolicyManual)
+	}
+	if cfg.ServerURL != "" {
+		t.Errorf("ServerURL = %q, want empty (not loaded from config file)", cfg.ServerURL)
 	}
 	if cfg.MaxRetries != 7 {
 		t.Errorf("MaxRetries = %d, want %d", cfg.MaxRetries, 7)

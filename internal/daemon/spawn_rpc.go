@@ -1,10 +1,13 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"time"
+
+	"github.com/baiirun/aetherflow/internal/sessions"
 )
 
 const (
@@ -66,6 +69,8 @@ func (d *Daemon) handleSpawnRegister(rawParams json.RawMessage) *Response {
 		"log_path", logPath,
 	)
 
+	go d.captureSpawnSession(logPath, params.SpawnID)
+
 	return &Response{Success: true}
 }
 
@@ -87,8 +92,37 @@ func (d *Daemon) handleSpawnDeregister(rawParams json.RawMessage) *Response {
 	}
 
 	d.spawns.Deregister(params.SpawnID)
+	if d.sstore != nil {
+		_ = d.sstore.SetStatusByWorkRef(sessions.OriginSpawn, params.SpawnID, sessions.StatusIdle)
+	}
 
 	d.log.Info("spawn deregistered", "spawn_id", params.SpawnID)
 
 	return &Response{Success: true}
+}
+
+func (d *Daemon) captureSpawnSession(path, spawnID string) {
+	if d.sstore == nil {
+		return
+	}
+
+	const maxAttempts = 40
+	for i := 0; i < maxAttempts; i++ {
+		sid, err := ParseSessionID(context.Background(), path)
+		if err == nil && sid != "" {
+			rec := sessions.Record{
+				ServerRef: d.config.ServerURL,
+				SessionID: sid,
+				Project:   d.config.Project,
+				Origin:    sessions.OriginSpawn,
+				WorkRef:   spawnID,
+				Status:    sessions.StatusActive,
+			}
+			if err := d.sstore.Upsert(rec); err != nil {
+				d.log.Warn("failed to persist spawn session record", "spawn_id", spawnID, "error", err)
+			}
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }

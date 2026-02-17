@@ -215,7 +215,9 @@ func TestDaemonRunRejectsNonSocketPathCollision(t *testing.T) {
 	if err := os.WriteFile(path, []byte("not a socket"), 0644); err != nil {
 		t.Fatalf("failed to create collision file: %v", err)
 	}
-	defer os.Remove(path)
+	defer func() {
+		_ = os.Remove(path)
+	}()
 
 	cfg := Config{
 		SocketPath:        path,

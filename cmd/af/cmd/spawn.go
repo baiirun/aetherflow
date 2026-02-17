@@ -83,6 +83,13 @@ func runSpawn(cmd *cobra.Command, args []string) {
 		logDir = fileCfg.LogDir
 	}
 
+	// Phase A server-first launch path: ensure attach-based spawn command.
+	serverURL := fileCfg.ServerURL
+	if cmd.Flags().Changed("spawn-cmd") || serverURL == "" {
+		serverURL = daemon.DefaultServerURL
+	}
+	spawnCmd = daemon.EnsureAttachSpawnCmd(spawnCmd, serverURL)
+
 	// Generate a unique spawn ID for worktree/branch naming.
 	// The "spawn-" prefix ensures no collision with pool agent IDs.
 	// A random hex suffix expands the namespace from ~14K to ~943M

@@ -14,9 +14,12 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/baiirun/aetherflow/internal/sessions"
 )
 
 const (
@@ -30,6 +33,8 @@ type Daemon struct {
 	poller   *Poller
 	pool     *Pool
 	spawns   *SpawnRegistry
+	sstore   *sessions.Store
+	server   *exec.Cmd
 	shutdown chan struct{}
 	log      *slog.Logger
 }
@@ -65,6 +70,10 @@ func New(cfg Config) *Daemon {
 
 	var poller *Poller
 	var pool *Pool
+	store, storeErr := sessions.Open(cfg.SessionDir)
+	if storeErr != nil && log != nil {
+		log.Warn("session registry unavailable", "error", storeErr)
+	}
 	if cfg.Project != "" {
 		poller = NewPoller(cfg.Project, cfg.PollInterval, cfg.Runner, log)
 		pool = NewPool(cfg, cfg.Runner, cfg.Starter, log)
@@ -75,6 +84,7 @@ func New(cfg Config) *Daemon {
 		poller:   poller,
 		pool:     pool,
 		spawns:   NewSpawnRegistry(),
+		sstore:   store,
 		shutdown: make(chan struct{}),
 		log:      log,
 	}
@@ -137,6 +147,15 @@ func (d *Daemon) Run() error {
 	// Handle shutdown gracefully
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	serverCmd, err := StartManagedServer(ctx, d.config.ServerURL, func(msg string, args ...any) {
+		d.log.Info(msg, args...)
+	})
+	if err != nil {
+		_ = listener.Close()
+		return err
+	}
+	d.server = serverCmd
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

@@ -195,13 +195,15 @@ func TestBuildFullStatusManualSkipsProgCalls(t *testing.T) {
 
 func TestBuildFullStatusIncludesSpawnsWithoutPool(t *testing.T) {
 	spawns := NewSpawnRegistry()
-	spawns.Register(SpawnEntry{
+	if err := spawns.Register(SpawnEntry{
 		SpawnID:   "spawn-1",
 		PID:       999,
 		Prompt:    "test prompt",
 		LogPath:   "/tmp/spawn-1.jsonl",
 		SpawnTime: time.Now(),
-	})
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
 
 	cfg := Config{PoolSize: 3, SpawnPolicy: SpawnPolicyManual}
 	status := BuildFullStatus(context.Background(), nil, spawns, cfg, nil)

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/baiirun/aetherflow/internal/protocol"
+	"github.com/baiirun/aetherflow/internal/sessions"
 )
 
 // PoolMode controls pool scheduling behavior.
@@ -140,6 +141,8 @@ type Pool struct {
 	logDir  string // absolute path to JSONL log directory
 	runner  CommandRunner
 	starter ProcessStarter
+	sstore  *sessions.Store
+	work    WorkSource
 	log     *slog.Logger
 	ctx     context.Context // stored for respawn goroutines
 
@@ -172,6 +175,11 @@ func NewPool(cfg Config, runner CommandRunner, starter ProcessStarter, log *slog
 		starter = ExecProcessStarter
 	}
 
+	store, err := sessions.Open(cfg.SessionDir)
+	if err != nil && log != nil {
+		log.Warn("session registry unavailable", "error", err)
+	}
+
 	return &Pool{
 		mode:     PoolActive,
 		agents:   make(map[string]*Agent),
@@ -181,6 +189,8 @@ func NewPool(cfg Config, runner CommandRunner, starter ProcessStarter, log *slog
 		logDir:   cfg.LogDir,
 		runner:   runner,
 		starter:  starter,
+		sstore:   store,
+		work:     NewProgWorkSource(runner),
 		log:      log,
 		pidAlive: defaultPIDAlive,
 	}
@@ -270,7 +280,7 @@ func (p *Pool) schedule(ctx context.Context, tasks []Task) {
 // the task in "in_progress" state with no agent.
 func (p *Pool) spawn(ctx context.Context, task Task) {
 	// Prep: fetch metadata and infer role before claiming.
-	meta, err := FetchTaskMeta(ctx, task.ID, p.config.Project, p.runner)
+	meta, err := p.work.GetMeta(ctx, task.ID, p.config.Project)
 	if err != nil {
 		p.log.Error("failed to fetch task metadata",
 			"task_id", task.ID,
@@ -305,7 +315,7 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 	// Claim the task in prog. This is the point of no return — after this,
 	// the task is in_progress and we must either spawn an agent or leave it
 	// for manual recovery.
-	_, err = p.runner(ctx, "prog", "start", task.ID, "-p", p.config.Project)
+	err = p.work.Claim(ctx, task.ID, p.config.Project)
 	if err != nil {
 		_ = logFile.Close()
 		p.log.Error("failed to claim task",
@@ -317,7 +327,8 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 
 	agentID := p.names.Generate()
 
-	proc, err := p.starter(ctx, p.config.SpawnCmd, prompt, string(agentID), logFile)
+	launchCmd := EnsureAttachSpawnCmd(p.config.SpawnCmd, p.config.ServerURL)
+	proc, err := p.starter(ctx, launchCmd, prompt, string(agentID), logFile)
 	if err != nil {
 		_ = logFile.Close()
 		p.log.Error("failed to spawn agent",
@@ -348,6 +359,16 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 		"role", role,
 		"pid", proc.PID(),
 	)
+
+	go p.captureSessionFromLog(logFilePath(p.logDir, task.ID), sessions.Record{
+		ServerRef: p.config.ServerURL,
+		Directory: "",
+		Project:   p.config.Project,
+		Origin:    sessions.OriginPool,
+		WorkRef:   task.ID,
+		AgentID:   string(agentID),
+		Status:    sessions.StatusActive,
+	})
 
 	// Wait for process exit in background.
 	go p.reap(agent, proc, logFile)
@@ -386,9 +407,11 @@ func (p *Pool) reap(agent *Agent, proc Process, cleanup io.Closer) {
 	if err == nil {
 		// Clean exit — clear retry count.
 		delete(p.retries, agent.TaskID)
+		p.updateWorkSessionStatus(sessions.OriginPool, agent.TaskID, sessions.StatusIdle)
 	} else {
 		// Crash — bump retry counter.
 		p.retries[agent.TaskID]++
+		p.updateWorkSessionStatus(sessions.OriginPool, agent.TaskID, sessions.StatusTerminated)
 	}
 	attempts := p.retries[agent.TaskID]
 	p.mu.Unlock()
@@ -482,7 +505,8 @@ func (p *Pool) respawn(taskID string, role Role) {
 
 	agentID := p.names.Generate()
 
-	proc, err := p.starter(p.ctx, p.config.SpawnCmd, prompt, string(agentID), logFile)
+	launchCmd := EnsureAttachSpawnCmd(p.config.SpawnCmd, p.config.ServerURL)
+	proc, err := p.starter(p.ctx, launchCmd, prompt, string(agentID), logFile)
 	if err != nil {
 		_ = logFile.Close()
 		p.log.Error("failed to respawn agent",
@@ -514,7 +538,46 @@ func (p *Pool) respawn(taskID string, role Role) {
 		"pid", proc.PID(),
 	)
 
+	go p.captureSessionFromLog(logFilePath(p.logDir, taskID), sessions.Record{
+		ServerRef: p.config.ServerURL,
+		Directory: "",
+		Project:   p.config.Project,
+		Origin:    sessions.OriginPool,
+		WorkRef:   taskID,
+		AgentID:   string(agentID),
+		Status:    sessions.StatusActive,
+	})
+
 	go p.reap(agent, proc, logFile)
+}
+
+func (p *Pool) captureSessionFromLog(path string, base sessions.Record) {
+	if p.sstore == nil {
+		return
+	}
+
+	const maxAttempts = 40
+	for i := 0; i < maxAttempts; i++ {
+		sid, err := ParseSessionID(context.Background(), path)
+		if err == nil && sid != "" {
+			base.SessionID = sid
+			base.LastSeenAt = time.Now()
+			if err := p.sstore.Upsert(base); err != nil {
+				p.log.Warn("failed to persist session record", "path", path, "error", err)
+			}
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+func (p *Pool) updateWorkSessionStatus(origin sessions.OriginType, workRef string, status sessions.Status) {
+	if p.sstore == nil || workRef == "" {
+		return
+	}
+	if err := p.sstore.SetStatusByWorkRef(origin, workRef, status); err != nil {
+		p.log.Warn("failed to update session status", "work_ref", workRef, "status", status, "error", err)
+	}
 }
 
 // runningCount returns the number of currently running agents.
