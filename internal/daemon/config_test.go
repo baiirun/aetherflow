@@ -186,6 +186,11 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: "invalid server-url",
 		},
 		{
+			name:    "non-local server url rejected",
+			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "opencode run", ServerURL: "http://example.com:4096"},
+			wantErr: "host must be localhost",
+		},
+		{
 			name:    "invalid spawn policy",
 			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", SpawnPolicy: "sometimes"},
 			wantErr: "spawn-policy must be one of",

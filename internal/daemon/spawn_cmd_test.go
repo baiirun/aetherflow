@@ -21,3 +21,14 @@ func TestEnsureAttachSpawnCmdNoopWhenPresent(t *testing.T) {
 		t.Fatalf("EnsureAttachSpawnCmd() = %q, want %q", got, cmd)
 	}
 }
+
+func TestEnsureAttachSpawnCmdDoesNotFalseMatch(t *testing.T) {
+	t.Parallel()
+
+	cmd := "opencode run --attachment-token xyz --format json"
+	got := EnsureAttachSpawnCmd(cmd, "http://127.0.0.1:4096")
+	want := "opencode run --attachment-token xyz --format json --attach http://127.0.0.1:4096"
+	if got != want {
+		t.Fatalf("EnsureAttachSpawnCmd() = %q, want %q", got, want)
+	}
+}

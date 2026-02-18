@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -35,6 +36,7 @@ type Daemon struct {
 	spawns   *SpawnRegistry
 	sstore   *sessions.Store
 	server   *exec.Cmd
+	serverMu sync.Mutex
 	shutdown chan struct{}
 	log      *slog.Logger
 }
@@ -77,6 +79,9 @@ func New(cfg Config) *Daemon {
 	if cfg.Project != "" {
 		poller = NewPoller(cfg.Project, cfg.PollInterval, cfg.Runner, log)
 		pool = NewPool(cfg, cfg.Runner, cfg.Starter, log)
+		if pool != nil {
+			pool.sstore = store
+		}
 	}
 
 	return &Daemon{
@@ -156,6 +161,9 @@ func (d *Daemon) Run() error {
 		return err
 	}
 	d.server = serverCmd
+	if serverCmd != nil {
+		go d.superviseServer(ctx)
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -223,6 +231,41 @@ func (d *Daemon) Run() error {
 			}
 		}
 		go d.handleConnection(ctx, conn)
+	}
+}
+
+func (d *Daemon) superviseServer(ctx context.Context) {
+	for {
+		d.serverMu.Lock()
+		cmd := d.server
+		d.serverMu.Unlock()
+		if cmd == nil {
+			return
+		}
+
+		err := cmd.Wait()
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		d.log.Warn("managed opencode server exited, restarting", "error", err)
+		time.Sleep(500 * time.Millisecond)
+		restarted, startErr := StartManagedServer(ctx, d.config.ServerURL, func(msg string, args ...any) {
+			d.log.Info(msg, args...)
+		})
+		if startErr != nil {
+			d.log.Error("failed to restart managed opencode server", "error", startErr)
+			continue
+		}
+		if restarted == nil {
+			// Existing server is already up; nothing to supervise.
+			return
+		}
+		d.serverMu.Lock()
+		d.server = restarted
+		d.serverMu.Unlock()
 	}
 }
 

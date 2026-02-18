@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"net/url"
 	"os/exec"
 	"strconv"
 	"time"
@@ -13,18 +12,12 @@ import (
 // StartManagedServer ensures a local opencode server is available at serverURL.
 // If one is already listening, it is reused.
 func StartManagedServer(ctx context.Context, serverURL string, logf func(msg string, args ...any)) (*exec.Cmd, error) {
-	u, err := url.Parse(serverURL)
+	u, err := ValidateServerURLLocal(serverURL)
 	if err != nil {
-		return nil, fmt.Errorf("parsing server url %q: %w", serverURL, err)
+		return nil, err
 	}
 	host := u.Hostname()
 	portStr := u.Port()
-	if host == "" || portStr == "" {
-		return nil, fmt.Errorf("server url must include host and port: %q", serverURL)
-	}
-	if host != "127.0.0.1" && host != "localhost" {
-		return nil, fmt.Errorf("managed server requires localhost URL, got %q", serverURL)
-	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port <= 0 {
 		return nil, fmt.Errorf("invalid server port in %q", serverURL)
@@ -57,5 +50,6 @@ func StartManagedServer(ctx context.Context, serverURL string, logf func(msg str
 	}
 
 	_ = cmd.Process.Kill()
+	_, _ = cmd.Process.Wait()
 	return nil, fmt.Errorf("managed opencode server did not become ready at %s", serverURL)
 }

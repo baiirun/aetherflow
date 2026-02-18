@@ -100,6 +100,7 @@ func (s *FullStatus) IsManualSpawnPolicy() bool {
 type SpawnStatus struct {
 	SpawnID   string    `json:"spawn_id"`
 	PID       int       `json:"pid"`
+	SessionID string    `json:"session_id,omitempty"`
 	Prompt    string    `json:"prompt"`
 	LogPath   string    `json:"log_path"`
 	SpawnTime time.Time `json:"spawn_time"`

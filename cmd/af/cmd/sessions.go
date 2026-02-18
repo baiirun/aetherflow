@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/baiirun/aetherflow/internal/daemon"
 	"github.com/baiirun/aetherflow/internal/sessions"
 	"github.com/spf13/cobra"
 )
@@ -42,14 +43,16 @@ func init() {
 
 	sessionsCmd.Flags().Bool("json", false, "Output JSON")
 	sessionsCmd.Flags().String("server", "", "Filter by server_ref")
+	sessionsCmd.Flags().String("session-dir", "", "Session registry directory (overrides config/default)")
 	sessionAttachCmd.Flags().String("server", "", "Disambiguate by server_ref when session_id exists on multiple servers")
+	sessionAttachCmd.Flags().String("session-dir", "", "Session registry directory (overrides config/default)")
 }
 
 func runSessions(cmd *cobra.Command, _ []string) {
 	jsonOut, _ := cmd.Flags().GetBool("json")
 	serverFilter, _ := cmd.Flags().GetString("server")
 
-	store, err := sessions.Open("")
+	store, err := openSessionStore(cmd)
 	if err != nil {
 		Fatal("opening session registry: %v", err)
 	}
@@ -105,7 +108,7 @@ func runSessionAttach(cmd *cobra.Command, args []string) {
 	sessionID := args[0]
 	serverFilter, _ := cmd.Flags().GetString("server")
 
-	store, err := sessions.Open("")
+	store, err := openSessionStore(cmd)
 	if err != nil {
 		Fatal("opening session registry: %v", err)
 	}
@@ -142,6 +145,12 @@ func runSessionAttach(cmd *cobra.Command, args []string) {
 	}
 
 	target := matches[0]
+	if _, err := daemon.ValidateServerURLLocal(target.ServerRef); err != nil {
+		Fatal("invalid server_ref %q in session registry: %v", target.ServerRef, err)
+	}
+	if strings.HasPrefix(target.ServerRef, "-") {
+		Fatal("invalid server_ref %q in session registry", target.ServerRef)
+	}
 	attach := exec.Command("opencode", "attach", target.ServerRef, "--session", target.SessionID)
 	attach.Stdin = os.Stdin
 	attach.Stdout = os.Stdout
@@ -153,6 +162,21 @@ func runSessionAttach(cmd *cobra.Command, args []string) {
 		}
 		Fatal("running opencode attach: %v", err)
 	}
+}
+
+func openSessionStore(cmd *cobra.Command) (*sessions.Store, error) {
+	sessionDir, _ := cmd.Flags().GetString("session-dir")
+	if sessionDir != "" {
+		return sessions.Open(sessionDir)
+	}
+
+	configPath, _ := cmd.Flags().GetString("config")
+	if configPath == "" {
+		configPath = ".aetherflow.yaml"
+	}
+	var cfg daemon.Config
+	_ = daemon.LoadConfigFile(configPath, &cfg)
+	return sessions.Open(cfg.SessionDir)
 }
 
 func humanSince(t time.Time) string {

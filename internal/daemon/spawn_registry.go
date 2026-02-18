@@ -25,6 +25,7 @@ const (
 type SpawnEntry struct {
 	SpawnID   string    `json:"spawn_id"`
 	PID       int       `json:"pid"`
+	SessionID string    `json:"session_id,omitempty"`
 	Prompt    string    `json:"prompt"`
 	LogPath   string    `json:"log_path"`
 	SpawnTime time.Time `json:"spawn_time"`
@@ -89,6 +90,19 @@ func (r *SpawnRegistry) Get(spawnID string) *SpawnEntry {
 		return &cp
 	}
 	return nil
+}
+
+// SetSessionID updates the session ID for an existing spawn entry.
+// Returns false when the spawn is not registered.
+func (r *SpawnRegistry) SetSessionID(spawnID, sessionID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, ok := r.entries[spawnID]
+	if !ok {
+		return false
+	}
+	entry.SessionID = sessionID
+	return true
 }
 
 // List returns all registered spawn entries.

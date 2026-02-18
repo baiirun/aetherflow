@@ -49,6 +49,7 @@ type Agent struct {
 	TaskID    string           `json:"task_id"`
 	Role      Role             `json:"role"`
 	PID       int              `json:"pid"`
+	SessionID string           `json:"session_id,omitempty"`
 	SpawnTime time.Time        `json:"spawn_time"`
 	State     AgentState       `json:"state"`
 	ExitCode  int              `json:"exit_code,omitempty"`
@@ -175,11 +176,6 @@ func NewPool(cfg Config, runner CommandRunner, starter ProcessStarter, log *slog
 		starter = ExecProcessStarter
 	}
 
-	store, err := sessions.Open(cfg.SessionDir)
-	if err != nil && log != nil {
-		log.Warn("session registry unavailable", "error", err)
-	}
-
 	return &Pool{
 		mode:     PoolActive,
 		agents:   make(map[string]*Agent),
@@ -189,7 +185,7 @@ func NewPool(cfg Config, runner CommandRunner, starter ProcessStarter, log *slog
 		logDir:   cfg.LogDir,
 		runner:   runner,
 		starter:  starter,
-		sstore:   store,
+		sstore:   nil,
 		work:     NewProgWorkSource(runner),
 		log:      log,
 		pidAlive: defaultPIDAlive,
@@ -360,7 +356,7 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 		"pid", proc.PID(),
 	)
 
-	go p.captureSessionFromLog(logFilePath(p.logDir, task.ID), sessions.Record{
+	go p.captureSessionFromLog(ctx, task.ID, string(agentID), logFilePath(p.logDir, task.ID), sessions.Record{
 		ServerRef: p.config.ServerURL,
 		Directory: "",
 		Project:   p.config.Project,
@@ -397,24 +393,30 @@ func (p *Pool) reap(agent *Agent, proc Process, cleanup io.Closer) {
 
 	duration := time.Since(agent.SpawnTime).Round(time.Second)
 
-	// Single lock to update all state atomically: remove agent, update retries.
+	var targetStatus sessions.Status
+	var sessionID string
+
+	// Single lock to update all pool state atomically.
 	p.mu.Lock()
 	agent.State = AgentExited
 	agent.ExitCode = exitCode
+	sessionID = agent.SessionID
 	delete(p.agents, agent.TaskID)
 	p.names.Release(agent.ID)
 
 	if err == nil {
 		// Clean exit — clear retry count.
 		delete(p.retries, agent.TaskID)
-		p.updateWorkSessionStatus(sessions.OriginPool, agent.TaskID, sessions.StatusIdle)
+		targetStatus = sessions.StatusIdle
 	} else {
 		// Crash — bump retry counter.
 		p.retries[agent.TaskID]++
-		p.updateWorkSessionStatus(sessions.OriginPool, agent.TaskID, sessions.StatusTerminated)
+		targetStatus = sessions.StatusTerminated
 	}
 	attempts := p.retries[agent.TaskID]
 	p.mu.Unlock()
+
+	p.updateSessionStatus(sessionID, sessions.OriginPool, agent.TaskID, targetStatus)
 
 	// Clean exit — agent finished normally.
 	if err == nil {
@@ -538,7 +540,7 @@ func (p *Pool) respawn(taskID string, role Role) {
 		"pid", proc.PID(),
 	)
 
-	go p.captureSessionFromLog(logFilePath(p.logDir, taskID), sessions.Record{
+	go p.captureSessionFromLog(p.ctx, taskID, string(agentID), logFilePath(p.logDir, taskID), sessions.Record{
 		ServerRef: p.config.ServerURL,
 		Directory: "",
 		Project:   p.config.Project,
@@ -551,32 +553,86 @@ func (p *Pool) respawn(taskID string, role Role) {
 	go p.reap(agent, proc, logFile)
 }
 
-func (p *Pool) captureSessionFromLog(path string, base sessions.Record) {
+func (p *Pool) captureSessionFromLog(ctx context.Context, taskID, agentID, path string, base sessions.Record) {
 	if p.sstore == nil {
 		return
 	}
 
 	const maxAttempts = 40
+	var firstErr error
 	for i := 0; i < maxAttempts; i++ {
+		if ctx != nil {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+		}
+
+		p.mu.RLock()
+		a, ok := p.agents[taskID]
+		alive := ok && string(a.ID) == agentID
+		p.mu.RUnlock()
+		if !alive {
+			return
+		}
+
 		sid, err := ParseSessionID(context.Background(), path)
 		if err == nil && sid != "" {
 			base.SessionID = sid
 			base.LastSeenAt = time.Now()
 			if err := p.sstore.Upsert(base); err != nil {
 				p.log.Warn("failed to persist session record", "path", path, "error", err)
+				return
 			}
+
+			p.mu.Lock()
+			if cur, ok := p.agents[taskID]; ok && string(cur.ID) == agentID {
+				cur.SessionID = sid
+			}
+			p.mu.Unlock()
 			return
+		}
+		if err != nil && firstErr == nil {
+			firstErr = err
+			p.log.Debug("session capture retry",
+				"task_id", taskID,
+				"agent_id", agentID,
+				"path", path,
+				"error", err,
+			)
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
+	if firstErr != nil {
+		p.log.Warn("session capture exhausted retries",
+			"task_id", taskID,
+			"agent_id", agentID,
+			"path", path,
+			"attempts", maxAttempts,
+			"first_error", firstErr,
+		)
+	}
 }
 
-func (p *Pool) updateWorkSessionStatus(origin sessions.OriginType, workRef string, status sessions.Status) {
-	if p.sstore == nil || workRef == "" {
+func (p *Pool) updateSessionStatus(sessionID string, origin sessions.OriginType, workRef string, status sessions.Status) {
+	if p.sstore == nil {
 		return
 	}
-	if err := p.sstore.SetStatusByWorkRef(origin, workRef, status); err != nil {
+	if sessionID != "" {
+		if changed, err := p.sstore.SetStatusBySession(p.config.ServerURL, sessionID, status); err != nil {
+			p.log.Warn("failed to update session status by key", "session_id", sessionID, "status", status, "error", err)
+		} else if changed {
+			return
+		}
+	}
+	if workRef == "" {
+		return
+	}
+	if changed, err := p.sstore.SetStatusByWorkRef(origin, workRef, status); err != nil {
 		p.log.Warn("failed to update session status", "work_ref", workRef, "status", status, "error", err)
+	} else if !changed {
+		p.log.Debug("session status update skipped (record not found yet)", "work_ref", workRef, "status", status)
 	}
 }
 

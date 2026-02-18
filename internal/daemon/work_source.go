@@ -6,7 +6,6 @@ import "context"
 // not hard-code a specific backend.
 type WorkSource interface {
 	Claim(ctx context.Context, workRef, project string) error
-	Complete(ctx context.Context, workRef, project string) error
 	GetMeta(ctx context.Context, workRef, project string) (TaskMeta, error)
 }
 
@@ -24,15 +23,6 @@ func NewProgWorkSource(runner CommandRunner) *ProgWorkSource {
 
 func (p *ProgWorkSource) Claim(ctx context.Context, workRef, project string) error {
 	args := []string{"start", workRef}
-	if project != "" {
-		args = append(args, "-p", project)
-	}
-	_, err := p.runner(ctx, "prog", args...)
-	return err
-}
-
-func (p *ProgWorkSource) Complete(ctx context.Context, workRef, project string) error {
-	args := []string{"done", workRef}
 	if project != "" {
 		args = append(args, "-p", project)
 	}

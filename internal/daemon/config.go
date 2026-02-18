@@ -3,11 +3,9 @@ package daemon
 import (
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/baiirun/aetherflow/internal/protocol"
@@ -181,10 +179,10 @@ func (c *Config) Validate() error {
 	if c.ServerURL == "" {
 		c.ServerURL = DefaultServerURL
 	}
-	if _, err := url.ParseRequestURI(c.ServerURL); err != nil {
-		return fmt.Errorf("invalid server-url %q: %w", c.ServerURL, err)
+	if _, err := ValidateServerURLLocal(c.ServerURL); err != nil {
+		return err
 	}
-	if !strings.Contains(c.SpawnCmd, "--attach") {
+	if !spawnCmdHasAttach(c.SpawnCmd) {
 		c.SpawnCmd = EnsureAttachSpawnCmd(c.SpawnCmd, c.ServerURL)
 	}
 	if c.SpawnPolicy == "" {

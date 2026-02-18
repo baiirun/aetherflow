@@ -83,7 +83,7 @@ func TestStoreSetStatusByWorkRef(t *testing.T) {
 	_ = store.Upsert(Record{ServerRef: "http://127.0.0.1:4096", SessionID: "ses_1", Origin: OriginPool, WorkRef: "ts-1"})
 	_ = store.Upsert(Record{ServerRef: "http://127.0.0.1:4096", SessionID: "ses_2", Origin: OriginPool, WorkRef: "ts-2"})
 
-	if err := store.SetStatusByWorkRef(OriginPool, "ts-1", StatusTerminated); err != nil {
+	if _, err := store.SetStatusByWorkRef(OriginPool, "ts-1", StatusTerminated); err != nil {
 		t.Fatalf("SetStatusByWorkRef() error = %v", err)
 	}
 
@@ -106,6 +106,35 @@ func TestStoreSetStatusByWorkRef(t *testing.T) {
 	}
 	if status2 != StatusActive {
 		t.Fatalf("ses_2 status = %q, want %q", status2, StatusActive)
+	}
+}
+
+func TestStoreSetStatusBySession(t *testing.T) {
+	t.Parallel()
+
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	if err := store.Upsert(Record{ServerRef: "http://127.0.0.1:4096", SessionID: "ses_1", Origin: OriginPool, WorkRef: "ts-1"}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	changed, err := store.SetStatusBySession("http://127.0.0.1:4096", "ses_1", StatusIdle)
+	if err != nil {
+		t.Fatalf("SetStatusBySession() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("SetStatusBySession() changed = false, want true")
+	}
+
+	recs, err := store.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(recs) != 1 || recs[0].Status != StatusIdle {
+		t.Fatalf("status = %q, want %q", recs[0].Status, StatusIdle)
 	}
 }
 

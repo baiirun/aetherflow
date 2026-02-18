@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -64,9 +65,8 @@ type diskState struct {
 type Store struct {
 	dir  string
 	path string
+	mu   sync.Mutex
 }
-
-var ioMu sync.Mutex
 
 // DefaultDir returns the default session registry directory.
 func DefaultDir() (string, error) {
@@ -97,8 +97,14 @@ func (s *Store) Path() string { return s.path }
 
 // List returns all records sorted by UpdatedAt descending.
 func (s *Store) List() ([]Record, error) {
-	ioMu.Lock()
-	defer ioMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	unlock, err := s.lockFile()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	state, err := s.readLocked()
 	if err != nil {
@@ -124,8 +130,14 @@ func (s *Store) Upsert(rec Record) error {
 		rec.Status = StatusActive
 	}
 
-	ioMu.Lock()
-	defer ioMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	unlock, err := s.lockFile()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	state, err := s.readLocked()
 	if err != nil {
@@ -163,18 +175,24 @@ func (s *Store) Upsert(rec Record) error {
 }
 
 // SetStatusByWorkRef updates status for matching records.
-func (s *Store) SetStatusByWorkRef(origin OriginType, workRef string, status Status) error {
+func (s *Store) SetStatusByWorkRef(origin OriginType, workRef string, status Status) (bool, error) {
 	if workRef == "" {
-		return nil
+		return false, nil
 	}
 	now := time.Now()
 
-	ioMu.Lock()
-	defer ioMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	unlock, err := s.lockFile()
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
 
 	state, err := s.readLocked()
 	if err != nil {
-		return err
+		return false, err
 	}
 	changed := false
 	for i := range state.Records {
@@ -190,9 +208,50 @@ func (s *Store) SetStatusByWorkRef(origin OriginType, workRef string, status Sta
 		changed = true
 	}
 	if !changed {
-		return nil
+		return false, nil
 	}
-	return s.writeLocked(state)
+	if err := s.writeLocked(state); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// SetStatusBySession updates a record by canonical {server_ref, session_id}.
+func (s *Store) SetStatusBySession(serverRef, sessionID string, status Status) (bool, error) {
+	if serverRef == "" || sessionID == "" {
+		return false, nil
+	}
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	unlock, err := s.lockFile()
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+
+	state, err := s.readLocked()
+	if err != nil {
+		return false, err
+	}
+	for i := range state.Records {
+		r := &state.Records[i]
+		if r.ServerRef != serverRef || r.SessionID != sessionID {
+			continue
+		}
+		r.Status = status
+		r.UpdatedAt = now
+		if status != StatusTerminated {
+			r.LastSeenAt = now
+		}
+		if err := s.writeLocked(state); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 func (s *Store) readLocked() (diskState, error) {
@@ -248,4 +307,20 @@ func (s *Store) writeLocked(state diskState) error {
 		return fmt.Errorf("renaming sessions registry: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) lockFile() (func(), error) {
+	path := s.path + ".lock"
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("opening lock file: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("locking sessions registry: %w", err)
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
 }

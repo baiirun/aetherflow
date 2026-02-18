@@ -85,8 +85,11 @@ func runSpawn(cmd *cobra.Command, args []string) {
 
 	// Phase A server-first launch path: ensure attach-based spawn command.
 	serverURL := fileCfg.ServerURL
-	if cmd.Flags().Changed("spawn-cmd") || serverURL == "" {
+	if serverURL == "" {
 		serverURL = daemon.DefaultServerURL
+	}
+	if _, err := daemon.ValidateServerURLLocal(serverURL); err != nil {
+		Fatal("invalid server URL: %v", err)
 	}
 	spawnCmd = daemon.EnsureAttachSpawnCmd(spawnCmd, serverURL)
 
