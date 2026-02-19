@@ -67,6 +67,87 @@ func FormatLogLine(raw []byte) string {
 	}
 }
 
+// FormatEvent formats a SessionEvent from the plugin event pipeline into a
+// human-readable string. Returns empty string for events that should be hidden.
+//
+// Plugin events use "message.part.updated" with data: {"part": {...}} where
+// the part has type "text", "tool", "step-start", "step-finish", etc. This
+// function handles the same event types as FormatLogLine but from the plugin
+// event shape rather than the JSONL shape.
+func FormatEvent(ev SessionEvent) string {
+	if ev.EventType != "message.part.updated" {
+		return ""
+	}
+	if len(ev.Data) == 0 {
+		return ""
+	}
+
+	var envelope struct {
+		Part json.RawMessage `json:"part"`
+	}
+	if err := json.Unmarshal(ev.Data, &envelope); err != nil || len(envelope.Part) == 0 {
+		return ""
+	}
+
+	// Parse the part into a LogEvent-compatible structure.
+	var part struct {
+		Type  string `json:"type"`
+		Text  string `json:"text"`
+		Tool  string `json:"tool"`
+		State struct {
+			Status string          `json:"status"`
+			Input  json.RawMessage `json:"input"`
+			Output string          `json:"output"`
+			Title  string          `json:"title"`
+			Time   struct {
+				Start int64 `json:"start"`
+				End   int64 `json:"end"`
+			} `json:"time"`
+		} `json:"state"`
+		Reason string  `json:"reason"`
+		Cost   float64 `json:"cost"`
+		Tokens struct {
+			Input     int `json:"input"`
+			Output    int `json:"output"`
+			Reasoning int `json:"reasoning"`
+			Cache     struct {
+				Read  int `json:"read"`
+				Write int `json:"write"`
+			} `json:"cache"`
+		} `json:"tokens"`
+	}
+	if err := json.Unmarshal(envelope.Part, &part); err != nil {
+		return ""
+	}
+
+	ts := time.UnixMilli(ev.Timestamp).Format("15:04:05")
+
+	// Map plugin part types to the existing formatting functions via LogEvent.
+	var logEv LogEvent
+	logEv.Timestamp = ev.Timestamp
+	logEv.Part.Type = part.Type
+	logEv.Part.Text = part.Text
+	logEv.Part.Tool = part.Tool
+	logEv.Part.State = part.State
+	logEv.Part.Reason = part.Reason
+	logEv.Part.Cost = part.Cost
+	logEv.Part.Tokens = part.Tokens
+
+	switch part.Type {
+	case "text":
+		logEv.Type = "text"
+		return formatText(ts, logEv)
+	case "tool":
+		logEv.Type = "tool_use"
+		return formatToolUse(ts, logEv)
+	case "step-finish":
+		logEv.Type = "step_finish"
+		return formatStepFinish(ts, logEv)
+	default:
+		return ""
+	}
+}
+
 // ANSI color helpers for terminal output.
 const (
 	ansiReset   = "\033[0m"

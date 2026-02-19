@@ -166,6 +166,228 @@ func TestHandleSessionEventIsolatesSessions(t *testing.T) {
 	}
 }
 
+// --- events.list tests ---
+
+func TestHandleEventsListMissingAgentName(t *testing.T) {
+	d := newTestDaemonForEvents()
+	resp := d.handleEventsList(nil)
+	if resp.Success {
+		t.Fatal("expected error for missing agent_name")
+	}
+	if resp.Error != "agent_name is required" {
+		t.Errorf("Error = %q, want %q", resp.Error, "agent_name is required")
+	}
+}
+
+func TestHandleEventsListAgentNotFound(t *testing.T) {
+	d := newTestDaemonForEvents()
+	params, _ := json.Marshal(EventsListParams{AgentName: "nonexistent"})
+	resp := d.handleEventsList(params)
+
+	if !resp.Success {
+		t.Fatalf("expected success (empty result), got error: %s", resp.Error)
+	}
+
+	var result EventsListResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if len(result.Lines) != 0 {
+		t.Errorf("Lines = %v, want empty", result.Lines)
+	}
+	if result.LastTS != 0 {
+		t.Errorf("LastTS = %d, want 0", result.LastTS)
+	}
+}
+
+func TestHandleEventsListWithSpawnEvents(t *testing.T) {
+	d := newTestDaemonForEvents()
+
+	// Register a spawn with a session ID.
+	_ = d.spawns.Register(SpawnEntry{
+		SpawnID:   "agent-x",
+		PID:       1234,
+		State:     SpawnRunning,
+		SessionID: "ses-x",
+		SpawnTime: time.Now(),
+	})
+
+	// Push a tool event into the buffer.
+	toolData, _ := json.Marshal(map[string]any{
+		"part": map[string]any{
+			"id":   "prt_1",
+			"type": "tool",
+			"tool": "bash",
+			"state": map[string]any{
+				"status": "completed",
+				"input":  map[string]string{"command": "echo hello"},
+				"title":  "echo hello",
+				"time":   map[string]int64{"start": 1000, "end": 2000},
+			},
+		},
+	})
+	d.events.Push(SessionEvent{
+		EventType: "message.part.updated",
+		SessionID: "ses-x",
+		Timestamp: 1500,
+		Data:      toolData,
+	})
+
+	params, _ := json.Marshal(EventsListParams{AgentName: "agent-x"})
+	resp := d.handleEventsList(params)
+
+	if !resp.Success {
+		t.Fatalf("expected success, got error: %s", resp.Error)
+	}
+
+	var result EventsListResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if result.SessionID != "ses-x" {
+		t.Errorf("SessionID = %q, want %q", result.SessionID, "ses-x")
+	}
+	if result.LastTS != 1500 {
+		t.Errorf("LastTS = %d, want 1500", result.LastTS)
+	}
+	if len(result.Lines) != 1 {
+		t.Fatalf("Lines count = %d, want 1", len(result.Lines))
+	}
+	// Verify the formatted line contains "bash".
+	if !containsStr(result.Lines[0], "bash") {
+		t.Errorf("expected formatted line to contain 'bash', got: %s", result.Lines[0])
+	}
+}
+
+func TestHandleEventsListAfterTimestamp(t *testing.T) {
+	d := newTestDaemonForEvents()
+
+	_ = d.spawns.Register(SpawnEntry{
+		SpawnID:   "agent-y",
+		PID:       5678,
+		State:     SpawnRunning,
+		SessionID: "ses-y",
+		SpawnTime: time.Now(),
+	})
+
+	// Push two events at different timestamps.
+	for i, ts := range []int64{1000, 2000} {
+		data, _ := json.Marshal(map[string]any{
+			"part": map[string]any{
+				"id":   "prt_" + string(rune('a'+i)),
+				"type": "tool",
+				"tool": "bash",
+				"state": map[string]any{
+					"status": "completed",
+					"input":  map[string]string{"command": "cmd" + string(rune('1'+i))},
+					"time":   map[string]int64{"start": ts, "end": ts + 100},
+				},
+			},
+		})
+		d.events.Push(SessionEvent{
+			EventType: "message.part.updated",
+			SessionID: "ses-y",
+			Timestamp: ts,
+			Data:      data,
+		})
+	}
+
+	// Request events after timestamp 1000 — should get only the second one.
+	params, _ := json.Marshal(EventsListParams{AgentName: "agent-y", AfterTimestamp: 1000})
+	resp := d.handleEventsList(params)
+
+	if !resp.Success {
+		t.Fatalf("expected success, got error: %s", resp.Error)
+	}
+
+	var result EventsListResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if len(result.Lines) != 1 {
+		t.Fatalf("Lines count = %d, want 1 (only events after ts=1000)", len(result.Lines))
+	}
+	if result.LastTS != 2000 {
+		t.Errorf("LastTS = %d, want 2000", result.LastTS)
+	}
+}
+
+func TestHandleEventsListHidesNonDisplayableEvents(t *testing.T) {
+	d := newTestDaemonForEvents()
+
+	_ = d.spawns.Register(SpawnEntry{
+		SpawnID:   "agent-z",
+		PID:       9999,
+		State:     SpawnRunning,
+		SessionID: "ses-z",
+		SpawnTime: time.Now(),
+	})
+
+	// Push a session.created event (not message.part.updated) — should not appear in lines.
+	d.events.Push(SessionEvent{
+		EventType: "session.created",
+		SessionID: "ses-z",
+		Timestamp: 1000,
+		Data:      json.RawMessage(`{"info":{"id":"ses-z"}}`),
+	})
+
+	// Push a step-start event (should be hidden by FormatEvent).
+	stepData, _ := json.Marshal(map[string]any{
+		"part": map[string]any{
+			"type": "step-start",
+		},
+	})
+	d.events.Push(SessionEvent{
+		EventType: "message.part.updated",
+		SessionID: "ses-z",
+		Timestamp: 1001,
+		Data:      stepData,
+	})
+
+	params, _ := json.Marshal(EventsListParams{AgentName: "agent-z"})
+	resp := d.handleEventsList(params)
+
+	if !resp.Success {
+		t.Fatalf("expected success, got error: %s", resp.Error)
+	}
+
+	var result EventsListResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if len(result.Lines) != 0 {
+		t.Errorf("expected 0 displayable lines, got %d: %v", len(result.Lines), result.Lines)
+	}
+	// But LastTS should still reflect the latest event.
+	if result.LastTS != 1001 {
+		t.Errorf("LastTS = %d, want 1001", result.LastTS)
+	}
+}
+
+func TestHandleEventsListInvalidJSON(t *testing.T) {
+	d := newTestDaemonForEvents()
+	resp := d.handleEventsList(json.RawMessage(`{invalid`))
+	if resp.Success {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func containsStr(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && findSubstr(s, substr))
+}
+
+func findSubstr(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
 // --- claimSession tests ---
 
 func TestClaimSessionPoolAgent(t *testing.T) {

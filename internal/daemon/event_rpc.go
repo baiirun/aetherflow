@@ -56,6 +56,108 @@ func (d *Daemon) handleSessionEvent(rawParams json.RawMessage) *Response {
 	return &Response{Success: true}
 }
 
+// EventsListParams are the parameters for the events.list RPC method.
+type EventsListParams struct {
+	AgentName      string `json:"agent_name"`
+	AfterTimestamp int64  `json:"after_timestamp,omitempty"` // for incremental reads
+	Raw            bool   `json:"raw,omitempty"`             // return raw JSON events instead of formatted lines
+}
+
+// EventsListResult is the response for the events.list RPC method.
+type EventsListResult struct {
+	Lines     []string       `json:"lines,omitempty"`  // formatted human-readable lines (when raw=false)
+	Events    []SessionEvent `json:"events,omitempty"` // raw events (when raw=true)
+	SessionID string         `json:"session_id,omitempty"`
+	LastTS    int64          `json:"last_ts"` // timestamp of last event (for follow pagination)
+}
+
+// handleEventsList returns events for an agent from the in-memory event buffer.
+// The agent is looked up in the pool and spawn registry to resolve its session ID,
+// then events are read from the buffer. Supports incremental reads via after_timestamp.
+func (d *Daemon) handleEventsList(rawParams json.RawMessage) *Response {
+	var params EventsListParams
+	if len(rawParams) > 0 {
+		if err := json.Unmarshal(rawParams, &params); err != nil {
+			return &Response{Success: false, Error: fmt.Sprintf("invalid params: %v", err)}
+		}
+	}
+	if params.AgentName == "" {
+		return &Response{Success: false, Error: "agent_name is required"}
+	}
+
+	// Resolve agent name → session ID.
+	sessionID := d.resolveSessionID(params.AgentName)
+	if sessionID == "" {
+		result, _ := json.Marshal(EventsListResult{})
+		return &Response{Success: true, Result: result}
+	}
+
+	// Read events from buffer.
+	var evs []SessionEvent
+	if params.AfterTimestamp > 0 {
+		evs = d.events.EventsSince(sessionID, params.AfterTimestamp)
+	} else {
+		evs = d.events.Events(sessionID)
+	}
+
+	var lastTS int64
+	if len(evs) > 0 {
+		lastTS = evs[len(evs)-1].Timestamp
+	}
+
+	if params.Raw {
+		result, err := json.Marshal(EventsListResult{
+			Events:    evs,
+			SessionID: sessionID,
+			LastTS:    lastTS,
+		})
+		if err != nil {
+			return &Response{Success: false, Error: fmt.Sprintf("marshal error: %v", err)}
+		}
+		return &Response{Success: true, Result: result}
+	}
+
+	// Format events into human-readable lines.
+	var lines []string
+	for _, ev := range evs {
+		line := FormatEvent(ev)
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+
+	result, err := json.Marshal(EventsListResult{
+		Lines:     lines,
+		SessionID: sessionID,
+		LastTS:    lastTS,
+	})
+	if err != nil {
+		return &Response{Success: false, Error: fmt.Sprintf("marshal error: %v", err)}
+	}
+	return &Response{Success: true, Result: result}
+}
+
+// resolveSessionID looks up an agent by name in the pool and spawn registry
+// and returns its opencode session ID. Returns empty string if the agent
+// is not found or has no session ID yet.
+func (d *Daemon) resolveSessionID(agentName string) string {
+	// Check pool first.
+	if d.pool != nil {
+		for _, a := range d.pool.Status() {
+			if string(a.ID) == agentName && a.SessionID != "" {
+				return a.SessionID
+			}
+		}
+	}
+	// Check spawn registry.
+	if d.spawns != nil {
+		if entry := d.spawns.Get(agentName); entry != nil && entry.SessionID != "" {
+			return entry.SessionID
+		}
+	}
+	return ""
+}
+
 // claimSession correlates a newly-created session ID to a pool agent or
 // spawn entry that hasn't been assigned a session yet. This replaces the
 // old JSONL-polling approach (captureSessionFromLog / captureSpawnSession).

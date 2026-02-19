@@ -347,6 +347,8 @@ func (d *Daemon) handleRequest(ctx context.Context, req *Request) *Response {
 		return d.handleSpawnDeregister(req.Params)
 	case "session.event":
 		return d.handleSessionEvent(req.Params)
+	case "events.list":
+		return d.handleEventsList(req.Params)
 	case "shutdown":
 		return d.handleShutdown()
 	default:

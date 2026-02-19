@@ -195,6 +195,31 @@ func (c *Client) LogsPath(agentName string) (string, error) {
 	return result.Path, nil
 }
 
+// EventsListParams are the parameters for the events.list RPC.
+type EventsListParams struct {
+	AgentName      string `json:"agent_name"`
+	AfterTimestamp int64  `json:"after_timestamp,omitempty"`
+	Raw            bool   `json:"raw,omitempty"`
+}
+
+// EventsListResult is the response for the events.list RPC.
+type EventsListResult struct {
+	Lines     []string `json:"lines,omitempty"`
+	SessionID string   `json:"session_id,omitempty"`
+	LastTS    int64    `json:"last_ts"`
+}
+
+// EventsList returns events for an agent from the daemon's event buffer.
+// When afterTimestamp is set, only events after that timestamp are returned.
+func (c *Client) EventsList(agentName string, afterTimestamp int64) (*EventsListResult, error) {
+	params := EventsListParams{AgentName: agentName, AfterTimestamp: afterTimestamp}
+	var result EventsListResult
+	if err := c.call("events.list", params, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // PoolModeResult is the response for pool control RPCs.
 type PoolModeResult struct {
 	Mode    string `json:"mode"`
