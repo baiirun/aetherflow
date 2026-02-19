@@ -1,4 +1,3 @@
-// Package daemon provides the log formatter for human-readable JSONL output.
 package daemon
 
 import (
@@ -8,7 +7,9 @@ import (
 	"time"
 )
 
-// LogEvent is a parsed JSONL log line with all event types supported.
+// LogEvent is the internal formatting target for event display.
+// FormatEvent parses SessionEvent data into this structure to reuse
+// the shared formatting functions (formatText, formatToolUse, formatStepFinish).
 type LogEvent struct {
 	Type      string `json:"type"`
 	Timestamp int64  `json:"timestamp"` // Unix millis
@@ -44,36 +45,13 @@ type LogEvent struct {
 	} `json:"part"`
 }
 
-// FormatLogLine parses a raw JSONL line and returns a human-readable string.
-// Returns empty string for events that should be hidden (e.g. step_start).
-func FormatLogLine(raw []byte) string {
-	var ev LogEvent
-	if err := json.Unmarshal(raw, &ev); err != nil {
-		return ""
-	}
-
-	ts := time.UnixMilli(ev.Timestamp).Format("15:04:05")
-
-	switch ev.Type {
-	case "text":
-		return formatText(ts, ev)
-	case "tool_use":
-		return formatToolUse(ts, ev)
-	case "step_finish":
-		return formatStepFinish(ts, ev)
-	default:
-		// step_start, etc. — skip
-		return ""
-	}
-}
-
 // FormatEvent formats a SessionEvent from the plugin event pipeline into a
 // human-readable string. Returns empty string for events that should be hidden.
 //
 // Plugin events use "message.part.updated" with data: {"part": {...}} where
 // the part has type "text", "tool", "step-start", "step-finish", etc. This
-// function handles the same event types as FormatLogLine but from the plugin
-// event shape rather than the JSONL shape.
+// function handles text, tool, and step-finish event types from the plugin
+// event shape.
 func FormatEvent(ev SessionEvent) string {
 	if ev.EventType != "message.part.updated" {
 		return ""

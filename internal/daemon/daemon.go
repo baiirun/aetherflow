@@ -333,8 +333,6 @@ func (d *Daemon) handleRequest(ctx context.Context, req *Request) *Response {
 		return d.handleStatusFull(ctx)
 	case "status.agent":
 		return d.handleStatusAgent(ctx, req.Params)
-	case "logs.path":
-		return d.handleLogsPath(req.Params)
 	case "pool.drain":
 		return d.handlePoolDrain()
 	case "pool.pause":

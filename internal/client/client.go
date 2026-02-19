@@ -133,7 +133,7 @@ type Task struct {
 	Title    string `json:"title"`
 }
 
-// ToolCall is a single tool invocation from the agent's JSONL log.
+// ToolCall is a single tool invocation from the agent's event stream.
 type ToolCall struct {
 	Timestamp  time.Time `json:"timestamp"`
 	Tool       string    `json:"tool"`
@@ -173,26 +173,6 @@ func (c *Client) StatusFull() (*FullStatus, error) {
 		return nil, err
 	}
 	return &result, nil
-}
-
-// LogsPathParams are the parameters for the logs.path RPC.
-type LogsPathParams struct {
-	AgentName string `json:"agent_name"`
-}
-
-// LogsPathResult is the response for the logs.path RPC.
-type LogsPathResult struct {
-	Path string `json:"path"`
-}
-
-// LogsPath returns the JSONL log file path for a running agent.
-func (c *Client) LogsPath(agentName string) (string, error) {
-	params := LogsPathParams{AgentName: agentName}
-	var result LogsPathResult
-	if err := c.call("logs.path", params, &result); err != nil {
-		return "", err
-	}
-	return result.Path, nil
 }
 
 // EventsListParams are the parameters for the events.list RPC.
