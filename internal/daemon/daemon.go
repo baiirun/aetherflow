@@ -365,7 +365,7 @@ func (d *Daemon) handleStatusAgent(ctx context.Context, rawParams json.RawMessag
 	}
 
 	start := time.Now()
-	detail, err := BuildAgentDetail(ctx, d.pool, d.spawns, d.config, d.config.Runner, params)
+	detail, err := BuildAgentDetail(ctx, d.pool, d.spawns, d.events, d.config, d.config.Runner, params)
 	if err != nil {
 		return &Response{Success: false, Error: err.Error()}
 	}
