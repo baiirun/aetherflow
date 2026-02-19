@@ -101,9 +101,11 @@ type SpawnStatus struct {
 	SpawnID   string    `json:"spawn_id"`
 	PID       int       `json:"pid"`
 	SessionID string    `json:"session_id,omitempty"`
+	State     string    `json:"state"`
 	Prompt    string    `json:"prompt"`
 	LogPath   string    `json:"log_path"`
 	SpawnTime time.Time `json:"spawn_time"`
+	ExitedAt  time.Time `json:"exited_at,omitempty"`
 }
 
 // AgentStatus is a single agent's enriched status.

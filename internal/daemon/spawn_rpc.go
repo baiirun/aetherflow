@@ -79,7 +79,9 @@ type SpawnDeregisterParams struct {
 	SpawnID string `json:"spawn_id"`
 }
 
-// handleSpawnDeregister removes a spawned agent from the registry.
+// handleSpawnDeregister marks a spawned agent as exited in the registry.
+// The entry is kept (preserving the agent→session mapping for af status)
+// until the periodic sweep removes it after exitedSpawnTTL.
 func (d *Daemon) handleSpawnDeregister(rawParams json.RawMessage) *Response {
 	var params SpawnDeregisterParams
 	if len(rawParams) > 0 {
@@ -92,7 +94,7 @@ func (d *Daemon) handleSpawnDeregister(rawParams json.RawMessage) *Response {
 	}
 
 	entry := d.spawns.Get(params.SpawnID)
-	d.spawns.Deregister(params.SpawnID)
+	d.spawns.MarkExited(params.SpawnID)
 	if d.sstore != nil {
 		if entry != nil && entry.SessionID != "" {
 			if _, err := d.sstore.SetStatusBySession(d.config.ServerURL, entry.SessionID, sessions.StatusIdle); err != nil {
@@ -104,7 +106,7 @@ func (d *Daemon) handleSpawnDeregister(rawParams json.RawMessage) *Response {
 		}
 	}
 
-	d.log.Info("spawn deregistered", "spawn_id", params.SpawnID)
+	d.log.Info("spawn exited", "spawn_id", params.SpawnID)
 
 	return &Response{Success: true}
 }

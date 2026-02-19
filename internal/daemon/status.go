@@ -24,12 +24,14 @@ type FullStatus struct {
 
 // SpawnStatus is the status of a spawned agent registered with the daemon.
 type SpawnStatus struct {
-	SpawnID   string    `json:"spawn_id"`
-	PID       int       `json:"pid"`
-	SessionID string    `json:"session_id,omitempty"`
-	Prompt    string    `json:"prompt"`
-	LogPath   string    `json:"log_path"`
-	SpawnTime time.Time `json:"spawn_time"`
+	SpawnID   string     `json:"spawn_id"`
+	PID       int        `json:"pid"`
+	SessionID string     `json:"session_id,omitempty"`
+	State     SpawnState `json:"state"`
+	Prompt    string     `json:"prompt"`
+	LogPath   string     `json:"log_path"`
+	SpawnTime time.Time  `json:"spawn_time"`
+	ExitedAt  time.Time  `json:"exited_at,omitempty"`
 }
 
 // AgentStatus enriches an Agent with task metadata from prog.

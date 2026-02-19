@@ -174,7 +174,7 @@ func TestSpawnRegistryRegisterFull(t *testing.T) {
 	}
 }
 
-func TestSpawnRegistrySweepDead(t *testing.T) {
+func TestSpawnRegistrySweepDeadMarksExited(t *testing.T) {
 	r := NewSpawnRegistry()
 
 	// Override pidAlive to control which PIDs are "alive".
@@ -185,19 +185,94 @@ func TestSpawnRegistrySweepDead(t *testing.T) {
 	_ = r.Register(SpawnEntry{SpawnID: "spawn-dead", PID: 200})
 	_ = r.Register(SpawnEntry{SpawnID: "spawn-alive-2", PID: 300})
 
-	removed := r.SweepDead()
-	if removed != 1 {
-		t.Errorf("SweepDead removed %d, want 1", removed)
+	changed := r.SweepDead()
+	if changed != 1 {
+		t.Errorf("SweepDead changed %d, want 1", changed)
 	}
 
-	if r.Get("spawn-dead") != nil {
-		t.Error("dead entry should have been swept")
+	// Dead entry should be marked exited, not removed.
+	dead := r.Get("spawn-dead")
+	if dead == nil {
+		t.Fatal("dead entry should still exist (marked exited, not removed)")
 	}
-	if r.Get("spawn-alive-1") == nil {
-		t.Error("alive entry spawn-alive-1 should still exist")
+	if dead.State != SpawnExited {
+		t.Errorf("State = %q, want %q", dead.State, SpawnExited)
 	}
-	if r.Get("spawn-alive-2") == nil {
-		t.Error("alive entry spawn-alive-2 should still exist")
+	if dead.ExitedAt.IsZero() {
+		t.Error("ExitedAt should be set")
+	}
+
+	// Alive entries should still be running.
+	if a := r.Get("spawn-alive-1"); a == nil || a.State != SpawnRunning {
+		t.Error("alive entry spawn-alive-1 should still be running")
+	}
+	if a := r.Get("spawn-alive-2"); a == nil || a.State != SpawnRunning {
+		t.Error("alive entry spawn-alive-2 should still be running")
+	}
+}
+
+func TestSpawnRegistrySweepRemovesExpiredExited(t *testing.T) {
+	r := NewSpawnRegistry()
+	r.pidAlive = func(pid int) bool { return true }
+
+	// Register an already-exited entry with an old ExitedAt.
+	_ = r.Register(SpawnEntry{
+		SpawnID:  "spawn-old-exit",
+		PID:      100,
+		State:    SpawnExited,
+		ExitedAt: time.Now().Add(-2 * exitedSpawnTTL), // well past TTL
+	})
+	// Register a recently-exited entry.
+	_ = r.Register(SpawnEntry{
+		SpawnID:  "spawn-recent-exit",
+		PID:      200,
+		State:    SpawnExited,
+		ExitedAt: time.Now().Add(-1 * time.Minute), // within TTL
+	})
+	// Register a running entry.
+	_ = r.Register(SpawnEntry{SpawnID: "spawn-running", PID: 300})
+
+	changed := r.SweepDead()
+	if changed != 1 {
+		t.Errorf("SweepDead changed %d, want 1 (removed expired exited)", changed)
+	}
+
+	if r.Get("spawn-old-exit") != nil {
+		t.Error("expired exited entry should have been removed")
+	}
+	if r.Get("spawn-recent-exit") == nil {
+		t.Error("recently exited entry should still exist")
+	}
+	if r.Get("spawn-running") == nil {
+		t.Error("running entry should still exist")
+	}
+}
+
+func TestSpawnRegistryMarkExited(t *testing.T) {
+	r := NewSpawnRegistry()
+	_ = r.Register(SpawnEntry{SpawnID: "spawn-test", PID: 100})
+
+	if !r.MarkExited("spawn-test") {
+		t.Error("MarkExited should return true for existing entry")
+	}
+
+	got := r.Get("spawn-test")
+	if got == nil {
+		t.Fatal("entry should still exist after MarkExited")
+	}
+	if got.State != SpawnExited {
+		t.Errorf("State = %q, want %q", got.State, SpawnExited)
+	}
+	if got.ExitedAt.IsZero() {
+		t.Error("ExitedAt should be set")
+	}
+}
+
+func TestSpawnRegistryMarkExitedNonexistent(t *testing.T) {
+	r := NewSpawnRegistry()
+
+	if r.MarkExited("nonexistent") {
+		t.Error("MarkExited should return false for nonexistent entry")
 	}
 }
 
