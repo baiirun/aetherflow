@@ -65,8 +65,7 @@ type Process interface {
 
 // ProcessStarter spawns a long-running agent process.
 // The prompt is the rendered role prompt passed as the message argument to the spawn command.
-// agentID is set as the AETHERFLOW_AGENT_ID environment variable on the spawned process
-// so plugins inside the agent session can identify which agent they belong to.
+// agentID is set as the AETHERFLOW_AGENT_ID environment variable on the spawned process.
 // stdout receives the process's standard output (typically a log file for JSONL capture).
 // This is the seam for testing — swap with a fake that returns immediately.
 type ProcessStarter func(ctx context.Context, spawnCmd string, prompt string, agentID string, stdout io.Writer) (Process, error)
@@ -82,8 +81,7 @@ func (p *execProcess) PID() int    { return p.cmd.Process.Pid }
 // ExecProcessStarter spawns a real OS process.
 // The prompt is appended as the final argument to the spawn command,
 // e.g. "opencode run --format json" becomes ["opencode", "run", "--format", "json", "<prompt>"].
-// agentID is exposed as the AETHERFLOW_AGENT_ID environment variable so plugins
-// running inside the agent session can identify which agent they belong to.
+// agentID is exposed as the AETHERFLOW_AGENT_ID environment variable.
 // stdout receives the process's standard output (typically a JSONL log file).
 func ExecProcessStarter(ctx context.Context, spawnCmd string, prompt string, agentID string, stdout io.Writer) (Process, error) {
 	parts := strings.Fields(spawnCmd)
@@ -355,15 +353,8 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 		"pid", proc.PID(),
 	)
 
-	go p.captureSessionFromLog(ctx, task.ID, string(agentID), logFilePath(p.logDir, task.ID), sessions.Record{
-		ServerRef: p.config.ServerURL,
-		Directory: "",
-		Project:   p.config.Project,
-		Origin:    sessions.OriginPool,
-		WorkRef:   task.ID,
-		AgentID:   string(agentID),
-		Status:    sessions.StatusActive,
-	})
+	// Session ID is captured when the session.created plugin event arrives
+	// at the daemon — see event_rpc.go claimSession.
 
 	// Wait for process exit in background.
 	go p.reap(agent, proc, logFile)
@@ -539,79 +530,10 @@ func (p *Pool) respawn(taskID string, role Role) {
 		"pid", proc.PID(),
 	)
 
-	go p.captureSessionFromLog(p.ctx, taskID, string(agentID), logFilePath(p.logDir, taskID), sessions.Record{
-		ServerRef: p.config.ServerURL,
-		Directory: "",
-		Project:   p.config.Project,
-		Origin:    sessions.OriginPool,
-		WorkRef:   taskID,
-		AgentID:   string(agentID),
-		Status:    sessions.StatusActive,
-	})
+	// Session ID is captured when the session.created plugin event arrives
+	// at the daemon — see event_rpc.go claimSession.
 
 	go p.reap(agent, proc, logFile)
-}
-
-func (p *Pool) captureSessionFromLog(ctx context.Context, taskID, agentID, path string, base sessions.Record) {
-	if p.sstore == nil {
-		return
-	}
-
-	const maxAttempts = 40
-	var firstErr error
-	for i := 0; i < maxAttempts; i++ {
-		if ctx != nil {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-		}
-
-		p.mu.RLock()
-		a, ok := p.agents[taskID]
-		alive := ok && string(a.ID) == agentID
-		p.mu.RUnlock()
-		if !alive {
-			return
-		}
-
-		sid, err := ParseSessionID(context.Background(), path)
-		if err == nil && sid != "" {
-			base.SessionID = sid
-			base.LastSeenAt = time.Now()
-			if err := p.sstore.Upsert(base); err != nil {
-				p.log.Warn("failed to persist session record", "path", path, "error", err)
-				return
-			}
-
-			p.mu.Lock()
-			if cur, ok := p.agents[taskID]; ok && string(cur.ID) == agentID {
-				cur.SessionID = sid
-			}
-			p.mu.Unlock()
-			return
-		}
-		if err != nil && firstErr == nil {
-			firstErr = err
-			p.log.Debug("session capture retry",
-				"task_id", taskID,
-				"agent_id", agentID,
-				"path", path,
-				"error", err,
-			)
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	if firstErr != nil {
-		p.log.Warn("session capture exhausted retries",
-			"task_id", taskID,
-			"agent_id", agentID,
-			"path", path,
-			"attempts", maxAttempts,
-			"first_error", firstErr,
-		)
-	}
 }
 
 func (p *Pool) updateSessionStatus(sessionID string, origin sessions.OriginType, workRef string, status sessions.Status) {
@@ -633,6 +555,33 @@ func (p *Pool) updateSessionStatus(sessionID string, origin sessions.OriginType,
 	} else if !changed {
 		p.log.Debug("session status update skipped (record not found yet)", "work_ref", workRef, "status", status)
 	}
+}
+
+// SetSessionID assigns a session ID to the pool agent with the given name.
+// Returns false if the agent is not found.
+func (p *Pool) SetSessionID(agentName, sessionID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, a := range p.agents {
+		if string(a.ID) == agentName {
+			a.SessionID = sessionID
+			return true
+		}
+	}
+	return false
+}
+
+// TaskIDForAgent returns the task ID for the pool agent with the given name.
+// Returns empty string if the agent is not found.
+func (p *Pool) TaskIDForAgent(agentName string) string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, a := range p.agents {
+		if string(a.ID) == agentName {
+			return a.TaskID
+		}
+	}
+	return ""
 }
 
 // runningCount returns the number of currently running agents.

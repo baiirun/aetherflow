@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -69,7 +68,8 @@ func (d *Daemon) handleSpawnRegister(rawParams json.RawMessage) *Response {
 		"log_path", logPath,
 	)
 
-	go d.captureSpawnSession(logPath, params.SpawnID)
+	// Session ID is captured when the session.created plugin event arrives
+	// at the daemon — see event_rpc.go claimSession.
 
 	return &Response{Success: true}
 }
@@ -107,43 +107,4 @@ func (d *Daemon) handleSpawnDeregister(rawParams json.RawMessage) *Response {
 	d.log.Info("spawn deregistered", "spawn_id", params.SpawnID)
 
 	return &Response{Success: true}
-}
-
-func (d *Daemon) captureSpawnSession(path, spawnID string) {
-	if d.sstore == nil {
-		return
-	}
-
-	const maxAttempts = 40
-	for i := 0; i < maxAttempts; i++ {
-		if d.spawns.Get(spawnID) == nil {
-			return
-		}
-
-		sid, err := ParseSessionID(context.Background(), path)
-		if err == nil && sid != "" {
-			if d.spawns.Get(spawnID) == nil {
-				return
-			}
-			rec := sessions.Record{
-				ServerRef: d.config.ServerURL,
-				SessionID: sid,
-				Project:   d.config.Project,
-				Origin:    sessions.OriginSpawn,
-				WorkRef:   spawnID,
-				Status:    sessions.StatusActive,
-			}
-			if err := d.sstore.Upsert(rec); err != nil {
-				d.log.Warn("failed to persist spawn session record", "spawn_id", spawnID, "error", err)
-				return
-			}
-			_ = d.spawns.SetSessionID(spawnID, sid)
-			return
-		}
-		if err != nil && i == 0 {
-			d.log.Debug("spawn session capture retry", "spawn_id", spawnID, "path", path, "error", err)
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	d.log.Warn("spawn session capture exhausted retries", "spawn_id", spawnID, "path", path, "attempts", maxAttempts)
 }

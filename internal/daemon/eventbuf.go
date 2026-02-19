@@ -5,7 +5,7 @@ import (
 	"sync"
 )
 
-// DefaultEventBufSize is the maximum number of events stored per agent.
+// DefaultEventBufSize is the maximum number of events stored per session.
 // Oldest events are evicted when this limit is exceeded.
 const DefaultEventBufSize = 2000
 
@@ -13,46 +13,49 @@ const DefaultEventBufSize = 2000
 // The Data field carries the raw event properties as-is from the plugin —
 // the daemon parses what it needs and stores the rest opaquely.
 type SessionEvent struct {
-	AgentID   string          `json:"agent_id"`
 	EventType string          `json:"event_type"`
-	SessionID string          `json:"session_id,omitempty"`
+	SessionID string          `json:"session_id"`
 	Timestamp int64           `json:"timestamp"`
 	Data      json.RawMessage `json:"data"`
 }
 
-// EventBuffer stores events per agent in bounded ring buffers.
+// EventBuffer stores events per session in bounded ring buffers.
+// Events are keyed by opencode session ID — the natural identifier
+// that appears on every plugin event. Consumers look up the session ID
+// from the pool agent or spawn entry, then query events by session ID.
+//
 // It is safe for concurrent use.
 type EventBuffer struct {
-	mu      sync.RWMutex
-	agents  map[string]*agentBuf
-	maxSize int
+	mu       sync.RWMutex
+	sessions map[string]*sessionBuf
+	maxSize  int
 }
 
-type agentBuf struct {
+type sessionBuf struct {
 	events []SessionEvent
 }
 
-// NewEventBuffer creates a new event buffer with the given per-agent capacity.
+// NewEventBuffer creates a new event buffer with the given per-session capacity.
 func NewEventBuffer(maxSize int) *EventBuffer {
 	if maxSize <= 0 {
 		maxSize = DefaultEventBufSize
 	}
 	return &EventBuffer{
-		agents:  make(map[string]*agentBuf),
-		maxSize: maxSize,
+		sessions: make(map[string]*sessionBuf),
+		maxSize:  maxSize,
 	}
 }
 
-// Push appends an event to the agent's buffer, evicting the oldest
+// Push appends an event to the session's buffer, evicting the oldest
 // event if the buffer is at capacity.
 func (b *EventBuffer) Push(ev SessionEvent) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	buf, ok := b.agents[ev.AgentID]
+	buf, ok := b.sessions[ev.SessionID]
 	if !ok {
-		buf = &agentBuf{events: make([]SessionEvent, 0, 64)}
-		b.agents[ev.AgentID] = buf
+		buf = &sessionBuf{events: make([]SessionEvent, 0, 64)}
+		b.sessions[ev.SessionID] = buf
 	}
 
 	if len(buf.events) >= b.maxSize {
@@ -65,13 +68,13 @@ func (b *EventBuffer) Push(ev SessionEvent) {
 	}
 }
 
-// Events returns all events for the given agent, oldest first.
-// Returns nil if no events exist for the agent.
-func (b *EventBuffer) Events(agentID string) []SessionEvent {
+// Events returns all events for the given session, oldest first.
+// Returns nil if no events exist for the session.
+func (b *EventBuffer) Events(sessionID string) []SessionEvent {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	buf, ok := b.agents[agentID]
+	buf, ok := b.sessions[sessionID]
 	if !ok || len(buf.events) == 0 {
 		return nil
 	}
@@ -82,13 +85,13 @@ func (b *EventBuffer) Events(agentID string) []SessionEvent {
 	return out
 }
 
-// EventsSince returns events for the given agent with timestamps strictly
+// EventsSince returns events for the given session with timestamps strictly
 // after the given timestamp, oldest first. Useful for incremental reads.
-func (b *EventBuffer) EventsSince(agentID string, afterTimestamp int64) []SessionEvent {
+func (b *EventBuffer) EventsSince(sessionID string, afterTimestamp int64) []SessionEvent {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	buf, ok := b.agents[agentID]
+	buf, ok := b.sessions[sessionID]
 	if !ok || len(buf.events) == 0 {
 		return nil
 	}
@@ -114,19 +117,19 @@ func (b *EventBuffer) EventsSince(agentID string, afterTimestamp int64) []Sessio
 	return out
 }
 
-// Clear removes all events for the given agent.
-func (b *EventBuffer) Clear(agentID string) {
+// Clear removes all events for the given session.
+func (b *EventBuffer) Clear(sessionID string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	delete(b.agents, agentID)
+	delete(b.sessions, sessionID)
 }
 
-// Len returns the number of events stored for the given agent.
-func (b *EventBuffer) Len(agentID string) int {
+// Len returns the number of events stored for the given session.
+func (b *EventBuffer) Len(sessionID string) int {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	buf, ok := b.agents[agentID]
+	buf, ok := b.sessions[sessionID]
 	if !ok {
 		return 0
 	}
