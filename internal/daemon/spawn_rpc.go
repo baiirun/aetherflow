@@ -55,6 +55,7 @@ func (d *Daemon) handleSpawnRegister(rawParams json.RawMessage) *Response {
 	if err := d.spawns.Register(SpawnEntry{
 		SpawnID:   params.SpawnID,
 		PID:       params.PID,
+		State:     SpawnRunning,
 		Prompt:    prompt,
 		LogPath:   logPath,
 		SpawnTime: time.Now(),
@@ -93,8 +94,15 @@ func (d *Daemon) handleSpawnDeregister(rawParams json.RawMessage) *Response {
 		return &Response{Success: false, Error: "spawn_id is required"}
 	}
 
+	if !d.spawns.MarkExited(params.SpawnID) {
+		d.log.Warn("spawn deregister: entry not found or already exited", "spawn_id", params.SpawnID)
+	} else {
+		d.log.Info("spawn exited", "spawn_id", params.SpawnID)
+	}
+
+	// Update session status regardless — the session store may have a record
+	// even if the spawn registry entry was already cleaned up.
 	entry := d.spawns.Get(params.SpawnID)
-	d.spawns.MarkExited(params.SpawnID)
 	if d.sstore != nil {
 		if entry != nil && entry.SessionID != "" {
 			if _, err := d.sstore.SetStatusBySession(d.config.ServerURL, entry.SessionID, sessions.StatusIdle); err != nil {
@@ -105,8 +113,6 @@ func (d *Daemon) handleSpawnDeregister(rawParams json.RawMessage) *Response {
 			d.log.Warn("failed to update spawn session status", "spawn_id", params.SpawnID, "status", sessions.StatusIdle, "error", err)
 		}
 	}
-
-	d.log.Info("spawn exited", "spawn_id", params.SpawnID)
 
 	return &Response{Success: true}
 }

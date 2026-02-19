@@ -81,6 +81,12 @@ type FullStatus struct {
 const (
 	SpawnPolicyAuto   = "auto"
 	SpawnPolicyManual = "manual"
+
+	// SpawnState constants for display code. These mirror the daemon's
+	// SpawnState type but are plain strings — the client package doesn't
+	// import daemon types. The JSON wire format is the boundary.
+	SpawnStateRunning = "running"
+	SpawnStateExited  = "exited"
 )
 
 // NormalizedSpawnPolicy returns the effective spawn policy for status display.
@@ -238,7 +244,7 @@ func (c *Client) SpawnRegister(params SpawnRegisterParams) error {
 	return c.call("spawn.register", params, nil)
 }
 
-// SpawnDeregister removes a spawned agent from the daemon's registry.
+// SpawnDeregister marks a spawned agent as exited in the daemon's registry.
 func (c *Client) SpawnDeregister(spawnID string) error {
 	return c.call("spawn.deregister", struct {
 		SpawnID string `json:"spawn_id"`

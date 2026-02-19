@@ -277,6 +277,7 @@ func TestBuildAgentDetailSpawnWithEvents(t *testing.T) {
 	_ = spawns.Register(SpawnEntry{
 		SpawnID:   "spawn-abc",
 		PID:       9999,
+		State:     SpawnRunning,
 		SessionID: sessionID,
 		Prompt:    "fix the authentication bug in the login flow",
 	})
@@ -336,6 +337,7 @@ func TestBuildAgentDetailSpawnNoSessionID(t *testing.T) {
 	_ = spawns.Register(SpawnEntry{
 		SpawnID: "spawn-nostream",
 		PID:     9999,
+		State:   SpawnRunning,
 		Prompt:  "do something",
 	})
 

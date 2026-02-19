@@ -235,6 +235,7 @@ func TestClaimSessionSpawnEntry(t *testing.T) {
 	_ = spawns.Register(SpawnEntry{
 		SpawnID:   "spawn-test",
 		PID:       12345,
+		State:     SpawnRunning,
 		Prompt:    "test prompt",
 		SpawnTime: time.Now(),
 	})
@@ -306,8 +307,8 @@ func TestClaimSessionNoCandidates(t *testing.T) {
 
 func TestClaimSessionMultipleCandidatesSkips(t *testing.T) {
 	spawns := NewSpawnRegistry()
-	_ = spawns.Register(SpawnEntry{SpawnID: "spawn-a", PID: 100, SpawnTime: time.Now()})
-	_ = spawns.Register(SpawnEntry{SpawnID: "spawn-b", PID: 200, SpawnTime: time.Now()})
+	_ = spawns.Register(SpawnEntry{SpawnID: "spawn-a", PID: 100, State: SpawnRunning, SpawnTime: time.Now()})
+	_ = spawns.Register(SpawnEntry{SpawnID: "spawn-b", PID: 200, State: SpawnRunning, SpawnTime: time.Now()})
 
 	d := &Daemon{
 		events: NewEventBuffer(DefaultEventBufSize),

@@ -229,7 +229,7 @@ func printStatus(s *client.FullStatus) {
 	if len(s.Spawns) > 0 {
 		var running, exited int
 		for _, sp := range s.Spawns {
-			if sp.State == "exited" {
+			if sp.State == client.SpawnStateExited {
 				exited++
 			} else {
 				running++
@@ -250,7 +250,7 @@ func printStatus(s *client.FullStatus) {
 			prompt := truncate(stripANSI(sp.Prompt), promptMax)
 			nameColor := term.Cyan
 			uptimeColor := term.Green
-			if sp.State == "exited" {
+			if sp.State == client.SpawnStateExited {
 				nameColor = term.Dim
 				uptimeColor = term.Dim
 			}

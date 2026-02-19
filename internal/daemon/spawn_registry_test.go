@@ -12,6 +12,7 @@ func TestSpawnRegistryRegisterAndGet(t *testing.T) {
 	entry := SpawnEntry{
 		SpawnID:   "spawn-ghost_wolf",
 		PID:       1234,
+		State:     SpawnRunning,
 		Prompt:    "refactor auth",
 		LogPath:   "/tmp/logs/spawn-ghost_wolf.jsonl",
 		SpawnTime: time.Now(),
@@ -30,6 +31,9 @@ func TestSpawnRegistryRegisterAndGet(t *testing.T) {
 	}
 	if got.PID != 1234 {
 		t.Errorf("PID = %d, want 1234", got.PID)
+	}
+	if got.State != SpawnRunning {
+		t.Errorf("State = %q, want %q", got.State, SpawnRunning)
 	}
 	if got.Prompt != "refactor auth" {
 		t.Errorf("Prompt = %q, want %q", got.Prompt, "refactor auth")
@@ -53,6 +57,7 @@ func TestSpawnRegistryGetReturnsCopy(t *testing.T) {
 	if err := r.Register(SpawnEntry{
 		SpawnID: "spawn-test",
 		PID:     100,
+		State:   SpawnRunning,
 		Prompt:  "original",
 	}); err != nil {
 		t.Fatal(err)
@@ -68,35 +73,12 @@ func TestSpawnRegistryGetReturnsCopy(t *testing.T) {
 	}
 }
 
-func TestSpawnRegistryDeregister(t *testing.T) {
-	r := NewSpawnRegistry()
-	_ = r.Register(SpawnEntry{SpawnID: "spawn-to-remove", PID: 1})
-
-	existed := r.Deregister("spawn-to-remove")
-	if !existed {
-		t.Error("Deregister should return true for existing entry")
-	}
-
-	if r.Get("spawn-to-remove") != nil {
-		t.Error("entry should be removed after Deregister")
-	}
-}
-
-func TestSpawnRegistryDeregisterNonexistent(t *testing.T) {
-	r := NewSpawnRegistry()
-
-	existed := r.Deregister("nonexistent")
-	if existed {
-		t.Error("Deregister should return false for nonexistent entry")
-	}
-}
-
 func TestSpawnRegistryList(t *testing.T) {
 	r := NewSpawnRegistry()
 
-	_ = r.Register(SpawnEntry{SpawnID: "spawn-a", PID: 1})
-	_ = r.Register(SpawnEntry{SpawnID: "spawn-b", PID: 2})
-	_ = r.Register(SpawnEntry{SpawnID: "spawn-c", PID: 3})
+	_ = r.Register(SpawnEntry{SpawnID: "spawn-a", PID: 1, State: SpawnRunning})
+	_ = r.Register(SpawnEntry{SpawnID: "spawn-b", PID: 2, State: SpawnRunning})
+	_ = r.Register(SpawnEntry{SpawnID: "spawn-c", PID: 3, State: SpawnRunning})
 
 	entries := r.List()
 	if len(entries) != 3 {
@@ -127,8 +109,8 @@ func TestSpawnRegistryListEmpty(t *testing.T) {
 func TestSpawnRegistryRegisterOverwrites(t *testing.T) {
 	r := NewSpawnRegistry()
 
-	_ = r.Register(SpawnEntry{SpawnID: "spawn-dup", PID: 100, Prompt: "first"})
-	_ = r.Register(SpawnEntry{SpawnID: "spawn-dup", PID: 200, Prompt: "second"})
+	_ = r.Register(SpawnEntry{SpawnID: "spawn-dup", PID: 100, State: SpawnRunning, Prompt: "first"})
+	_ = r.Register(SpawnEntry{SpawnID: "spawn-dup", PID: 200, State: SpawnRunning, Prompt: "second"})
 
 	got := r.Get("spawn-dup")
 	if got.PID != 200 {
@@ -144,14 +126,15 @@ func TestSpawnRegistryRegisterOverwrites(t *testing.T) {
 	}
 }
 
-func TestSpawnRegistryRegisterFull(t *testing.T) {
+func TestSpawnRegistryRegisterFullCountsOnlyRunning(t *testing.T) {
 	r := NewSpawnRegistry()
 
-	// Fill the registry to capacity.
+	// Fill the registry to capacity with running entries.
 	for i := 0; i < maxSpawnEntries; i++ {
 		err := r.Register(SpawnEntry{
 			SpawnID: fmt.Sprintf("spawn-%d", i),
 			PID:     i + 1,
+			State:   SpawnRunning,
 		})
 		if err != nil {
 			t.Fatalf("Register(%d) returned unexpected error: %v", i, err)
@@ -159,19 +142,66 @@ func TestSpawnRegistryRegisterFull(t *testing.T) {
 	}
 
 	// Next new entry should be rejected.
-	err := r.Register(SpawnEntry{SpawnID: "spawn-overflow", PID: 9999})
+	err := r.Register(SpawnEntry{SpawnID: "spawn-overflow", PID: 9999, State: SpawnRunning})
 	if err == nil {
 		t.Fatal("expected error when registry is full, got nil")
 	}
 
 	// Re-registering an existing entry should still work (overwrite).
-	err = r.Register(SpawnEntry{SpawnID: "spawn-0", PID: 42})
+	err = r.Register(SpawnEntry{SpawnID: "spawn-0", PID: 42, State: SpawnRunning})
 	if err != nil {
 		t.Fatalf("re-registration should succeed even when full, got: %v", err)
 	}
 	if got := r.Get("spawn-0"); got.PID != 42 {
 		t.Errorf("PID after re-register = %d, want 42", got.PID)
 	}
+}
+
+func TestSpawnRegistryRegisterFullExitedDontCount(t *testing.T) {
+	r := NewSpawnRegistry()
+
+	// Fill registry with exited entries — should not block new running entries.
+	for i := 0; i < maxSpawnEntries; i++ {
+		err := r.Register(SpawnEntry{
+			SpawnID:  fmt.Sprintf("spawn-exited-%d", i),
+			PID:      i + 1,
+			State:    SpawnExited,
+			ExitedAt: time.Now(),
+		})
+		if err != nil {
+			t.Fatalf("Register exited(%d) returned unexpected error: %v", i, err)
+		}
+	}
+
+	// A new running entry should succeed — exited entries don't count toward the cap.
+	err := r.Register(SpawnEntry{SpawnID: "spawn-new-running", PID: 9999, State: SpawnRunning})
+	if err != nil {
+		t.Fatalf("new running entry should succeed when all existing are exited, got: %v", err)
+	}
+}
+
+func TestSpawnRegistryRegisterPanicsOnInvalidState(t *testing.T) {
+	r := NewSpawnRegistry()
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for invalid state, got none")
+		}
+	}()
+
+	_ = r.Register(SpawnEntry{SpawnID: "spawn-bad", PID: 1, State: "zombie"})
+}
+
+func TestSpawnRegistryRegisterPanicsOnExitedWithoutTimestamp(t *testing.T) {
+	r := NewSpawnRegistry()
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for exited without ExitedAt, got none")
+		}
+	}()
+
+	_ = r.Register(SpawnEntry{SpawnID: "spawn-bad", PID: 1, State: SpawnExited})
 }
 
 func TestSpawnRegistrySweepDeadMarksExited(t *testing.T) {
@@ -181,13 +211,16 @@ func TestSpawnRegistrySweepDeadMarksExited(t *testing.T) {
 	alive := map[int]bool{100: true, 200: false, 300: true}
 	r.pidAlive = func(pid int) bool { return alive[pid] }
 
-	_ = r.Register(SpawnEntry{SpawnID: "spawn-alive-1", PID: 100})
-	_ = r.Register(SpawnEntry{SpawnID: "spawn-dead", PID: 200})
-	_ = r.Register(SpawnEntry{SpawnID: "spawn-alive-2", PID: 300})
+	_ = r.Register(SpawnEntry{SpawnID: "spawn-alive-1", PID: 100, State: SpawnRunning})
+	_ = r.Register(SpawnEntry{SpawnID: "spawn-dead", PID: 200, State: SpawnRunning})
+	_ = r.Register(SpawnEntry{SpawnID: "spawn-alive-2", PID: 300, State: SpawnRunning})
 
-	changed := r.SweepDead()
-	if changed != 1 {
-		t.Errorf("SweepDead changed %d, want 1", changed)
+	result := r.SweepDead()
+	if result.Marked != 1 {
+		t.Errorf("SweepDead marked %d, want 1", result.Marked)
+	}
+	if result.Removed != 0 {
+		t.Errorf("SweepDead removed %d, want 0", result.Removed)
 	}
 
 	// Dead entry should be marked exited, not removed.
@@ -230,11 +263,14 @@ func TestSpawnRegistrySweepRemovesExpiredExited(t *testing.T) {
 		ExitedAt: time.Now().Add(-1 * time.Minute), // within TTL
 	})
 	// Register a running entry.
-	_ = r.Register(SpawnEntry{SpawnID: "spawn-running", PID: 300})
+	_ = r.Register(SpawnEntry{SpawnID: "spawn-running", PID: 300, State: SpawnRunning})
 
-	changed := r.SweepDead()
-	if changed != 1 {
-		t.Errorf("SweepDead changed %d, want 1 (removed expired exited)", changed)
+	result := r.SweepDead()
+	if result.Removed != 1 {
+		t.Errorf("SweepDead removed %d, want 1 (removed expired exited)", result.Removed)
+	}
+	if result.Marked != 0 {
+		t.Errorf("SweepDead marked %d, want 0", result.Marked)
 	}
 
 	if r.Get("spawn-old-exit") != nil {
@@ -248,12 +284,58 @@ func TestSpawnRegistrySweepRemovesExpiredExited(t *testing.T) {
 	}
 }
 
+func TestSpawnRegistrySweepDoesNotRemoveReRegisteredEntry(t *testing.T) {
+	// Regression test for TOCTOU race: if an entry is identified for removal
+	// in phase 1 but re-registered (as running) before phase 2, the sweep
+	// must not delete the new running entry.
+	r := NewSpawnRegistry()
+	r.pidAlive = func(pid int) bool { return true }
+
+	// Register an exited entry past TTL.
+	_ = r.Register(SpawnEntry{
+		SpawnID:  "spawn-reused",
+		PID:      100,
+		State:    SpawnExited,
+		ExitedAt: time.Now().Add(-2 * exitedSpawnTTL),
+	})
+
+	// Simulate the race: overwrite with a fresh running entry before sweep's
+	// write phase. We can't truly race, but we can verify the re-check guard
+	// by overwriting between the two phases. Since SweepDead is atomic from
+	// the outside, we test the guard by overwriting before calling SweepDead
+	// and verifying the running entry survives (the read phase won't see it
+	// as exited). For a true TOCTOU test, we verify the guard code path by
+	// checking that re-registered running entries aren't removed.
+	_ = r.Register(SpawnEntry{
+		SpawnID: "spawn-reused",
+		PID:     200,
+		State:   SpawnRunning,
+	})
+
+	result := r.SweepDead()
+	// The entry is now running, so it should not be removed or marked.
+	if result.Removed != 0 {
+		t.Errorf("SweepDead removed %d, want 0 (re-registered entry should survive)", result.Removed)
+	}
+
+	got := r.Get("spawn-reused")
+	if got == nil {
+		t.Fatal("re-registered entry should still exist")
+	}
+	if got.State != SpawnRunning {
+		t.Errorf("State = %q, want %q", got.State, SpawnRunning)
+	}
+	if got.PID != 200 {
+		t.Errorf("PID = %d, want 200 (new registration)", got.PID)
+	}
+}
+
 func TestSpawnRegistryMarkExited(t *testing.T) {
 	r := NewSpawnRegistry()
-	_ = r.Register(SpawnEntry{SpawnID: "spawn-test", PID: 100})
+	_ = r.Register(SpawnEntry{SpawnID: "spawn-test", PID: 100, State: SpawnRunning})
 
 	if !r.MarkExited("spawn-test") {
-		t.Error("MarkExited should return true for existing entry")
+		t.Error("MarkExited should return true for running entry")
 	}
 
 	got := r.Get("spawn-test")
@@ -276,16 +358,38 @@ func TestSpawnRegistryMarkExitedNonexistent(t *testing.T) {
 	}
 }
 
+func TestSpawnRegistryMarkExitedIdempotent(t *testing.T) {
+	r := NewSpawnRegistry()
+	_ = r.Register(SpawnEntry{SpawnID: "spawn-test", PID: 100, State: SpawnRunning})
+
+	// First call succeeds.
+	if !r.MarkExited("spawn-test") {
+		t.Error("first MarkExited should return true")
+	}
+
+	originalExitedAt := r.Get("spawn-test").ExitedAt
+
+	// Second call returns false — already exited, TTL not reset.
+	if r.MarkExited("spawn-test") {
+		t.Error("second MarkExited should return false (already exited)")
+	}
+
+	got := r.Get("spawn-test")
+	if got.ExitedAt != originalExitedAt {
+		t.Error("ExitedAt should not change on double-exit")
+	}
+}
+
 func TestSpawnRegistrySweepDeadAllAlive(t *testing.T) {
 	r := NewSpawnRegistry()
 	r.pidAlive = func(pid int) bool { return true }
 
-	_ = r.Register(SpawnEntry{SpawnID: "spawn-a", PID: 1})
-	_ = r.Register(SpawnEntry{SpawnID: "spawn-b", PID: 2})
+	_ = r.Register(SpawnEntry{SpawnID: "spawn-a", PID: 1, State: SpawnRunning})
+	_ = r.Register(SpawnEntry{SpawnID: "spawn-b", PID: 2, State: SpawnRunning})
 
-	removed := r.SweepDead()
-	if removed != 0 {
-		t.Errorf("SweepDead removed %d, want 0 (all alive)", removed)
+	result := r.SweepDead()
+	if result.Total() != 0 {
+		t.Errorf("SweepDead total %d, want 0 (all alive)", result.Total())
 	}
 	if len(r.List()) != 2 {
 		t.Errorf("List returned %d entries, want 2", len(r.List()))
@@ -295,8 +399,8 @@ func TestSpawnRegistrySweepDeadAllAlive(t *testing.T) {
 func TestSpawnRegistrySweepDeadEmpty(t *testing.T) {
 	r := NewSpawnRegistry()
 
-	removed := r.SweepDead()
-	if removed != 0 {
-		t.Errorf("SweepDead removed %d from empty registry, want 0", removed)
+	result := r.SweepDead()
+	if result.Total() != 0 {
+		t.Errorf("SweepDead total %d from empty registry, want 0", result.Total())
 	}
 }

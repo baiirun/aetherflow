@@ -289,8 +289,8 @@ func (d *Daemon) sweepSpawns(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if removed := d.spawns.SweepDead(); removed > 0 {
-				d.log.Info("spawn sweep: removed dead entries", "count", removed)
+			if result := d.spawns.SweepDead(); result.Total() > 0 {
+				d.log.Info("spawn sweep", "marked_exited", result.Marked, "removed", result.Removed)
 			}
 		}
 	}

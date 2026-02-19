@@ -130,6 +130,7 @@ func TestHandleLogsPathSpawnFallback(t *testing.T) {
 	_ = spawns.Register(SpawnEntry{
 		SpawnID: "spawn-test_agent",
 		PID:     5678,
+		State:   SpawnRunning,
 		Prompt:  "fix the tests",
 		LogPath: "/tmp/logs/spawn-test_agent.jsonl",
 	})

@@ -198,6 +198,7 @@ func TestBuildFullStatusIncludesSpawnsWithoutPool(t *testing.T) {
 	if err := spawns.Register(SpawnEntry{
 		SpawnID:   "spawn-1",
 		PID:       999,
+		State:     SpawnRunning,
 		Prompt:    "test prompt",
 		LogPath:   "/tmp/spawn-1.jsonl",
 		SpawnTime: time.Now(),
@@ -349,6 +350,7 @@ func TestBuildFullStatusWithSpawns(t *testing.T) {
 	_ = spawns.Register(SpawnEntry{
 		SpawnID:   "spawn-ghost_wolf",
 		PID:       9999,
+		State:     SpawnRunning,
 		Prompt:    "refactor auth module",
 		LogPath:   "/tmp/logs/spawn-ghost_wolf.jsonl",
 		SpawnTime: time.Now().Add(-5 * time.Minute),
@@ -356,6 +358,7 @@ func TestBuildFullStatusWithSpawns(t *testing.T) {
 	_ = spawns.Register(SpawnEntry{
 		SpawnID:   "spawn-neon_fox",
 		PID:       8888,
+		State:     SpawnRunning,
 		Prompt:    "fix flaky test",
 		LogPath:   "/tmp/logs/spawn-neon_fox.jsonl",
 		SpawnTime: time.Now().Add(-2 * time.Minute),
