@@ -223,6 +223,17 @@ func (d *Daemon) Run() error {
 	// Sweep dead spawned agents periodically.
 	go d.sweepSpawns(ctx)
 
+	// Backfill event buffer from the opencode REST API for sessions that
+	// existed before this daemon started. Runs in background so it doesn't
+	// block accepting connections — the daemon is usable immediately, and
+	// events from the plugin will flow as soon as agents start.
+	go func() {
+		bctx, bcancel := context.WithTimeout(ctx, backfillTimeout)
+		defer bcancel()
+		api := newOpencodeClient(d.config.ServerURL)
+		backfillEvents(bctx, api, d.sstore, d.events, d.log)
+	}()
+
 	// Accept connections
 	for {
 		conn, err := listener.Accept()
