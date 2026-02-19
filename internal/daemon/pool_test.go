@@ -2,12 +2,10 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -266,74 +264,6 @@ func TestPoolReapsProcessWithError(t *testing.T) {
 	waitFor(t, func() bool {
 		return len(pool.Status()) == 0
 	})
-}
-
-func TestPoolSaveAndLoadState(t *testing.T) {
-	proc, release := newFakeProcess(1234)
-	defer release()
-
-	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
-		return proc, nil
-	}
-
-	pool := testPool(t, progRunner(testTaskMeta), starter)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	taskCh := make(chan []Task, 1)
-	taskCh <- []Task{{ID: "ts-abc", Priority: 1, Title: "Do it"}}
-
-	go pool.Run(ctx, taskCh)
-
-	waitFor(t, func() bool {
-		return len(pool.Status()) == 1
-	})
-
-	// Save state.
-	dir := t.TempDir()
-	path := filepath.Join(dir, "pool-state.json")
-
-	if err := pool.SaveState(path); err != nil {
-		t.Fatalf("SaveState error: %v", err)
-	}
-
-	// Verify file is valid JSON.
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading state file: %v", err)
-	}
-
-	var state PoolState
-	if err := json.Unmarshal(data, &state); err != nil {
-		t.Fatalf("parsing state file: %v", err)
-	}
-
-	if len(state.Agents) != 1 {
-		t.Fatalf("state has %d agents, want 1", len(state.Agents))
-	}
-	if state.Agents[0].TaskID != "ts-abc" {
-		t.Errorf("state agent TaskID = %q, want %q", state.Agents[0].TaskID, "ts-abc")
-	}
-
-	// Load it back.
-	loaded, err := LoadState(path)
-	if err != nil {
-		t.Fatalf("LoadState error: %v", err)
-	}
-	if len(loaded.Agents) != 1 {
-		t.Fatalf("loaded %d agents, want 1", len(loaded.Agents))
-	}
-}
-
-func TestLoadStateMissingFile(t *testing.T) {
-	state, err := LoadState("/nonexistent/pool-state.json")
-	if err != nil {
-		t.Fatalf("expected nil error for missing file, got: %v", err)
-	}
-	if len(state.Agents) != 0 {
-		t.Errorf("expected empty state, got %d agents", len(state.Agents))
-	}
 }
 
 func TestPoolStatus(t *testing.T) {

@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -721,63 +720,4 @@ func (p *Pool) Resume() {
 	prev := p.mode
 	p.mode = PoolActive
 	p.log.Info("pool mode changed", "from", prev, "to", PoolActive)
-}
-
-// PoolState is the persisted pool state for daemon restart recovery.
-type PoolState struct {
-	Agents []Agent `json:"agents"`
-}
-
-// SaveState writes the pool state to a file.
-func (p *Pool) SaveState(path string) error {
-	// Status() handles its own locking — don't double-lock.
-	state := PoolState{Agents: p.Status()}
-
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshaling pool state: %w", err)
-	}
-
-	// Write to temp file and rename for atomicity.
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".pool-state-*.json")
-	if err != nil {
-		return fmt.Errorf("creating temp file: %w", err)
-	}
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-		return fmt.Errorf("writing pool state: %w", err)
-	}
-
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmp.Name())
-		return fmt.Errorf("closing temp file: %w", err)
-	}
-
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		_ = os.Remove(tmp.Name())
-		return fmt.Errorf("renaming pool state: %w", err)
-	}
-
-	return nil
-}
-
-// LoadState reads persisted pool state. Returns empty state if file doesn't exist.
-func LoadState(path string) (PoolState, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return PoolState{}, nil
-		}
-		return PoolState{}, fmt.Errorf("reading pool state: %w", err)
-	}
-
-	var state PoolState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return PoolState{}, fmt.Errorf("parsing pool state: %w", err)
-	}
-
-	return state, nil
 }
