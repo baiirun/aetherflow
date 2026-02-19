@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strconv"
 	"time"
@@ -11,7 +12,9 @@ import (
 
 // StartManagedServer ensures a local opencode server is available at serverURL.
 // If one is already listening, it is reused.
-func StartManagedServer(ctx context.Context, serverURL string, logf func(msg string, args ...any)) (*exec.Cmd, error) {
+// Extra env vars (e.g. AETHERFLOW_SOCKET, AETHERFLOW_AGENT_ID) are added to
+// the server process environment alongside the inherited parent env.
+func StartManagedServer(ctx context.Context, serverURL string, env []string, logf func(msg string, args ...any)) (*exec.Cmd, error) {
 	u, err := ValidateServerURLLocal(serverURL)
 	if err != nil {
 		return nil, err
@@ -33,6 +36,9 @@ func StartManagedServer(ctx context.Context, serverURL string, logf func(msg str
 	}
 
 	cmd := exec.CommandContext(ctx, "opencode", "serve", "--port", strconv.Itoa(port))
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("starting opencode server on %s: %w", serverURL, err)
 	}

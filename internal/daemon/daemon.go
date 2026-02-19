@@ -35,6 +35,7 @@ type Daemon struct {
 	pool     *Pool
 	spawns   *SpawnRegistry
 	sstore   *sessions.Store
+	events   *EventBuffer
 	server   *exec.Cmd
 	serverMu sync.Mutex
 	shutdown chan struct{}
@@ -90,6 +91,7 @@ func New(cfg Config) *Daemon {
 		pool:     pool,
 		spawns:   NewSpawnRegistry(),
 		sstore:   store,
+		events:   NewEventBuffer(DefaultEventBufSize),
 		shutdown: make(chan struct{}),
 		log:      log,
 	}
@@ -153,7 +155,10 @@ func (d *Daemon) Run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	serverCmd, err := StartManagedServer(ctx, d.config.ServerURL, func(msg string, args ...any) {
+	serverEnv := []string{
+		"AETHERFLOW_SOCKET=" + d.config.SocketPath,
+	}
+	serverCmd, err := StartManagedServer(ctx, d.config.ServerURL, serverEnv, func(msg string, args ...any) {
 		d.log.Info(msg, args...)
 	})
 	if err != nil {
@@ -252,7 +257,10 @@ func (d *Daemon) superviseServer(ctx context.Context) {
 
 		d.log.Warn("managed opencode server exited, restarting", "error", err)
 		time.Sleep(500 * time.Millisecond)
-		restarted, startErr := StartManagedServer(ctx, d.config.ServerURL, func(msg string, args ...any) {
+		restartEnv := []string{
+			"AETHERFLOW_SOCKET=" + d.config.SocketPath,
+		}
+		restarted, startErr := StartManagedServer(ctx, d.config.ServerURL, restartEnv, func(msg string, args ...any) {
 			d.log.Info(msg, args...)
 		})
 		if startErr != nil {
@@ -326,6 +334,8 @@ func (d *Daemon) handleRequest(ctx context.Context, req *Request) *Response {
 		return d.handleSpawnRegister(req.Params)
 	case "spawn.deregister":
 		return d.handleSpawnDeregister(req.Params)
+	case "session.event":
+		return d.handleSessionEvent(req.Params)
 	case "shutdown":
 		return d.handleShutdown()
 	default:
