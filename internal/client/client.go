@@ -86,7 +86,7 @@ const (
 // NormalizedSpawnPolicy returns the effective spawn policy for status display.
 func (s *FullStatus) NormalizedSpawnPolicy() string {
 	if s.SpawnPolicy == "" {
-		return SpawnPolicyAuto
+		return SpawnPolicyManual
 	}
 	return s.SpawnPolicy
 }

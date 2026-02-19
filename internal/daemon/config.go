@@ -17,7 +17,7 @@ const (
 	DefaultServerURL         = "http://127.0.0.1:4096"
 	DefaultSpawnCmd          = "opencode run --attach " + DefaultServerURL + " --format json"
 	DefaultMaxRetries        = 3
-	DefaultSpawnPolicy       = SpawnPolicyAuto
+	DefaultSpawnPolicy       = SpawnPolicyManual
 	DefaultLogDir            = ".aetherflow/logs"
 	DefaultReconcileInterval = 30 * time.Second
 )

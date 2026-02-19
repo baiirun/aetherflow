@@ -77,7 +77,7 @@ func TestBuildFullStatus(t *testing.T) {
 	readyOutput := "ID           PRI  TITLE\nts-ghi    1    Fix auth token expiry\nts-jkl    2    Refactor config loading\n"
 
 	pool := statusPool(t, agents)
-	cfg := Config{Project: "testproject", PoolSize: 3}
+	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyAuto}
 	runner := statusRunner(showResponses, readyOutput)
 
 	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
@@ -130,7 +130,7 @@ func TestBuildFullStatus(t *testing.T) {
 
 func TestBuildFullStatusNoAgents(t *testing.T) {
 	pool := statusPool(t, nil)
-	cfg := Config{Project: "testproject", PoolSize: 3}
+	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyAuto}
 
 	readyOutput := "ID           PRI  TITLE\nts-aaa    1    Some task\n"
 	runner := statusRunner(nil, readyOutput)
@@ -229,7 +229,7 @@ func TestBuildFullStatusProgShowFails(t *testing.T) {
 	// prog show will fail for ts-abc (not in map).
 	runner := statusRunner(nil, "ID           PRI  TITLE\n")
 	pool := statusPool(t, agents)
-	cfg := Config{Project: "testproject", PoolSize: 3}
+	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyAuto}
 
 	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
 
@@ -284,7 +284,7 @@ func TestBuildFullStatusProgReadyFails(t *testing.T) {
 	}
 
 	pool := statusPool(t, agents)
-	cfg := Config{Project: "testproject", PoolSize: 3}
+	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyAuto}
 
 	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
 
@@ -325,7 +325,7 @@ func TestBuildFullStatusNoLogs(t *testing.T) {
 
 	runner := statusRunner(showResponses, "ID           PRI  TITLE\n")
 	pool := statusPool(t, agents)
-	cfg := Config{Project: "testproject", PoolSize: 3}
+	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyAuto}
 
 	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
 
