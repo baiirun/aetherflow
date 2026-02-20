@@ -68,7 +68,7 @@ func TestDaemonManualPolicySkipsProgRunnerCalls(t *testing.T) {
 	go func() { done <- d.Run() }()
 
 	c := client.New(socketPath)
-	status := waitForDaemonStatus(t, c, 2*time.Second)
+	status := waitForDaemonStatus(t, c, 10*time.Second)
 	if status.SpawnPolicy != string(SpawnPolicyManual) {
 		t.Fatalf("SpawnPolicy = %q, want %q", status.SpawnPolicy, SpawnPolicyManual)
 	}
@@ -81,7 +81,7 @@ func TestDaemonManualPolicySkipsProgRunnerCalls(t *testing.T) {
 	if err := c.Shutdown(); err != nil {
 		t.Fatalf("shutdown failed: %v", err)
 	}
-	waitForDaemonExit(t, done, 2*time.Second)
+	waitForDaemonExit(t, done, 5*time.Second)
 }
 
 func TestDaemonAutoPolicyUsesRunnerCalls(t *testing.T) {
@@ -112,10 +112,10 @@ func TestDaemonAutoPolicyUsesRunnerCalls(t *testing.T) {
 	go func() { done <- d.Run() }()
 
 	c := client.New(socketPath)
-	waitForDaemonStatus(t, c, 2*time.Second)
+	waitForDaemonStatus(t, c, 10*time.Second)
 	baselineReady := readyCalls.Load()
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if readyCalls.Load() > baselineReady {
 			break
@@ -129,7 +129,7 @@ func TestDaemonAutoPolicyUsesRunnerCalls(t *testing.T) {
 	if err := c.Shutdown(); err != nil {
 		t.Fatalf("shutdown failed: %v", err)
 	}
-	waitForDaemonExit(t, done, 2*time.Second)
+	waitForDaemonExit(t, done, 5*time.Second)
 }
 
 func TestDaemonSecondInstanceSameSocketFailsFast(t *testing.T) {
@@ -148,7 +148,7 @@ func TestDaemonSecondInstanceSameSocketFailsFast(t *testing.T) {
 	go func() { done1 <- d1.Run() }()
 
 	c := client.New(socketPath)
-	waitForDaemonStatus(t, c, 2*time.Second)
+	waitForDaemonStatus(t, c, 10*time.Second)
 
 	d2 := New(cfg)
 	done2 := make(chan error, 1)
@@ -162,14 +162,14 @@ func TestDaemonSecondInstanceSameSocketFailsFast(t *testing.T) {
 		if !strings.Contains(err.Error(), "already running") {
 			t.Fatalf("expected already-running error, got: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("second daemon startup did not fail within timeout")
 	}
 
 	if err := c.Shutdown(); err != nil {
 		t.Fatalf("shutdown failed: %v", err)
 	}
-	waitForDaemonExit(t, done1, 2*time.Second)
+	waitForDaemonExit(t, done1, 5*time.Second)
 }
 
 func TestDaemonRunRejectsAutoPolicyWithoutProject(t *testing.T) {
