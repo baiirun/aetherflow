@@ -139,6 +139,12 @@ func defaultPIDAlive(pid int) bool {
 
 const sweepInterval = 30 * time.Second
 
+// retentionTTL is how long idle/exited data is kept before being swept.
+// Used by all daemon subsystems (event buffers, spawn registry, session
+// store) so their data expires together. Set to 48h so overnight runs
+// are reviewable the next day.
+const retentionTTL = 48 * time.Hour
+
 // NewPool creates a pool with the given configuration.
 func NewPool(cfg Config, runner CommandRunner, starter ProcessStarter, log *slog.Logger) *Pool {
 	if runner == nil {
@@ -399,15 +405,20 @@ func (p *Pool) reap(agent *Agent, proc Process) {
 
 	// Respawn on the same task. The task is already in_progress in prog,
 	// so we skip prog start and go straight to spawning.
-	// respawn() opens its own log file — no handle passed across.
-	p.respawn(agent.TaskID, agent.Role)
+	// Pass the session ID so the respawned agent can resume the existing
+	// opencode session instead of starting a new one.
+	p.respawn(agent.TaskID, agent.Role, sessionID)
 }
 
 // respawn launches a new agent for a task that's already in_progress.
 // Respawns are blocked when the pool is paused. In draining mode,
 // respawns are allowed because the task is already claimed in prog
 // and leaving it without an agent would orphan it.
-func (p *Pool) respawn(taskID string, role Role) {
+//
+// If sessionID is non-empty, the respawned agent resumes the existing
+// opencode session instead of creating a new one. This preserves the
+// agent's conversation history and context across crashes.
+func (p *Pool) respawn(taskID string, role Role, sessionID string) {
 	if p.ctx.Err() != nil {
 		return
 	}
@@ -439,6 +450,7 @@ func (p *Pool) respawn(taskID string, role Role) {
 	agentID := p.names.Generate()
 
 	launchCmd := EnsureAttachSpawnCmd(p.config.SpawnCmd, p.config.ServerURL)
+	launchCmd = WithSessionFlag(launchCmd, sessionID)
 	proc, err := p.starter(p.ctx, launchCmd, prompt, string(agentID), io.Discard)
 	if err != nil {
 		p.log.Error("failed to respawn agent",
@@ -455,6 +467,7 @@ func (p *Pool) respawn(taskID string, role Role) {
 		TaskID:    taskID,
 		Role:      role,
 		PID:       proc.PID(),
+		SessionID: sessionID, // carry forward so next crash can resume too
 		SpawnTime: time.Now(),
 		State:     AgentRunning,
 	}
@@ -468,10 +481,12 @@ func (p *Pool) respawn(taskID string, role Role) {
 		"task_id", taskID,
 		"role", role,
 		"pid", proc.PID(),
+		"resumed_session", sessionID,
 	)
 
-	// Session ID is captured when the session.created plugin event arrives
-	// at the daemon — see event_rpc.go claimSession.
+	// If we resumed an existing session, the session ID is already set.
+	// If not, it will be captured when the session.created plugin event
+	// arrives at the daemon — see event_rpc.go claimSession.
 
 	go p.reap(agent, proc)
 }
@@ -509,6 +524,41 @@ func (p *Pool) SetSessionID(agentName, sessionID string) bool {
 		}
 	}
 	return false
+}
+
+// lookupSessionForTask finds the most recent resumable session ID for a task
+// from the session registry. Used by Reclaim to resume an existing opencode
+// session when restarting a crashed or orphaned agent.
+//
+// Only sessions with status active or idle are considered — terminated and
+// stale sessions may have been cleaned up by the opencode server and
+// attempting to resume them could fail or waste a retry attempt.
+//
+// Returns empty string if no session is found or the registry is unavailable.
+func (p *Pool) lookupSessionForTask(taskID string) string {
+	if p.sstore == nil {
+		return ""
+	}
+	recs, err := p.sstore.List()
+	if err != nil {
+		p.log.Warn("session registry read failed during reclaim",
+			"task_id", taskID,
+			"error", err,
+		)
+		return ""
+	}
+	// List returns records sorted by UpdatedAt descending, so the first
+	// match for this task is the most recent.
+	for _, r := range recs {
+		if r.WorkRef != taskID || r.SessionID == "" {
+			continue
+		}
+		// Only resume sessions that are likely still alive on the server.
+		if r.Status == sessions.StatusActive || r.Status == sessions.StatusIdle {
+			return r.SessionID
+		}
+	}
+	return ""
 }
 
 // TaskIDForAgent returns the task ID for the pool agent with the given name.

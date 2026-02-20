@@ -254,6 +254,46 @@ func (s *Store) SetStatusBySession(serverRef, sessionID string, status Status) (
 	return false, nil
 }
 
+// SweepStale removes records whose UpdatedAt is older than the given TTL.
+// Returns the number of records removed.
+// Called periodically by the daemon alongside the spawn and event sweeps.
+func (s *Store) SweepStale(ttl time.Duration) (int, error) {
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	unlock, err := s.lockFile()
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
+
+	state, err := s.readLocked()
+	if err != nil {
+		return 0, err
+	}
+
+	kept := make([]Record, 0, len(state.Records))
+	removed := 0
+	for _, r := range state.Records {
+		if now.Sub(r.UpdatedAt) > ttl {
+			removed++
+			continue
+		}
+		kept = append(kept, r)
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+
+	state.Records = kept
+	if err := s.writeLocked(state); err != nil {
+		return 0, err
+	}
+	return removed, nil
+}
+
 func (s *Store) readLocked() (diskState, error) {
 	data, err := os.ReadFile(s.path)
 	if err != nil {

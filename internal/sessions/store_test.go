@@ -138,6 +138,89 @@ func TestStoreSetStatusBySession(t *testing.T) {
 	}
 }
 
+func TestSweepStaleRemovesOldRecords(t *testing.T) {
+	t.Parallel()
+
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	// Insert two records.
+	_ = store.Upsert(Record{ServerRef: "http://127.0.0.1:4096", SessionID: "ses_old", WorkRef: "ts-old"})
+	_ = store.Upsert(Record{ServerRef: "http://127.0.0.1:4096", SessionID: "ses_new", WorkRef: "ts-new"})
+
+	// Backdate the "old" record's UpdatedAt past the TTL.
+	store.mu.Lock()
+	unlock, _ := store.lockFile()
+	state, _ := store.readLocked()
+	for i := range state.Records {
+		if state.Records[i].SessionID == "ses_old" {
+			state.Records[i].UpdatedAt = time.Now().Add(-49 * time.Hour)
+		}
+	}
+	_ = store.writeLocked(state)
+	unlock()
+	store.mu.Unlock()
+
+	removed, err := store.SweepStale(48 * time.Hour)
+	if err != nil {
+		t.Fatalf("SweepStale() error = %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("SweepStale() removed %d, want 1", removed)
+	}
+
+	recs, _ := store.List()
+	if len(recs) != 1 {
+		t.Fatalf("after sweep: len(records) = %d, want 1", len(recs))
+	}
+	if recs[0].SessionID != "ses_new" {
+		t.Errorf("remaining record = %q, want ses_new", recs[0].SessionID)
+	}
+}
+
+func TestSweepStaleKeepsRecentRecords(t *testing.T) {
+	t.Parallel()
+
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	_ = store.Upsert(Record{ServerRef: "http://127.0.0.1:4096", SessionID: "ses_fresh", WorkRef: "ts-fresh"})
+
+	removed, err := store.SweepStale(48 * time.Hour)
+	if err != nil {
+		t.Fatalf("SweepStale() error = %v", err)
+	}
+	if removed != 0 {
+		t.Errorf("SweepStale() removed %d, want 0 (all records are fresh)", removed)
+	}
+
+	recs, _ := store.List()
+	if len(recs) != 1 {
+		t.Fatalf("after sweep: len(records) = %d, want 1", len(recs))
+	}
+}
+
+func TestSweepStaleEmptyStore(t *testing.T) {
+	t.Parallel()
+
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	removed, err := store.SweepStale(48 * time.Hour)
+	if err != nil {
+		t.Fatalf("SweepStale() error = %v", err)
+	}
+	if removed != 0 {
+		t.Errorf("SweepStale() removed %d from empty store, want 0", removed)
+	}
+}
+
 func TestStoreWritesExpectedFile(t *testing.T) {
 	t.Parallel()
 

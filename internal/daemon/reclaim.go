@@ -90,12 +90,16 @@ func (p *Pool) Reclaim(ctx context.Context) {
 		}
 		role := InferRole(meta)
 
-		// Use respawn path — task is already in_progress, no need for prog start.
+		// Look up the session ID from the registry so the reclaimed agent
+		// can resume the existing opencode session instead of starting fresh.
+		sessionID := p.lookupSessionForTask(task.ID)
+
 		p.log.Info("reclaim: respawning orphaned task",
 			"task_id", task.ID,
 			"role", role,
+			"resumed_session", sessionID,
 		)
-		p.respawn(task.ID, role)
+		p.respawn(task.ID, role, sessionID)
 		reclaimed++
 	}
 

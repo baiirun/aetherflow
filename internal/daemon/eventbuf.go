@@ -11,10 +11,9 @@ import (
 const DefaultEventBufSize = 2000
 
 // sessionIdleTTL is how long an idle session's events are kept before
-// being swept. Set to 48h so events survive overnight runs and are
-// available for review the next day. Matches exitedSpawnTTL so both
-// spawn entries and their corresponding event data expire together.
-const sessionIdleTTL = 48 * time.Hour
+// being swept. Uses the shared retentionTTL so all daemon data
+// (events, spawn entries, session records) expires together.
+const sessionIdleTTL = retentionTTL
 
 // SessionEvent is a single event received from the opencode plugin.
 // The Data field carries the raw event properties as-is from the plugin —
