@@ -548,7 +548,7 @@ CLI flags override config file values. Config file overrides defaults.
 | `--server-url` | `http://127.0.0.1:4096` | Opencode server URL for server-first launches |
 | `--spawn-policy` | `manual` | `manual` is spawn-only, `auto` polls/schedules from prog |
 | `--max-retries` | `3` | Max crash respawns per task |
-| `--solo` | `false` | Agents merge to main directly instead of creating PRs |
+| `--solo` | `false` | Agents merge to main directly instead of creating PRs (applies to both `af spawn` and `af daemon start`) |
 | `--reconcile-interval` | `30s` | How often to check if reviewing tasks are merged |
 | `-d` / `--detach` | `false` | Run in background |
 
@@ -573,6 +573,8 @@ Manual mode without a project uses the global default socket path. Starting a se
 | Command | Description |
 |---------|-------------|
 | `af daemon start` | Start the daemon (manages opencode server, RPC socket, event pipeline) |
+| `af daemon start --solo` | All pool agents merge to main instead of creating PRs |
+| `af daemon start --spawn-policy auto` | Enable automatic task scheduling from prog |
 | `af daemon stop` | Stop the daemon |
 | `af daemon` | Quick status check (running/not running) |
 
