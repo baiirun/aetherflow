@@ -87,6 +87,35 @@ In auto mode, the daemon polls prog for ready tasks, spawns opencode agents in i
 
 The daemon auto-starts a managed opencode server on `http://127.0.0.1:4096`. All agents connect to this shared server via `opencode run --attach`. The aetherflow plugin on the server streams session events back to the daemon for real-time observability.
 
+### Attaching to a running agent
+
+Every agent session runs on a shared opencode server. You can attach to any running session to watch it work, send it messages, or intervene — then detach and the agent continues autonomously.
+
+```bash
+# List active sessions
+af sessions
+
+# Attach to a session interactively
+af session attach <session-id>
+
+# Inside the opencode TUI:
+#   - Watch the agent work in real-time
+#   - Send messages to guide or correct it
+#   - Quit the TUI (ctrl-c / q) to detach
+```
+
+When you detach, the agent process keeps running — it's a separate process connected to the server. Your attach session is just a view into the same opencode session. This works for both `af spawn` agents and daemon pool agents.
+
+You can also monitor without attaching interactively:
+
+```bash
+# Stream an agent's events
+af logs <agent-name> -f
+
+# One-shot status with tool calls
+af status <agent-name>
+```
+
 ## How It Works With prog
 
 prog manages tasks. aetherflow consumes them.
