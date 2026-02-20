@@ -158,7 +158,11 @@ func (d *Daemon) Run() error {
 	serverEnv := []string{
 		"AETHERFLOW_SOCKET=" + d.config.SocketPath,
 	}
-	serverCmd, err := StartManagedServer(ctx, d.config.ServerURL, serverEnv, func(msg string, args ...any) {
+	startServer := d.config.ServerStarter
+	if startServer == nil {
+		startServer = StartManagedServer
+	}
+	serverCmd, err := startServer(ctx, d.config.ServerURL, serverEnv, func(msg string, args ...any) {
 		d.log.Info(msg, args...)
 	})
 	if err != nil {

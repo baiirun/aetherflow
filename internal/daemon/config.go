@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"time"
@@ -119,6 +121,11 @@ type Config struct {
 
 	// Starter is the process spawning function. Not configurable via file/flags.
 	Starter ProcessStarter `yaml:"-"`
+
+	// ServerStarter launches the managed opencode server. When nil, the daemon
+	// uses StartManagedServer (the real implementation). Tests inject a no-op
+	// to avoid requiring opencode on PATH.
+	ServerStarter func(ctx context.Context, serverURL string, env []string, logf func(string, ...any)) (*exec.Cmd, error) `yaml:"-"`
 
 	// Logger is the structured logger. Not configurable via file/flags.
 	Logger *slog.Logger `yaml:"-"`
