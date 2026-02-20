@@ -50,7 +50,7 @@ func (c *opencodeClient) fetchSessionMessages(ctx context.Context, sessionID str
 	if err != nil {
 		return nil, fmt.Errorf("fetching session messages: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
@@ -63,41 +63,4 @@ func (c *opencodeClient) fetchSessionMessages(ctx context.Context, sessionID str
 	}
 
 	return messages, nil
-}
-
-// fetchSessionStatus fetches the status of all sessions from the server.
-// Returns a map of session ID → status type (e.g. "busy", "idle").
-func (c *opencodeClient) fetchSessionStatus(ctx context.Context) (map[string]string, error) {
-	url := fmt.Sprintf("%s/session/status", c.baseURL)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetching session status: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("GET %s returned %d: %s", url, resp.StatusCode, string(body))
-	}
-
-	// Response shape: {"ses_xxx": {"type": "idle"}, ...}
-	var raw map[string]struct {
-		Type string `json:"type"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		return nil, fmt.Errorf("decoding session status: %w", err)
-	}
-
-	result := make(map[string]string, len(raw))
-	for id, s := range raw {
-		result[id] = s.Type
-	}
-	return result, nil
 }

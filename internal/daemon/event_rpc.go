@@ -47,12 +47,7 @@ func (d *Daemon) handleSessionEvent(rawParams json.RawMessage) *Response {
 		return &Response{Success: false, Error: fmt.Sprintf("event data too large: %d bytes (max %d)", len(params.Data), maxEventDataBytes)}
 	}
 
-	d.events.Push(SessionEvent{
-		EventType: params.EventType,
-		SessionID: params.SessionID,
-		Timestamp: params.Timestamp,
-		Data:      params.Data,
-	})
+	d.events.Push(SessionEvent(params))
 
 	d.log.Debug("session.event",
 		"event_type", params.EventType,
