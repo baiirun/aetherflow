@@ -1,17 +1,24 @@
 # aetherflow
 
-An opinionated harness for running autonomous agents. A process supervisor that watches [prog](https://github.com/baiirun/prog) for ready tasks and spawns [opencode](https://github.com/anomalyco/opencode) sessions to work on them.
+An opinionated harness for running autonomous agents. Spawn [opencode](https://github.com/anomalyco/opencode) sessions with a prompt and let them work to completion, or connect to [prog](https://github.com/baiirun/prog) for automatic task scheduling.
 
 ```
-    +-----------+           +---------------+           +------------+
-    |   prog    |           |  aetherflow   |           |  opencode  |
-    |           |   poll    |   (daemon)    |   spawn   |            |
-    |  task db  |---------->|  af / aetherd |---------->|   agent    |
-    |           |           |               |           |  sessions  |
-    +-----------+           +---------------+           +------------+
+                  +---------------+           +------------------+
+                  |  aetherflow   |  attach   |  opencode server |
+  af spawn ------>|  (daemon)     |---------->|  (shared)        |
+  af daemon ----->|  af / aetherd |<----------|  plugin events   |
+                  +---------------+           +------------------+
+                        ^                            |
+                        |  poll (auto mode)          |  sessions
+                  +-----------+               +------------+
+                  |   prog    |               |   agent    |
+                  |  task db  |               |  processes |
+                  +-----------+               +------------+
 ```
 
-[prog](https://github.com/baiirun/prog) is a local task management CLI -- create, prioritize, track tasks, and capture learnings. [opencode](https://github.com/anomalyco/opencode) is an agent runtime that runs LLM sessions with tool access. aetherflow bridges them: it watches prog for unblocked tasks and spawns opencode sessions to do the work.
+All agent sessions connect to a shared opencode server (`opencode serve`). The daemon starts and supervises this server automatically. A plugin on the server forwards session events (tool calls, messages, lifecycle) back to the daemon over its Unix socket, providing real-time observability without log files.
+
+[prog](https://github.com/baiirun/prog) is a local task management CLI -- create, prioritize, track tasks, and capture learnings. [opencode](https://github.com/anomalyco/opencode) is an agent runtime that runs LLM sessions with tool access. aetherflow bridges them: spawn agents with a prompt (`af spawn`), or let the daemon auto-schedule from prog (`--spawn-policy=auto`).
 
 ## Install
 
@@ -48,21 +55,37 @@ brew install opencode    # or: curl -fsSL https://opencode.ai/install | bash
 
 ## Quick Start
 
+### Spawn an agent (no daemon required)
+
 ```bash
-# 1. Install agent skills and review definitions to opencode
+# Install agent skills and review definitions
 af install
 
-# 2. Start the daemon (foreground)
-af daemon start --project myapp
+# Spawn a one-off agent with a freeform prompt
+af spawn "refactor the auth module to use JWT"
 
-# 3. Watch the swarm
+# Or in the background
+af spawn "add rate limiting to /api/users" -d
+```
+
+The agent works in an isolated git worktree, implements the prompt, and creates a PR (or merges to main in `--solo` mode). No daemon or task tracker required -- the prompt is the spec, the PR is the deliverable.
+
+### Run the daemon (automatic task scheduling)
+
+```bash
+# Start the daemon with prog integration
+af daemon start --project myapp --spawn-policy auto
+
+# Watch the swarm
 af status -w
 
-# 4. Or launch the interactive TUI
+# Or launch the interactive TUI
 af tui
 ```
 
-The daemon polls prog for ready tasks (or runs in spawn-only manual mode), spawns opencode agents in isolated git worktrees, and monitors their lifecycle. Each agent follows a structured protocol: orient, implement, verify, review, fix, land.
+In auto mode, the daemon polls prog for ready tasks, spawns opencode agents in isolated git worktrees, and monitors their lifecycle. Each agent follows a structured protocol: orient, implement, verify, review, fix, land.
+
+The daemon auto-starts a managed opencode server on `http://127.0.0.1:4096`. All agents connect to this shared server via `opencode run --attach`. The aetherflow plugin on the server streams session events back to the daemon for real-time observability.
 
 ## How It Works With prog
 
@@ -74,7 +97,7 @@ prog add "Implement user auth endpoint" -p myapp --priority 1
 prog add "Add rate limiting middleware" -p myapp --priority 2
 
 # aetherflow polls prog, picks up ready tasks, and spawns agents
-af daemon start -p myapp
+af daemon start -p myapp --spawn-policy auto
 
 # Agents work autonomously:
 #   - Set up git worktree
@@ -257,32 +280,51 @@ If the merge has conflicts the agent can't resolve, it aborts and yields with `p
 
 ## Architecture
 
-The daemon is the only persistent process. Everything else (agents, tasks, learnings) is ephemeral or lives in prog.
+Two persistent processes: the aetherflow daemon and a shared opencode server. Everything else (agents, tasks, learnings) is ephemeral or lives in prog.
 
 ```
-prog ready              daemon                    opencode
-  (task queue)    -->   (process supervisor)  -->  (agent sessions)
-                         poll -> pool -> spawn
-                         reap -> respawn
-                         reconcile (reviewing -> done)
-                         reclaim (orphaned tasks)
+                    daemon                         opencode server
+                    (process supervisor)           (shared, managed)
+                     |                              |
+  af spawn -------->  spawn registry                plugin events
+  prog ready ------>  poll -> pool -> spawn ------> agent sessions
+                     reap -> respawn           <--- session.event RPC
+                     event buffer              <--- tool calls, lifecycle
+                     reconcile (reviewing->done)
+                     reclaim (orphaned tasks)
 ```
+
+### Server-First Model
+
+All agents connect to a shared opencode server via `opencode run --attach <url>`. The daemon starts this server automatically on startup and supervises it (restarting if it crashes). The server URL defaults to `http://127.0.0.1:4096` and is configurable via `--server-url` or `server_url` in the config file.
+
+The `AETHERFLOW_SOCKET` env var is set on the server process so the aetherflow plugin knows where to send events. Each agent process gets `AETHERFLOW_AGENT_ID` set to its unique name for session correlation.
+
+### Plugin Event Pipeline
+
+Observability flows through a plugin on the opencode server, not through log files. The aetherflow plugin (`~/.config/opencode/plugins/aetherflow-events.ts`) intercepts session lifecycle events and forwards them to the daemon over its Unix socket via the `session.event` RPC.
+
+**Event buffer** (`eventbuf.go`) -- a session-keyed ring buffer storing up to 10K events per session. Idle sessions are evicted after 2 hours. The buffer is the single source of truth for `af logs`, `af status <agent>`, and the TUI.
+
+**Session claiming** -- when a `session.created` event arrives, the daemon matches the `AETHERFLOW_AGENT_ID` from the event to an unclaimed pool agent or spawn registry entry. This correlates the opencode session ID to the aetherflow agent, enabling event routing.
+
+**Backfill** -- on daemon startup, existing sessions are fetched from the opencode server's REST API (`/session`) and pushed into the event buffer. This covers agents that started before the daemon (re)started.
 
 ### Daemon Internals
 
-The daemon runs several concurrent loops:
+The daemon runs several concurrent loops. In `--spawn-policy=manual` (the default), auto task lifecycle loops are disabled (poll/reclaim/reconcile). Manual mode handles `af spawn` agents and their observability.
 
-In `--spawn-policy=manual`, auto task lifecycle loops are intentionally disabled (poll/reclaim/reconcile). Manual mode is spawn-only and does not perform automatic task-state recovery.
+**Poller** (auto mode only) -- calls `prog ready -p <project>` on an interval to discover unblocked tasks. Returns a list of task IDs and titles. The poller runs in its own goroutine and sends batches to the pool via a channel.
 
-**Poller** -- calls `prog ready -p <project>` on an interval to discover unblocked tasks. Returns a list of task IDs and titles. The poller runs in its own goroutine and sends batches to the pool via a channel.
+**Pool** (auto mode only) -- manages a fixed number of agent slots (`--pool-size`, default 3). When a batch of ready tasks arrives from the poller, the pool assigns them to free slots. Each slot runs one opencode session. The pool tracks agents by task ID, not by process, so it knows which task each agent is working on.
 
-**Pool** -- manages a fixed number of agent slots (`--pool-size`, default 3). When a batch of ready tasks arrives from the poller, the pool assigns them to free slots. Each slot runs one opencode session. The pool tracks agents by task ID, not by process, so it knows which task each agent is working on.
+**Spawn registry** -- tracks agents spawned via `af spawn` (outside the pool). Registration is best-effort via the `spawn.register` RPC. Entries transition from running to exited when the agent process dies, and are kept for 1 hour after exit so `af status <agent>` works post-mortem. A periodic sweep checks PID liveness and removes stale entries.
 
 **Spawn sequence**: For each task, the pool:
 1. Fetches task metadata from prog (`prog show --json`) to infer the agent role
 2. Renders the role prompt template, replacing `{{task_id}}` and landing instructions
 3. Claims the task in prog (`prog start <id>`)
-4. Launches an opencode session with the rendered prompt as the first message
+4. Launches an opencode session via `opencode run --attach <server-url>` with the rendered prompt
 
 All fallible prep (1-2) happens before claiming (3) so a failure doesn't orphan the task in `in_progress` with no agent.
 
@@ -292,9 +334,9 @@ All fallible prep (1-2) happens before claiming (3) so a failure doesn't orphan 
 
 **Sweep** -- a safety net that runs every 30s. Checks PID liveness via `kill(pid, 0)` for every tracked agent. If a PID is gone but the reap goroutine is stuck on `Wait()` (observed with `Setsid` session leaders), the sweep force-removes the dead agent from the pool.
 
-**Reclaim** -- on daemon startup, finds tasks that are `in_progress` in prog but have no running agent. These are orphans from a previous daemon session that crashed. The daemon respawns agents for these tasks (up to pool capacity), using the same respawn path as crash recovery.
+**Reclaim** (auto mode only) -- on daemon startup, finds tasks that are `in_progress` in prog but have no running agent. These are orphans from a previous daemon session that crashed. The daemon respawns agents for these tasks (up to pool capacity), using the same respawn path as crash recovery.
 
-**Reconciler** -- (normal mode only) periodically checks if `reviewing` tasks have been merged to main. Fetches main from origin (`git fetch origin main`), then for each reviewing task checks `git merge-base --is-ancestor af/<id> main`. If the branch is merged (or already deleted), calls `prog done`. This closes the loop between an agent calling `prog review` and the task reaching its terminal state.
+**Reconciler** (auto mode, normal landing only) -- periodically checks if `reviewing` tasks have been merged to main. Fetches main from origin (`git fetch origin main`), then for each reviewing task checks `git merge-base --is-ancestor af/<id> main`. If the branch is merged (or already deleted), calls `prog done`. This closes the loop between an agent calling `prog review` and the task reaching its terminal state.
 
 ### Agent Isolation
 
@@ -306,13 +348,13 @@ Each agent runs in an isolated git worktree at `.aetherflow/worktrees/<task-id>`
 
 ### Process Model
 
-Agents run as child processes of the daemon. Each gets:
+Agents run as child processes of the daemon (pool agents) or the `af spawn` CLI process. Each gets:
 - Its own process group (`Setsid: true`) so terminal signals don't propagate
-- `AETHERFLOW_AGENT_ID` environment variable for plugin identification
-- Observability via the plugin event pipeline (session events flow through the daemon's event buffer)
-- stderr passed through to the daemon's stderr
+- `AETHERFLOW_AGENT_ID` environment variable for session correlation
+- Observability via the plugin event pipeline (no log files)
+- stderr passed through to the parent's stderr
 
-The spawn command is configurable (`--spawn-cmd`, default `opencode run --format json`). The rendered prompt is appended as the final argument.
+The spawn command is configurable (`--spawn-cmd`, default `opencode run --attach http://127.0.0.1:4096 --format json`). If the command doesn't include `--attach`, the daemon automatically appends it with the configured server URL. The rendered prompt is appended as the final argument.
 
 ### Name Generator
 
@@ -419,8 +461,9 @@ Create `.aetherflow.yaml` in the project directory:
 project: myapp
 # poll_interval: 10s
 # pool_size: 3
-# spawn_cmd: opencode run --format json
-# spawn_policy: auto          # auto | manual (manual = no prog polling / auto-spawn)
+# spawn_cmd: opencode run --attach http://127.0.0.1:4096 --format json
+# server_url: http://127.0.0.1:4096
+# spawn_policy: manual        # manual | auto (auto = poll prog and auto-schedule)
 # max_retries: 3
 # solo: false
 # reconcile_interval: 30s
@@ -438,8 +481,9 @@ CLI flags override config file values. Config file overrides defaults.
 | `--project` | *(required for auto)* | Prog project to watch for tasks |
 | `--poll-interval` | `10s` | How often to poll prog for tasks |
 | `--pool-size` | `3` | Maximum concurrent agent slots |
-| `--spawn-cmd` | `opencode run --format json` | Command to launch agent sessions |
-| `--spawn-policy` | `auto` | `auto` polls/schedules from prog, `manual` is spawn-only |
+| `--spawn-cmd` | `opencode run --attach <server-url> --format json` | Command to launch agent sessions |
+| `--server-url` | `http://127.0.0.1:4096` | Opencode server URL for server-first launches |
+| `--spawn-policy` | `manual` | `manual` is spawn-only, `auto` polls/schedules from prog |
 | `--max-retries` | `3` | Max crash respawns per task |
 | `--solo` | `false` | Agents merge to main directly instead of creating PRs |
 | `--reconcile-interval` | `30s` | How often to check if reviewing tasks are merged |
@@ -452,11 +496,20 @@ Manual mode without a project uses the global default socket path. Starting a se
 
 ## CLI Reference
 
+### Spawning Agents
+
+| Command | Description |
+|---------|-------------|
+| `af spawn "<prompt>"` | Spawn a one-off agent with a freeform prompt |
+| `af spawn "<prompt>" -d` | Spawn in background (detached) |
+| `af spawn "<prompt>" --solo` | Agent merges to main instead of creating a PR |
+| `af spawn "<prompt>" --json` | Output spawn metadata as JSON |
+
 ### Daemon
 
 | Command | Description |
 |---------|-------------|
-| `af daemon start` | Start the daemon |
+| `af daemon start` | Start the daemon (manages opencode server, RPC socket, event pipeline) |
 | `af daemon stop` | Stop the daemon |
 | `af daemon` | Quick status check (running/not running) |
 
@@ -468,8 +521,11 @@ Manual mode without a project uses the global default socket path. Starting a se
 | `af status <agent>` | Agent detail -- task info, uptime, recent tool calls |
 | `af status -w` | Watch mode -- continuous refresh |
 | `af status --json` | Machine-readable output |
-| `af logs <agent> -f` | Tail an agent's event log |
+| `af logs <agent> -f` | Tail an agent's event stream (from daemon's event buffer) |
 | `af logs <agent> --raw` | Raw events instead of formatted output |
+| `af sessions` | List known opencode sessions from the global registry |
+| `af sessions --json` | Machine-readable session list |
+| `af session attach <id>` | Attach interactively to a session |
 | `af tui` | Interactive terminal dashboard (k9s-style) |
 
 ### Flow Control
@@ -492,8 +548,6 @@ Manual mode without a project uses the global default socket path. Starting a se
 ## Roadmap
 
 **Custom task sources.** The daemon currently requires prog as the task backend. A plugin interface for task sources would let you swap in Linear, GitHub Issues, Jira, or a simple JSON file -- anything that can answer "what's ready?" and "mark this as started."
-
-**Ad-hoc agent spawning.** `af spawn "Your prompt"` to fire off a one-shot agent without creating a task first. Useful for quick jobs that don't need tracking.
 
 **External triggers.** Spawn agents from Slack, Linear, Discord, or any webhook. A lightweight API layer that accepts a prompt and queues it into the pool.
 
