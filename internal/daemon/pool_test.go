@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/baiirun/aetherflow/internal/sessions"
 )
 
 // fakeProcess implements Process for testing.
@@ -802,6 +804,379 @@ func TestPoolSweepFreesSlot(t *testing.T) {
 	agents := pool.Status()
 	if agents[0].TaskID != "ts-3" {
 		t.Errorf("new agent task = %q, want %q", agents[0].TaskID, "ts-3")
+	}
+}
+
+// --- session-aware respawn tests ---
+
+func TestCrashRespawnCarriesSessionID(t *testing.T) {
+	// When an agent with a session ID crashes, the respawned process
+	// should include --session <id> in its spawn command so it resumes
+	// the existing opencode session.
+	var spawnCount atomic.Int32
+	var mu sync.Mutex
+	procs := make([]*fakeProcess, 0)
+	releases := make([]func(), 0)
+	spawnCmds := make([]string, 0)
+
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
+		spawnCount.Add(1)
+		proc, release := newFakeProcess(int(spawnCount.Load()) * 100)
+		mu.Lock()
+		procs = append(procs, proc)
+		releases = append(releases, release)
+		spawnCmds = append(spawnCmds, spawnCmd)
+		mu.Unlock()
+		return proc, nil
+	}
+
+	cfg := Config{
+		Project:    "testproject",
+		PoolSize:   2,
+		SpawnCmd:   "fake-agent",
+		MaxRetries: 3,
+	}
+	cfg.ApplyDefaults()
+	pool := NewPool(cfg, progRunner(testTaskMeta), starter, slog.Default())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	taskCh := make(chan []Task, 1)
+	taskCh <- []Task{{ID: "ts-abc", Priority: 1, Title: "Do it"}}
+
+	go pool.Run(ctx, taskCh)
+
+	// Wait for first spawn.
+	waitFor(t, func() bool {
+		return spawnCount.Load() >= 1
+	})
+
+	// Simulate the session.created plugin event setting the session ID.
+	pool.SetSessionID(pool.Status()[0].ID.String(), "ses_test123")
+
+	// Crash the first agent.
+	mu.Lock()
+	procs[0].err = fmt.Errorf("exit status 1")
+	releases[0]()
+	mu.Unlock()
+
+	// Wait for respawn.
+	waitFor(t, func() bool {
+		return spawnCount.Load() >= 2
+	})
+
+	// Verify the respawn command includes --session.
+	mu.Lock()
+	defer mu.Unlock()
+	if len(spawnCmds) < 2 {
+		t.Fatalf("expected at least 2 spawn commands, got %d", len(spawnCmds))
+	}
+	// First spawn should NOT have --session (new agent).
+	if strings.Contains(spawnCmds[0], "--session") {
+		t.Errorf("initial spawn should not have --session, got: %q", spawnCmds[0])
+	}
+	// Second spawn (respawn) should have --session ses_test123.
+	if !strings.Contains(spawnCmds[1], "--session ses_test123") {
+		t.Errorf("respawn command should contain '--session ses_test123', got: %q", spawnCmds[1])
+	}
+}
+
+func TestCrashRespawnWithoutSessionIDOmitsFlag(t *testing.T) {
+	// When an agent without a session ID crashes (e.g. it crashed before
+	// the session.created event arrived), the respawn should not include
+	// --session in the spawn command.
+	var spawnCount atomic.Int32
+	var mu sync.Mutex
+	procs := make([]*fakeProcess, 0)
+	releases := make([]func(), 0)
+	spawnCmds := make([]string, 0)
+
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
+		spawnCount.Add(1)
+		proc, release := newFakeProcess(int(spawnCount.Load()) * 100)
+		mu.Lock()
+		procs = append(procs, proc)
+		releases = append(releases, release)
+		spawnCmds = append(spawnCmds, spawnCmd)
+		mu.Unlock()
+		return proc, nil
+	}
+
+	cfg := Config{
+		Project:    "testproject",
+		PoolSize:   2,
+		SpawnCmd:   "fake-agent",
+		MaxRetries: 3,
+	}
+	cfg.ApplyDefaults()
+	pool := NewPool(cfg, progRunner(testTaskMeta), starter, slog.Default())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	taskCh := make(chan []Task, 1)
+	taskCh <- []Task{{ID: "ts-abc", Priority: 1, Title: "Do it"}}
+
+	go pool.Run(ctx, taskCh)
+
+	// Wait for first spawn.
+	waitFor(t, func() bool {
+		return spawnCount.Load() >= 1
+	})
+
+	// Do NOT set a session ID — agent crashes before session.created arrives.
+
+	// Crash the first agent.
+	mu.Lock()
+	procs[0].err = fmt.Errorf("exit status 1")
+	releases[0]()
+	mu.Unlock()
+
+	// Wait for respawn.
+	waitFor(t, func() bool {
+		return spawnCount.Load() >= 2
+	})
+
+	// Neither spawn should have --session.
+	mu.Lock()
+	defer mu.Unlock()
+	for i, cmd := range spawnCmds {
+		if strings.Contains(cmd, "--session") {
+			t.Errorf("spawn %d should not have --session, got: %q", i, cmd)
+		}
+	}
+}
+
+func TestRespawnCarriesSessionIDForward(t *testing.T) {
+	// After a crash-respawn with a session ID, the new agent struct
+	// should have SessionID set so a second crash can also resume.
+	var spawnCount atomic.Int32
+	var mu sync.Mutex
+	procs := make([]*fakeProcess, 0)
+	releases := make([]func(), 0)
+	spawnCmds := make([]string, 0)
+
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
+		spawnCount.Add(1)
+		proc, release := newFakeProcess(int(spawnCount.Load()) * 100)
+		mu.Lock()
+		procs = append(procs, proc)
+		releases = append(releases, release)
+		spawnCmds = append(spawnCmds, spawnCmd)
+		mu.Unlock()
+		return proc, nil
+	}
+
+	cfg := Config{
+		Project:    "testproject",
+		PoolSize:   2,
+		SpawnCmd:   "fake-agent",
+		MaxRetries: 3,
+	}
+	cfg.ApplyDefaults()
+	pool := NewPool(cfg, progRunner(testTaskMeta), starter, slog.Default())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	taskCh := make(chan []Task, 1)
+	taskCh <- []Task{{ID: "ts-abc", Priority: 1, Title: "Do it"}}
+
+	go pool.Run(ctx, taskCh)
+
+	// Wait for first spawn.
+	waitFor(t, func() bool { return spawnCount.Load() >= 1 })
+
+	// Set session ID on first agent.
+	pool.SetSessionID(pool.Status()[0].ID.String(), "ses_persist")
+
+	// Crash agent 1 → respawn with --session ses_persist.
+	mu.Lock()
+	procs[0].err = fmt.Errorf("crash 1")
+	releases[0]()
+	mu.Unlock()
+
+	waitFor(t, func() bool { return spawnCount.Load() >= 2 })
+
+	// Crash agent 2 (without setting a new session ID — it should carry forward).
+	mu.Lock()
+	procs[1].err = fmt.Errorf("crash 2")
+	releases[1]()
+	mu.Unlock()
+
+	waitFor(t, func() bool { return spawnCount.Load() >= 3 })
+
+	// Both respawns should have --session ses_persist.
+	mu.Lock()
+	defer mu.Unlock()
+	for i := 1; i < len(spawnCmds); i++ {
+		if !strings.Contains(spawnCmds[i], "--session ses_persist") {
+			t.Errorf("respawn %d should contain '--session ses_persist', got: %q", i, spawnCmds[i])
+		}
+	}
+}
+
+// --- lookupSessionForTask tests ---
+
+func TestLookupSessionForTaskNilStore(t *testing.T) {
+	pool := testPool(t, progRunner(testTaskMeta), nil)
+	// sstore is nil by default from NewPool.
+	got := pool.lookupSessionForTask("ts-abc")
+	if got != "" {
+		t.Errorf("expected empty string with nil sstore, got %q", got)
+	}
+}
+
+func TestLookupSessionForTaskNoMatch(t *testing.T) {
+	sstore, err := sessions.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Insert a record for a different task.
+	if err := sstore.Upsert(sessions.Record{
+		ServerRef: "http://127.0.0.1:4096",
+		SessionID: "ses_other",
+		WorkRef:   "ts-other",
+		Origin:    sessions.OriginPool,
+		Status:    sessions.StatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := testPool(t, progRunner(testTaskMeta), nil)
+	pool.sstore = sstore
+
+	got := pool.lookupSessionForTask("ts-abc")
+	if got != "" {
+		t.Errorf("expected empty string for non-matching task, got %q", got)
+	}
+}
+
+func TestLookupSessionForTaskFindsMatch(t *testing.T) {
+	sstore, err := sessions.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sstore.Upsert(sessions.Record{
+		ServerRef: "http://127.0.0.1:4096",
+		SessionID: "ses_abc123",
+		WorkRef:   "ts-abc",
+		Origin:    sessions.OriginPool,
+		Status:    sessions.StatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := testPool(t, progRunner(testTaskMeta), nil)
+	pool.sstore = sstore
+
+	got := pool.lookupSessionForTask("ts-abc")
+	if got != "ses_abc123" {
+		t.Errorf("lookupSessionForTask() = %q, want %q", got, "ses_abc123")
+	}
+}
+
+func TestLookupSessionForTaskSkipsTerminated(t *testing.T) {
+	sstore, err := sessions.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Insert a terminated session — should be skipped.
+	if err := sstore.Upsert(sessions.Record{
+		ServerRef: "http://127.0.0.1:4096",
+		SessionID: "ses_terminated",
+		WorkRef:   "ts-abc",
+		Origin:    sessions.OriginPool,
+		Status:    sessions.StatusTerminated,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := testPool(t, progRunner(testTaskMeta), nil)
+	pool.sstore = sstore
+
+	got := pool.lookupSessionForTask("ts-abc")
+	if got != "" {
+		t.Errorf("lookupSessionForTask() = %q, want empty (terminated session should be skipped)", got)
+	}
+}
+
+func TestLookupSessionForTaskSkipsStaleReturnsActive(t *testing.T) {
+	sstore, err := sessions.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Insert a stale session (should be skipped).
+	if err := sstore.Upsert(sessions.Record{
+		ServerRef: "http://127.0.0.1:4096",
+		SessionID: "ses_stale",
+		WorkRef:   "ts-abc",
+		Origin:    sessions.OriginPool,
+		Status:    sessions.StatusStale,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	// Insert an active session (should be returned).
+	if err := sstore.Upsert(sessions.Record{
+		ServerRef: "http://127.0.0.1:4096",
+		SessionID: "ses_active",
+		WorkRef:   "ts-abc",
+		Origin:    sessions.OriginPool,
+		Status:    sessions.StatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := testPool(t, progRunner(testTaskMeta), nil)
+	pool.sstore = sstore
+
+	got := pool.lookupSessionForTask("ts-abc")
+	if got != "ses_active" {
+		t.Errorf("lookupSessionForTask() = %q, want %q (should skip stale, return active)", got, "ses_active")
+	}
+}
+
+func TestLookupSessionForTaskPicksMostRecent(t *testing.T) {
+	sstore, err := sessions.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Insert an older record first.
+	if err := sstore.Upsert(sessions.Record{
+		ServerRef: "http://127.0.0.1:4096",
+		SessionID: "ses_old",
+		WorkRef:   "ts-abc",
+		Origin:    sessions.OriginPool,
+		Status:    sessions.StatusIdle,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Small delay so UpdatedAt differs.
+	time.Sleep(5 * time.Millisecond)
+
+	// Insert a newer record.
+	if err := sstore.Upsert(sessions.Record{
+		ServerRef: "http://127.0.0.1:4096",
+		SessionID: "ses_new",
+		WorkRef:   "ts-abc",
+		Origin:    sessions.OriginPool,
+		Status:    sessions.StatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := testPool(t, progRunner(testTaskMeta), nil)
+	pool.sstore = sstore
+
+	// List returns records sorted by UpdatedAt descending, so the first
+	// match should be ses_new (the most recent).
+	got := pool.lookupSessionForTask("ts-abc")
+	if got != "ses_new" {
+		t.Errorf("lookupSessionForTask() = %q, want %q (most recent)", got, "ses_new")
 	}
 }
 

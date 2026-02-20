@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/baiirun/aetherflow/internal/sessions"
 )
 
 func TestFetchInProgressTasks(t *testing.T) {
@@ -334,5 +338,146 @@ func TestReclaimNoOrphans(t *testing.T) {
 
 	if got := len(pool.Status()); got != 0 {
 		t.Errorf("pool should be empty, got %d agents", got)
+	}
+}
+
+func TestReclaimResumesSessionFromRegistry(t *testing.T) {
+	// When the daemon restarts and reclaims orphaned in_progress tasks,
+	// it should look up the session ID from the registry and pass it to
+	// the respawned agent so it reconnects to the existing opencode session.
+	var mu sync.Mutex
+	var spawnCount atomic.Int32
+	spawnCmds := make([]string, 0)
+
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
+		spawnCount.Add(1)
+		proc, _ := newFakeProcess(int(spawnCount.Load()) * 100)
+		mu.Lock()
+		spawnCmds = append(spawnCmds, spawnCmd)
+		mu.Unlock()
+		return proc, nil
+	}
+
+	orphanedTasks := []progListItem{
+		{ID: "ts-orphan", Title: "Orphan Task", Type: "task", Status: "in_progress"},
+	}
+	orphanedJSON, _ := json.Marshal(orphanedTasks)
+
+	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if len(args) >= 1 && args[0] == "list" {
+			return orphanedJSON, nil
+		}
+		if len(args) >= 2 && args[0] == "show" {
+			meta := fmt.Sprintf(`{"id":"%s","type":"task","definition_of_done":"Do it","labels":[]}`, args[1])
+			return []byte(meta), nil
+		}
+		return nil, fmt.Errorf("unexpected: %v", args)
+	}
+
+	// Set up the session store with a record for the orphaned task.
+	sstore, err := sessions.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sstore.Upsert(sessions.Record{
+		ServerRef: "http://127.0.0.1:4096",
+		SessionID: "ses_orphan_session",
+		WorkRef:   "ts-orphan",
+		Origin:    sessions.OriginPool,
+		Status:    sessions.StatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{
+		Project:  "testproject",
+		PoolSize: 3,
+		SpawnCmd: "fake-agent",
+	}
+	cfg.ApplyDefaults()
+	pool := NewPool(cfg, runner, starter, slog.Default())
+	pool.sstore = sstore
+	pool.SetContext(context.Background())
+
+	pool.Reclaim(context.Background())
+
+	waitFor(t, func() bool {
+		return len(pool.Status()) == 1
+	})
+
+	// Verify the spawn command includes --session with the registry session ID.
+	mu.Lock()
+	defer mu.Unlock()
+	if len(spawnCmds) != 1 {
+		t.Fatalf("expected 1 spawn command, got %d", len(spawnCmds))
+	}
+	if !strings.Contains(spawnCmds[0], "--session ses_orphan_session") {
+		t.Errorf("reclaim spawn should contain '--session ses_orphan_session', got: %q", spawnCmds[0])
+	}
+}
+
+func TestReclaimWithoutRegistryOmitsSessionFlag(t *testing.T) {
+	// When no session record exists in the registry (e.g. fresh daemon
+	// with a leftover in_progress task from before sessions existed),
+	// reclaim should still work but without --session.
+	var mu sync.Mutex
+	var spawnCount atomic.Int32
+	spawnCmds := make([]string, 0)
+
+	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
+		spawnCount.Add(1)
+		proc, _ := newFakeProcess(int(spawnCount.Load()) * 100)
+		mu.Lock()
+		spawnCmds = append(spawnCmds, spawnCmd)
+		mu.Unlock()
+		return proc, nil
+	}
+
+	orphanedTasks := []progListItem{
+		{ID: "ts-orphan", Title: "Orphan Task", Type: "task", Status: "in_progress"},
+	}
+	orphanedJSON, _ := json.Marshal(orphanedTasks)
+
+	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if len(args) >= 1 && args[0] == "list" {
+			return orphanedJSON, nil
+		}
+		if len(args) >= 2 && args[0] == "show" {
+			meta := fmt.Sprintf(`{"id":"%s","type":"task","definition_of_done":"Do it","labels":[]}`, args[1])
+			return []byte(meta), nil
+		}
+		return nil, fmt.Errorf("unexpected: %v", args)
+	}
+
+	// Empty session store — no records for the orphaned task.
+	sstore, err := sessions.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{
+		Project:  "testproject",
+		PoolSize: 3,
+		SpawnCmd: "fake-agent",
+	}
+	cfg.ApplyDefaults()
+	pool := NewPool(cfg, runner, starter, slog.Default())
+	pool.sstore = sstore
+	pool.SetContext(context.Background())
+
+	pool.Reclaim(context.Background())
+
+	waitFor(t, func() bool {
+		return len(pool.Status()) == 1
+	})
+
+	// Spawn command should NOT have --session.
+	mu.Lock()
+	defer mu.Unlock()
+	if len(spawnCmds) != 1 {
+		t.Fatalf("expected 1 spawn command, got %d", len(spawnCmds))
+	}
+	if strings.Contains(spawnCmds[0], "--session") {
+		t.Errorf("reclaim spawn should not have --session when no registry record exists, got: %q", spawnCmds[0])
 	}
 }

@@ -224,8 +224,8 @@ func (d *Daemon) Run() error {
 		}
 	}
 
-	// Sweep dead spawned agents periodically.
-	go d.sweepSpawns(ctx)
+	// Sweep stale data periodically (spawn entries, event buffers, session records).
+	go d.sweepStale(ctx)
 
 	// Backfill event buffer from the opencode REST API for sessions that
 	// existed before this daemon started. Runs in background so it doesn't
@@ -292,10 +292,13 @@ func (d *Daemon) superviseServer(ctx context.Context) {
 	}
 }
 
-// sweepSpawns periodically removes dead spawned agents from the registry.
-// This runs independently of the reconciler so spawn cleanup works even when
+// sweepStale periodically removes stale data from all daemon subsystems:
+// dead/exited spawn entries, idle event buffers, and old session records.
+// All use retentionTTL (48h) so data expires together.
+//
+// This runs independently of the reconciler so cleanup works even when
 // the reconciler is disabled (solo mode) or no project is configured.
-func (d *Daemon) sweepSpawns(ctx context.Context) {
+func (d *Daemon) sweepStale(ctx context.Context) {
 	ticker := time.NewTicker(sweepInterval) // same interval as pool sweep (pool.go)
 	defer ticker.Stop()
 
@@ -309,6 +312,13 @@ func (d *Daemon) sweepSpawns(ctx context.Context) {
 			}
 			if n := d.events.SweepIdle(); n > 0 {
 				d.log.Info("event buffer sweep", "sessions_removed", n)
+			}
+			if d.sstore != nil {
+				if n, err := d.sstore.SweepStale(retentionTTL); err != nil {
+					d.log.Warn("session registry sweep failed", "error", err)
+				} else if n > 0 {
+					d.log.Info("session registry sweep", "records_removed", n)
+				}
 			}
 		}
 	}

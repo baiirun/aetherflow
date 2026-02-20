@@ -19,9 +19,9 @@ const (
 
 	// exitedSpawnTTL is how long an exited spawn entry is kept in the
 	// registry before being swept. This preserves the agent→session mapping
-	// so af status <agent> works after the agent process exits. Set to 48h
-	// so overnight runs are reviewable the next day. Matches sessionIdleTTL.
-	exitedSpawnTTL = 48 * time.Hour
+	// so af status <agent> works after the agent process exits.
+	// Uses the shared retentionTTL so all daemon data expires together.
+	exitedSpawnTTL = retentionTTL
 )
 
 // SpawnState is the lifecycle state of a spawn entry.
