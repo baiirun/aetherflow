@@ -281,11 +281,10 @@ In `--spawn-policy=manual`, auto task lifecycle loops are intentionally disabled
 **Spawn sequence**: For each task, the pool:
 1. Fetches task metadata from prog (`prog show --json`) to infer the agent role
 2. Renders the role prompt template, replacing `{{task_id}}` and landing instructions
-3. Opens a log file at `.aetherflow/logs/<task-id>.jsonl`
-4. Claims the task in prog (`prog start <id>`)
-5. Launches an opencode session with the rendered prompt as the first message
+3. Claims the task in prog (`prog start <id>`)
+4. Launches an opencode session with the rendered prompt as the first message
 
-All fallible prep (1-3) happens before claiming (4) so a failure doesn't orphan the task in `in_progress` with no agent.
+All fallible prep (1-2) happens before claiming (3) so a failure doesn't orphan the task in `in_progress` with no agent.
 
 **Reaper** -- each spawned agent gets a background goroutine that calls `Wait()` on the process. When the process exits:
 - Clean exit (code 0): slot is freed, retry count cleared
@@ -310,7 +309,7 @@ Each agent runs in an isolated git worktree at `.aetherflow/worktrees/<task-id>`
 Agents run as child processes of the daemon. Each gets:
 - Its own process group (`Setsid: true`) so terminal signals don't propagate
 - `AETHERFLOW_AGENT_ID` environment variable for plugin identification
-- Stdout captured to `.aetherflow/logs/<task-id>.jsonl`
+- Observability via the plugin event pipeline (session events flow through the daemon's event buffer)
 - stderr passed through to the daemon's stderr
 
 The spawn command is configurable (`--spawn-cmd`, default `opencode run --format json`). The rendered prompt is appended as the final argument.
@@ -428,7 +427,6 @@ project: myapp
 
 # Config-file-only settings (no CLI flag):
 # prompt_dir: ""              # Override embedded prompts with files from this directory
-# log_dir: .aetherflow/logs   # Directory for agent log files
 ```
 
 CLI flags override config file values. Config file overrides defaults.

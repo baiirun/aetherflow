@@ -45,7 +45,6 @@ type SpawnEntry struct {
 	SessionID string     `json:"session_id,omitempty"`
 	State     SpawnState `json:"state"`
 	Prompt    string     `json:"prompt"`
-	LogPath   string     `json:"log_path"`
 	SpawnTime time.Time  `json:"spawn_time"`
 	ExitedAt  time.Time  `json:"exited_at,omitempty"`
 }

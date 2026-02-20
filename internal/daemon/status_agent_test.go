@@ -11,7 +11,6 @@ import (
 
 func TestBuildAgentDetailHappyPath(t *testing.T) {
 	// Set up a pool with one running agent.
-	logDir := t.TempDir()
 	proc, release := newFakeProcess(1234)
 	defer release()
 
@@ -24,7 +23,6 @@ func TestBuildAgentDetailHappyPath(t *testing.T) {
 		PoolSize:    2,
 		SpawnCmd:    "fake-agent",
 		PromptDir:   "",
-		LogDir:      logDir,
 		SpawnPolicy: SpawnPolicyAuto,
 	}
 	cfg.ApplyDefaults()
@@ -117,13 +115,11 @@ func TestBuildAgentDetailHappyPath(t *testing.T) {
 }
 
 func TestBuildAgentDetailAgentNotFound(t *testing.T) {
-	logDir := t.TempDir()
 	cfg := Config{
 		Project:   "testproject",
 		PoolSize:  2,
 		SpawnCmd:  "fake-agent",
 		PromptDir: "",
-		LogDir:    logDir,
 	}
 	cfg.ApplyDefaults()
 
@@ -149,7 +145,6 @@ func TestBuildAgentDetailNilPool(t *testing.T) {
 
 func TestBuildAgentDetailNoSessionID(t *testing.T) {
 	// Agent exists but has no session ID yet — tool calls should be empty.
-	logDir := t.TempDir()
 	proc, release := newFakeProcess(1234)
 	defer release()
 
@@ -162,7 +157,6 @@ func TestBuildAgentDetailNoSessionID(t *testing.T) {
 		PoolSize:    2,
 		SpawnCmd:    "fake-agent",
 		PromptDir:   "",
-		LogDir:      logDir,
 		SpawnPolicy: SpawnPolicyAuto,
 	}
 	cfg.ApplyDefaults()
@@ -202,7 +196,6 @@ func TestBuildAgentDetailNoSessionID(t *testing.T) {
 
 func TestBuildAgentDetailProgShowFails(t *testing.T) {
 	// Prog show fails but tool calls still work — partial success.
-	logDir := t.TempDir()
 	proc, release := newFakeProcess(1234)
 	defer release()
 
@@ -215,7 +208,6 @@ func TestBuildAgentDetailProgShowFails(t *testing.T) {
 		PoolSize:    2,
 		SpawnCmd:    "fake-agent",
 		PromptDir:   "",
-		LogDir:      logDir,
 		SpawnPolicy: SpawnPolicyAuto,
 	}
 	cfg.ApplyDefaults()

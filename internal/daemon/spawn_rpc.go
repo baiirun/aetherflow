@@ -3,7 +3,6 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"time"
 
 	"github.com/baiirun/aetherflow/internal/sessions"
@@ -23,9 +22,6 @@ type SpawnRegisterParams struct {
 }
 
 // handleSpawnRegister registers a spawned agent with the daemon for observability.
-// The log path is derived server-side from the spawn ID and the daemon's log
-// directory — this matches the pool pattern (logFilePath) and prevents callers
-// from pointing at arbitrary files.
 func (d *Daemon) handleSpawnRegister(rawParams json.RawMessage) *Response {
 	var params SpawnRegisterParams
 	if len(rawParams) > 0 {
@@ -49,15 +45,11 @@ func (d *Daemon) handleSpawnRegister(rawParams json.RawMessage) *Response {
 		prompt = prompt[:maxSpawnPromptLen]
 	}
 
-	// Derive log path server-side from spawn ID, matching pool agent pattern.
-	logPath := filepath.Join(d.config.LogDir, filepath.Base(params.SpawnID)+".jsonl")
-
 	if err := d.spawns.Register(SpawnEntry{
 		SpawnID:   params.SpawnID,
 		PID:       params.PID,
 		State:     SpawnRunning,
 		Prompt:    prompt,
-		LogPath:   logPath,
 		SpawnTime: time.Now(),
 	}); err != nil {
 		return &Response{Success: false, Error: err.Error()}
@@ -66,7 +58,6 @@ func (d *Daemon) handleSpawnRegister(rawParams json.RawMessage) *Response {
 	d.log.Info("spawn registered",
 		"spawn_id", params.SpawnID,
 		"pid", params.PID,
-		"log_path", logPath,
 	)
 
 	// Session ID is captured when the session.created plugin event arrives

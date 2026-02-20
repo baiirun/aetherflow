@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -105,29 +104,6 @@ func ExecProcessStarter(ctx context.Context, spawnCmd string, prompt string, age
 	return &execProcess{cmd: cmd}, nil
 }
 
-// logFilePath returns the path for a task's log file.
-// taskID is sanitized with filepath.Base to prevent path traversal.
-func logFilePath(logDir, taskID string) string {
-	return filepath.Join(logDir, filepath.Base(taskID)+".jsonl")
-}
-
-// openLogFile creates the log directory if needed and opens the log file for appending.
-// Log files are owner-only (0600) since agent stdout may contain sensitive data.
-//
-// Note: writes are not fsynced — a daemon crash may lose buffered log lines.
-// This is acceptable for observability data; the agent process is unaffected.
-func openLogFile(logDir, taskID string) (*os.File, error) {
-	if err := os.MkdirAll(logDir, 0700); err != nil {
-		return nil, fmt.Errorf("creating log directory %s: %w", logDir, err)
-	}
-	path := logFilePath(logDir, taskID)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-	if err != nil {
-		return nil, fmt.Errorf("opening log file %s: %w", path, err)
-	}
-	return f, nil
-}
-
 // Pool manages a fixed number of agent slots.
 type Pool struct {
 	mu      sync.RWMutex
@@ -136,7 +112,6 @@ type Pool struct {
 	retries map[string]int    // crash count per task ID
 	names   *protocol.NameGenerator
 	config  Config
-	logDir  string // absolute path to log directory
 	runner  CommandRunner
 	starter ProcessStarter
 	sstore  *sessions.Store
@@ -179,7 +154,6 @@ func NewPool(cfg Config, runner CommandRunner, starter ProcessStarter, log *slog
 		retries:  make(map[string]int),
 		names:    protocol.NewNameGenerator(),
 		config:   cfg,
-		logDir:   cfg.LogDir,
 		runner:   runner,
 		starter:  starter,
 		sstore:   nil,
@@ -294,23 +268,11 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 		return
 	}
 
-	// Prep: open log file before claiming task. If this fails, the task stays
-	// in the queue rather than being orphaned in in_progress with no agent.
-	logFile, err := openLogFile(p.logDir, task.ID)
-	if err != nil {
-		p.log.Error("failed to open log file",
-			"task_id", task.ID,
-			"error", err,
-		)
-		return
-	}
-
 	// Claim the task in prog. This is the point of no return — after this,
 	// the task is in_progress and we must either spawn an agent or leave it
 	// for manual recovery.
 	err = p.work.Claim(ctx, task.ID, p.config.Project)
 	if err != nil {
-		_ = logFile.Close()
 		p.log.Error("failed to claim task",
 			"task_id", task.ID,
 			"error", err,
@@ -321,9 +283,8 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 	agentID := p.names.Generate()
 
 	launchCmd := EnsureAttachSpawnCmd(p.config.SpawnCmd, p.config.ServerURL)
-	proc, err := p.starter(ctx, launchCmd, prompt, string(agentID), logFile)
+	proc, err := p.starter(ctx, launchCmd, prompt, string(agentID), io.Discard)
 	if err != nil {
-		_ = logFile.Close()
 		p.log.Error("failed to spawn agent",
 			"task_id", task.ID,
 			"agent_id", agentID,
@@ -357,20 +318,12 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 	// at the daemon — see event_rpc.go claimSession.
 
 	// Wait for process exit in background.
-	go p.reap(agent, proc, logFile)
+	go p.reap(agent, proc)
 }
 
 // reap waits for a process to exit, frees the slot, and respawns on crash.
-// cleanup is closed after the process exits (typically the log file).
-func (p *Pool) reap(agent *Agent, proc Process, cleanup io.Closer) {
+func (p *Pool) reap(agent *Agent, proc Process) {
 	err := proc.Wait()
-	if closeErr := cleanup.Close(); closeErr != nil {
-		p.log.Warn("failed to close log file",
-			"agent_id", agent.ID,
-			"task_id", agent.TaskID,
-			"error", closeErr,
-		)
-	}
 
 	exitCode := 0
 	if err != nil {
@@ -483,24 +436,11 @@ func (p *Pool) respawn(taskID string, role Role) {
 		return
 	}
 
-	// Reopen the same log file in append mode.
-	// Uses openLogFile (with MkdirAll) rather than assuming the directory exists,
-	// so respawn is resilient to the log dir being removed between spawns.
-	logFile, err := openLogFile(p.logDir, taskID)
-	if err != nil {
-		p.log.Error("failed to open log file for respawn",
-			"task_id", taskID,
-			"error", err,
-		)
-		return
-	}
-
 	agentID := p.names.Generate()
 
 	launchCmd := EnsureAttachSpawnCmd(p.config.SpawnCmd, p.config.ServerURL)
-	proc, err := p.starter(p.ctx, launchCmd, prompt, string(agentID), logFile)
+	proc, err := p.starter(p.ctx, launchCmd, prompt, string(agentID), io.Discard)
 	if err != nil {
-		_ = logFile.Close()
 		p.log.Error("failed to respawn agent",
 			"task_id", taskID,
 			"agent_id", agentID,
@@ -533,7 +473,7 @@ func (p *Pool) respawn(taskID string, role Role) {
 	// Session ID is captured when the session.created plugin event arrives
 	// at the daemon — see event_rpc.go claimSession.
 
-	go p.reap(agent, proc, logFile)
+	go p.reap(agent, proc)
 }
 
 func (p *Pool) updateSessionStatus(sessionID string, origin sessions.OriginType, workRef string, status sessions.Status) {

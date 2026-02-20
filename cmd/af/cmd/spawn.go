@@ -5,12 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -49,7 +47,6 @@ func init() {
 	f.Bool("solo", false, "Solo mode: agent merges to main instead of creating a PR")
 	f.String("spawn-cmd", daemon.DefaultSpawnCmd, "Command to launch the agent session")
 	f.String("prompt-dir", "", "Override embedded prompts with files from this directory")
-	f.String("log-dir", daemon.DefaultLogDir, "Directory for agent log files")
 }
 
 func runSpawn(cmd *cobra.Command, args []string) {
@@ -60,7 +57,6 @@ func runSpawn(cmd *cobra.Command, args []string) {
 	solo, _ := cmd.Flags().GetBool("solo")
 	spawnCmd, _ := cmd.Flags().GetString("spawn-cmd")
 	promptDir, _ := cmd.Flags().GetString("prompt-dir")
-	logDir, _ := cmd.Flags().GetString("log-dir")
 
 	// Load config file values for fields not set by flags.
 	configPath, _ := cmd.Flags().GetString("config")
@@ -78,9 +74,6 @@ func runSpawn(cmd *cobra.Command, args []string) {
 	}
 	if !cmd.Flags().Changed("prompt-dir") && fileCfg.PromptDir != "" {
 		promptDir = fileCfg.PromptDir
-	}
-	if !cmd.Flags().Changed("log-dir") && fileCfg.LogDir != "" {
-		logDir = fileCfg.LogDir
 	}
 
 	// Phase A server-first launch path: ensure attach-based spawn command.
@@ -105,21 +98,15 @@ func runSpawn(cmd *cobra.Command, args []string) {
 		Fatal("rendering prompt: %v", err)
 	}
 
-	// Set up logging directory.
-	if err := os.MkdirAll(logDir, 0700); err != nil {
-		Fatal("creating log directory: %v", err)
-	}
-	logPath := filepath.Join(logDir, spawnID+".jsonl")
-
 	// Resolve the daemon socket for best-effort registration.
 	socketPath := resolveSocketPath(cmd)
 
 	if detach {
-		runDetached(spawnID, userPrompt, spawnCmd, prompt, logPath, socketPath, jsonOutput)
+		runDetached(spawnID, userPrompt, spawnCmd, prompt, socketPath, jsonOutput)
 		return
 	}
 
-	runForeground(spawnID, userPrompt, spawnCmd, prompt, logPath, socketPath, jsonOutput)
+	runForeground(spawnID, userPrompt, spawnCmd, prompt, socketPath, jsonOutput)
 }
 
 // newSpawnID generates a unique spawn identifier.
@@ -189,36 +176,25 @@ func isConnectionRefused(err error) bool {
 type spawnResult struct {
 	SpawnID string `json:"spawn_id"`
 	PID     int    `json:"pid"`
-	LogPath string `json:"log_path"`
 }
 
 // runForeground launches the agent in the current terminal.
-// Output goes to both the terminal and the log file.
-func runForeground(spawnID, userPrompt, spawnCmd, prompt, logPath, socketPath string, jsonOutput bool) {
+func runForeground(spawnID, userPrompt, spawnCmd, prompt, socketPath string, jsonOutput bool) {
 	if !jsonOutput {
 		fmt.Printf("%s Spawning agent %s\n", term.Bold("af spawn:"), term.Cyan(spawnID))
-		fmt.Printf("%s %s\n", term.Dim("log:"), logPath)
 		fmt.Println()
-	}
-
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-	if err != nil {
-		Fatal("opening log file: %v", err)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	proc := buildAgentProc(ctx, spawnCmd, prompt, spawnID)
-
-	// Tee stdout to both terminal and log file.
-	proc.Stdout = io.MultiWriter(os.Stdout, logFile)
+	proc.Stdout = os.Stdout
 	proc.Stderr = os.Stderr
 	proc.Stdin = os.Stdin
 
 	// Start (not Run) so we can register with the daemon before waiting.
 	if err := proc.Start(); err != nil {
-		_ = logFile.Close()
 		Fatal("failed to start agent: %v", err)
 	}
 
@@ -226,7 +202,6 @@ func runForeground(spawnID, userPrompt, spawnCmd, prompt, logPath, socketPath st
 		_ = json.NewEncoder(os.Stdout).Encode(spawnResult{
 			SpawnID: spawnID,
 			PID:     proc.Process.Pid,
-			LogPath: logPath,
 		})
 	}
 
@@ -235,7 +210,6 @@ func runForeground(spawnID, userPrompt, spawnCmd, prompt, logPath, socketPath st
 
 	// Wait for the process to exit.
 	waitErr := proc.Wait()
-	_ = logFile.Close()
 
 	// Deregister from daemon (best-effort).
 	deregisterSpawn(socketPath, spawnID)
@@ -255,23 +229,26 @@ func runForeground(spawnID, userPrompt, spawnCmd, prompt, logPath, socketPath st
 // runDetached launches the agent process in the background.
 // The rendered prompt is passed directly to the spawn command, bypassing
 // af spawn entirely so there's no double-rendering or flag-forwarding.
-func runDetached(spawnID, userPrompt, spawnCmd, prompt, logPath, socketPath string, jsonOutput bool) {
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-	if err != nil {
-		Fatal("opening log file for detached process: %v", err)
-	}
-
+// Stdout/stderr are discarded — observability comes from the plugin event pipeline.
+func runDetached(spawnID, userPrompt, spawnCmd, prompt, socketPath string, jsonOutput bool) {
 	proc := buildAgentProc(context.Background(), spawnCmd, prompt, spawnID)
-	proc.Stdout = logFile
-	proc.Stderr = logFile
+
+	// Redirect stdout/stderr to /dev/null. Observability is provided by the
+	// plugin event pipeline (session events flow through the daemon's event buffer).
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		Fatal("opening /dev/null: %v", err)
+	}
+	proc.Stdout = devNull
+	proc.Stderr = devNull
 
 	if err := proc.Start(); err != nil {
-		_ = logFile.Close()
+		_ = devNull.Close()
 		Fatal("failed to start agent: %v", err)
 	}
 
 	// Detach: don't wait for the child.
-	_ = logFile.Close()
+	_ = devNull.Close()
 
 	// Register with daemon for observability (best-effort).
 	// The daemon's sweep will clean up the entry when the PID dies.
@@ -281,11 +258,9 @@ func runDetached(spawnID, userPrompt, spawnCmd, prompt, logPath, socketPath stri
 		_ = json.NewEncoder(os.Stdout).Encode(spawnResult{
 			SpawnID: spawnID,
 			PID:     proc.Process.Pid,
-			LogPath: logPath,
 		})
 	} else {
 		fmt.Printf("%s Spawned agent %s (pid %d)\n", term.Bold("af spawn:"), term.Cyan(spawnID), proc.Process.Pid)
-		fmt.Printf("%s %s\n", term.Dim("log:"), logPath)
-		fmt.Printf("%s tail -f %s\n", term.Dim("tail:"), logPath)
+		fmt.Printf("%s af logs %s -f\n", term.Dim("logs:"), spawnID)
 	}
 }

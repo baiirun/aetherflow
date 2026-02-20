@@ -14,7 +14,6 @@ func TestSpawnRegistryRegisterAndGet(t *testing.T) {
 		PID:       1234,
 		State:     SpawnRunning,
 		Prompt:    "refactor auth",
-		LogPath:   "/tmp/logs/spawn-ghost_wolf.jsonl",
 		SpawnTime: time.Now(),
 	}
 
@@ -37,9 +36,6 @@ func TestSpawnRegistryRegisterAndGet(t *testing.T) {
 	}
 	if got.Prompt != "refactor auth" {
 		t.Errorf("Prompt = %q, want %q", got.Prompt, "refactor auth")
-	}
-	if got.LogPath != "/tmp/logs/spawn-ghost_wolf.jsonl" {
-		t.Errorf("LogPath = %q, want %q", got.LogPath, "/tmp/logs/spawn-ghost_wolf.jsonl")
 	}
 }
 

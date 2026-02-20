@@ -18,7 +18,6 @@ const (
 	DefaultSpawnCmd          = "opencode run --attach " + DefaultServerURL + " --format json"
 	DefaultMaxRetries        = 3
 	DefaultSpawnPolicy       = SpawnPolicyManual
-	DefaultLogDir            = ".aetherflow/logs"
 	DefaultReconcileInterval = 30 * time.Second
 )
 
@@ -105,10 +104,6 @@ type Config struct {
 	// or when you want autonomous end-to-end delivery without a review gate.
 	Solo bool `yaml:"solo"`
 
-	// LogDir is the directory for agent log files.
-	// Each task gets a <taskID>.jsonl file in this directory.
-	LogDir string `yaml:"log_dir"`
-
 	// SessionDir is the global session registry directory.
 	// Empty uses ~/.config/aetherflow/sessions.
 	SessionDir string `yaml:"session_dir"`
@@ -155,9 +150,6 @@ func (c *Config) ApplyDefaults() {
 	// PromptDir intentionally has no default — empty means use embedded prompts.
 	if c.ReconcileInterval == 0 {
 		c.ReconcileInterval = DefaultReconcileInterval
-	}
-	if c.LogDir == "" {
-		c.LogDir = DefaultLogDir
 	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()
@@ -231,15 +223,6 @@ func (c *Config) Validate() error {
 		c.Logger.Info("using embedded prompts")
 	}
 
-	// Resolve LogDir to absolute path so detached daemons don't depend on cwd.
-	if !filepath.IsAbs(c.LogDir) {
-		abs, err := filepath.Abs(c.LogDir)
-		if err != nil {
-			return fmt.Errorf("resolving log-dir %q: %w", c.LogDir, err)
-		}
-		c.LogDir = abs
-	}
-
 	return nil
 }
 
@@ -299,9 +282,6 @@ func mergeConfig(src, dst *Config) {
 	// Since bool zero is false, we can only merge true from file.
 	if src.Solo && !dst.Solo {
 		dst.Solo = true
-	}
-	if dst.LogDir == "" {
-		dst.LogDir = src.LogDir
 	}
 	if dst.SessionDir == "" {
 		dst.SessionDir = src.SessionDir

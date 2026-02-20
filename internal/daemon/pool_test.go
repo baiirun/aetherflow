@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -43,14 +42,12 @@ func newFakeProcessWithError(pid int, err error) (*fakeProcess, func()) {
 
 // testPool creates a pool with sensible test defaults and the given fakes.
 // PromptDir is empty so the pool uses embedded prompts compiled into the binary.
-// logDir is set to t.TempDir() so filesystem-touching tests don't leak into cwd.
 func testPool(t *testing.T, runner CommandRunner, starter ProcessStarter) *Pool {
 	t.Helper()
 	cfg := Config{
 		Project:  "testproject",
 		PoolSize: 2,
 		SpawnCmd: "fake-agent",
-		LogDir:   t.TempDir(),
 		// PromptDir empty — uses embedded prompts.
 	}
 	cfg.ApplyDefaults()
@@ -585,131 +582,7 @@ func TestCrashRetryCountResetsOnSuccess(t *testing.T) {
 	}
 }
 
-// --- stdout capture tests ---
-
-func TestSpawnWritesToLogFile(t *testing.T) {
-	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, stdout io.Writer) (Process, error) {
-		// Simulate the process writing to stdout (like opencode --format json).
-		_, _ = stdout.Write([]byte(`{"event":"tool_use"}`))
-		_, _ = stdout.Write([]byte("\n"))
-		proc, _ := newFakeProcess(1234)
-		return proc, nil
-	}
-
-	pool := testPool(t, progRunner(testTaskMeta), starter)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	taskCh := make(chan []Task, 1)
-	taskCh <- []Task{{ID: "ts-abc", Priority: 1, Title: "Do it"}}
-
-	go pool.Run(ctx, taskCh)
-
-	waitFor(t, func() bool {
-		return len(pool.Status()) == 1
-	})
-
-	// Verify the log file was created and contains the expected content.
-	path := logFilePath(pool.logDir, "ts-abc")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading log file: %v", err)
-	}
-	if !strings.Contains(string(data), `{"event":"tool_use"}`) {
-		t.Errorf("log file content = %q, want to contain tool_use event", string(data))
-	}
-}
-
-// spyCloser records whether Close was called.
-type spyCloser struct {
-	closed atomic.Bool
-}
-
-func (s *spyCloser) Close() error {
-	s.closed.Store(true)
-	return nil
-}
-
-func TestReapClosesLogFile(t *testing.T) {
-	spy := &spyCloser{}
-	proc, release := newFakeProcess(1234)
-
-	pool := testPool(t, progRunner(testTaskMeta), nil)
-
-	agent := &Agent{
-		ID:        "test_agent",
-		TaskID:    "ts-abc",
-		Role:      RoleWorker,
-		PID:       1234,
-		SpawnTime: time.Now(),
-		State:     AgentRunning,
-	}
-
-	pool.mu.Lock()
-	pool.agents["ts-abc"] = agent
-	pool.mu.Unlock()
-	pool.ctx = context.Background()
-
-	go pool.reap(agent, proc, spy)
-
-	// Clean exit.
-	release()
-
-	waitFor(t, func() bool {
-		return len(pool.Status()) == 0
-	})
-
-	if !spy.closed.Load() {
-		t.Error("expected log file closer to be called on clean exit")
-	}
-}
-
-func TestReapClosesLogFileOnCrash(t *testing.T) {
-	spy := &spyCloser{}
-	proc, release := newFakeProcessWithError(1234, fmt.Errorf("exit status 1"))
-
-	// Use a starter for the respawn path.
-	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
-		p, _ := newFakeProcess(5678)
-		return p, nil
-	}
-
-	cfg := Config{
-		Project:  "testproject",
-		PoolSize: 2,
-		SpawnCmd: "fake-agent",
-		LogDir:   t.TempDir(),
-	}
-	cfg.ApplyDefaults()
-	cfg.MaxRetries = 0 // Set AFTER ApplyDefaults since 0 is the zero value.
-	pool := NewPool(cfg, progRunner(testTaskMeta), starter, slog.Default())
-	pool.ctx = context.Background()
-
-	agent := &Agent{
-		ID:        "test_agent",
-		TaskID:    "ts-abc",
-		Role:      RoleWorker,
-		PID:       1234,
-		SpawnTime: time.Now(),
-		State:     AgentRunning,
-	}
-
-	pool.mu.Lock()
-	pool.agents["ts-abc"] = agent
-	pool.mu.Unlock()
-
-	go pool.reap(agent, proc, spy)
-
-	// Crash.
-	release()
-
-	waitFor(t, func() bool {
-		return spy.closed.Load()
-	})
-}
-
-func TestSpawnClosesFileOnStarterFailure(t *testing.T) {
+func TestSpawnFailsGracefullyOnStarterError(t *testing.T) {
 	var attempted atomic.Bool
 	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, _ io.Writer) (Process, error) {
 		attempted.Store(true)
@@ -731,83 +604,9 @@ func TestSpawnClosesFileOnStarterFailure(t *testing.T) {
 		return attempted.Load()
 	})
 
-	// The log file should have been created (during prep) and then closed
-	// (on starter failure). Verify it exists but the pool has no agents.
-	path := logFilePath(pool.logDir, "ts-abc")
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("log file should exist even after starter failure: %v", err)
-	}
-
+	// Pool should have no agents after a failed spawn.
 	if got := len(pool.Status()); got != 0 {
 		t.Errorf("pool should have 0 agents after starter failure, got %d", got)
-	}
-}
-
-func TestRespawnAppendsToSameFile(t *testing.T) {
-	var spawnCount atomic.Int32
-	var mu sync.Mutex
-	procs := make([]*fakeProcess, 0)
-	releases := make([]func(), 0)
-
-	starter := func(ctx context.Context, spawnCmd string, prompt string, _ string, stdout io.Writer) (Process, error) {
-		n := spawnCount.Add(1)
-		// Each spawn writes a unique marker to stdout.
-		_, _ = fmt.Fprintf(stdout, `{"spawn":%d}`+"\n", n)
-		proc, release := newFakeProcess(int(n) * 100)
-		mu.Lock()
-		procs = append(procs, proc)
-		releases = append(releases, release)
-		mu.Unlock()
-		return proc, nil
-	}
-
-	cfg := Config{
-		Project:    "testproject",
-		PoolSize:   2,
-		SpawnCmd:   "fake-agent",
-		MaxRetries: 3,
-	}
-	cfg.ApplyDefaults()
-	pool := NewPool(cfg, progRunner(testTaskMeta), starter, slog.Default())
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	taskCh := make(chan []Task, 1)
-	taskCh <- []Task{{ID: "ts-abc", Priority: 1, Title: "Do it"}}
-
-	go pool.Run(ctx, taskCh)
-
-	// Wait for first spawn.
-	waitFor(t, func() bool {
-		return spawnCount.Load() >= 1
-	})
-
-	// Crash the first agent.
-	mu.Lock()
-	procs[0].err = fmt.Errorf("exit status 1")
-	releases[0]()
-	mu.Unlock()
-
-	// Wait for respawn.
-	waitFor(t, func() bool {
-		return spawnCount.Load() >= 2
-	})
-
-	// Verify the log file contains output from both spawns.
-	path := logFilePath(pool.logDir, "ts-abc")
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading log file: %v", err)
-	}
-
-	content := string(data)
-	if !strings.Contains(content, `{"spawn":1}`) {
-		t.Errorf("log file missing spawn 1 marker, got: %q", content)
-	}
-	if !strings.Contains(content, `{"spawn":2}`) {
-		t.Errorf("log file missing spawn 2 marker, got: %q", content)
 	}
 }
 

@@ -109,7 +109,6 @@ type SpawnStatus struct {
 	SessionID string    `json:"session_id,omitempty"`
 	State     string    `json:"state"`
 	Prompt    string    `json:"prompt"`
-	LogPath   string    `json:"log_path"`
 	SpawnTime time.Time `json:"spawn_time"`
 	ExitedAt  time.Time `json:"exited_at,omitempty"`
 }
@@ -234,8 +233,6 @@ func (c *Client) PoolResume() (*PoolModeResult, error) {
 }
 
 // SpawnRegisterParams are the parameters for the spawn.register RPC.
-// LogPath is intentionally omitted — the daemon derives it server-side
-// from the spawn ID and its configured log directory.
 type SpawnRegisterParams struct {
 	SpawnID string `json:"spawn_id"`
 	PID     int    `json:"pid"`
