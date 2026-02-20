@@ -17,13 +17,17 @@ import (
 
 var installCmd = &cobra.Command{
 	Use:   "install",
-	Short: "Install aetherflow skills and agents to opencode",
-	Long: `Install bundled skill and agent definitions to your opencode
+	Short: "Install aetherflow skills, agents, and plugins to opencode",
+	Long: `Install bundled skill, agent, and plugin definitions to your opencode
 configuration directory (~/.config/opencode/ by default).
 
 Skills and agents are required for aetherflow's worker agents to perform
-code reviews and knowledge compounding. Running this command ensures
-your opencode installation has the definitions it needs.
+code reviews and knowledge compounding. The aetherflow-events plugin
+enables the event pipeline that streams opencode session events to the
+daemon for real-time observability.
+
+Running this command ensures your opencode installation has the
+definitions and plugins it needs.
 
 The command is idempotent — files that are already up to date are skipped.`,
 	Run: runInstall,
@@ -112,7 +116,7 @@ func runInstall(cmd *cobra.Command, args []string) {
 
 	// Dry-run or interactive display.
 	if !asJSON {
-		fmt.Printf("Installing aetherflow skills and agents to %s:\n\n", targetDir)
+		fmt.Printf("Installing aetherflow skills, agents, and plugins to %s:\n\n", targetDir)
 		for _, a := range actions {
 			switch a.Action {
 			case install.ActionWrite:

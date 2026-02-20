@@ -16,18 +16,38 @@ const (
 	// from inflating daemon memory. The prompt is only used for display
 	// (truncated to 80 runes in status views), so 8 KiB is generous.
 	maxSpawnPromptLen = 8192
+
+	// exitedSpawnTTL is how long an exited spawn entry is kept in the
+	// registry before being swept. This preserves the agent→session mapping
+	// so af status <agent> works after the agent process exits. Set to 48h
+	// so overnight runs are reviewable the next day. Matches sessionIdleTTL.
+	exitedSpawnTTL = 48 * time.Hour
+)
+
+// SpawnState is the lifecycle state of a spawn entry.
+type SpawnState string
+
+const (
+	SpawnRunning SpawnState = "running"
+	SpawnExited  SpawnState = "exited"
 )
 
 // SpawnEntry tracks a spawned agent registered with the daemon.
 // Spawned agents are outside the pool — they don't consume pool slots
 // and aren't managed by the daemon's scheduler. Registration is purely
 // for observability (af status, af logs, af status <agent>).
+//
+// Entries transition from running → exited when the agent process exits.
+// Exited entries are kept for exitedSpawnTTL so af status <agent> works
+// after exit. The periodic sweep removes them after the TTL expires.
 type SpawnEntry struct {
-	SpawnID   string    `json:"spawn_id"`
-	PID       int       `json:"pid"`
-	Prompt    string    `json:"prompt"`
-	LogPath   string    `json:"log_path"`
-	SpawnTime time.Time `json:"spawn_time"`
+	SpawnID   string     `json:"spawn_id"`
+	PID       int        `json:"pid"`
+	SessionID string     `json:"session_id,omitempty"`
+	State     SpawnState `json:"state"`
+	Prompt    string     `json:"prompt"`
+	SpawnTime time.Time  `json:"spawn_time"`
+	ExitedAt  time.Time  `json:"exited_at,omitempty"`
 }
 
 // SpawnRegistry tracks spawned agents for observability.
@@ -48,7 +68,8 @@ func NewSpawnRegistry() *SpawnRegistry {
 
 // Register adds a spawned agent to the registry.
 // If a spawn with the same ID already exists, it is overwritten (re-registration).
-// Returns an error if the registry is full and this is a new entry.
+// Returns an error if the registry is full of running entries and this is a new entry.
+// The caller must set entry.State explicitly (typically SpawnRunning).
 func (r *SpawnRegistry) Register(entry SpawnEntry) error {
 	if entry.SpawnID == "" {
 		panic("spawn registry: Register called with empty SpawnID")
@@ -56,28 +77,54 @@ func (r *SpawnRegistry) Register(entry SpawnEntry) error {
 	if entry.PID <= 0 {
 		panic("spawn registry: Register called with non-positive PID")
 	}
+	if entry.State != SpawnRunning && entry.State != SpawnExited {
+		panic(fmt.Sprintf("spawn registry: Register called with invalid State %q", entry.State))
+	}
+	if entry.State == SpawnExited && entry.ExitedAt.IsZero() {
+		panic("spawn registry: Register called with SpawnExited but zero ExitedAt")
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	// Allow re-registration of an existing spawn (same ID), but reject
-	// new entries when at capacity.
-	if _, exists := r.entries[entry.SpawnID]; !exists && len(r.entries) >= maxSpawnEntries {
-		return fmt.Errorf("spawn registry full (%d entries)", maxSpawnEntries)
+	// new entries when running entries are at capacity. Exited entries don't
+	// count — they're observability artifacts bounded by TTL, not resources.
+	if _, exists := r.entries[entry.SpawnID]; !exists {
+		running := 0
+		for _, e := range r.entries {
+			if e.State == SpawnRunning {
+				running++
+			}
+		}
+		if running >= maxSpawnEntries {
+			return fmt.Errorf("spawn registry full (%d running entries)", maxSpawnEntries)
+		}
 	}
 
 	r.entries[entry.SpawnID] = &entry
 	return nil
 }
 
-// Deregister removes a spawned agent from the registry.
-// Returns true if the entry existed and was removed.
-func (r *SpawnRegistry) Deregister(spawnID string) bool {
+// MarkExited transitions a spawn entry from running to exited.
+// The entry remains in the registry (preserving the agent→session mapping)
+// until the periodic sweep removes it after exitedSpawnTTL.
+// Returns false when the spawn is not registered or already exited.
+// Idempotent for already-exited entries — does not reset the TTL clock.
+func (r *SpawnRegistry) MarkExited(spawnID string) bool {
+	now := time.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	_, existed := r.entries[spawnID]
-	delete(r.entries, spawnID)
-	return existed
+	entry, ok := r.entries[spawnID]
+	if !ok {
+		return false
+	}
+	if entry.State != SpawnRunning {
+		return false // already exited — preserve original ExitedAt
+	}
+	entry.State = SpawnExited
+	entry.ExitedAt = now
+	return true
 }
 
 // Get returns a spawn entry by ID, or nil if not found.
@@ -91,6 +138,19 @@ func (r *SpawnRegistry) Get(spawnID string) *SpawnEntry {
 	return nil
 }
 
+// SetSessionID updates the session ID for an existing spawn entry.
+// Returns false when the spawn is not registered.
+func (r *SpawnRegistry) SetSessionID(spawnID, sessionID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, ok := r.entries[spawnID]
+	if !ok {
+		return false
+	}
+	entry.SessionID = sessionID
+	return true
+}
+
 // List returns all registered spawn entries.
 func (r *SpawnRegistry) List() []SpawnEntry {
 	r.mu.RLock()
@@ -102,37 +162,69 @@ func (r *SpawnRegistry) List() []SpawnEntry {
 	return result
 }
 
-// SweepDead removes entries whose PID is no longer alive.
-// Called periodically by the daemon alongside the pool sweep.
+// SweepResult is the outcome of a SweepDead call.
+type SweepResult struct {
+	Marked  int // running entries transitioned to exited
+	Removed int // exited entries deleted past TTL
+}
+
+// Total returns the number of entries affected by the sweep.
+func (r SweepResult) Total() int { return r.Marked + r.Removed }
+
+// SweepDead marks running entries whose PID is no longer alive as exited,
+// and removes exited entries that have exceeded exitedSpawnTTL.
+// Called periodically by the daemon.
 //
-// Uses a two-phase approach: collect dead PIDs under read lock (so
+// Uses a two-phase approach: collect candidates under read lock (so
 // pidAlive syscalls don't block concurrent Get/List/Register), then
-// delete under write lock.
-func (r *SpawnRegistry) SweepDead() int {
-	// Phase 1: identify dead PIDs under read lock.
+// mutate under write lock. Both phases re-verify state to handle races
+// between phases (e.g., a re-registered entry must not be swept).
+func (r *SpawnRegistry) SweepDead() SweepResult {
+	now := time.Now()
+
+	// Phase 1: identify candidates under read lock.
 	r.mu.RLock()
-	var dead []string
+	var toMark []string   // running entries with dead PIDs → mark exited
+	var toRemove []string // exited entries past TTL → remove
 	for id, entry := range r.entries {
-		if !r.pidAlive(entry.PID) {
-			dead = append(dead, id)
+		switch entry.State {
+		case SpawnRunning:
+			if !r.pidAlive(entry.PID) {
+				toMark = append(toMark, id)
+			}
+		case SpawnExited:
+			if now.Sub(entry.ExitedAt) > exitedSpawnTTL {
+				toRemove = append(toRemove, id)
+			}
+		default:
+			// Unknown state is a bug — treat as dead to prevent immortal entries.
+			toMark = append(toMark, id)
 		}
 	}
 	r.mu.RUnlock()
 
-	if len(dead) == 0 {
-		return 0
+	if len(toMark) == 0 && len(toRemove) == 0 {
+		return SweepResult{}
 	}
 
-	// Phase 2: remove dead entries under write lock.
-	// Re-check existence: entry may have been deregistered between phases.
+	// Phase 2: mutate under write lock.
+	// Re-check state: entries may have been re-registered or marked exited
+	// by another goroutine between the two lock phases.
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	removed := 0
-	for _, id := range dead {
-		if _, exists := r.entries[id]; exists {
-			delete(r.entries, id)
-			removed++
+	var result SweepResult
+	for _, id := range toMark {
+		if entry, exists := r.entries[id]; exists && entry.State == SpawnRunning {
+			entry.State = SpawnExited
+			entry.ExitedAt = now
+			result.Marked++
 		}
 	}
-	return removed
+	for _, id := range toRemove {
+		if entry, exists := r.entries[id]; exists && entry.State == SpawnExited {
+			delete(r.entries, id)
+			result.Removed++
+		}
+	}
+	return result
 }

@@ -3,8 +3,9 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"time"
+
+	"github.com/baiirun/aetherflow/internal/sessions"
 )
 
 const (
@@ -21,9 +22,6 @@ type SpawnRegisterParams struct {
 }
 
 // handleSpawnRegister registers a spawned agent with the daemon for observability.
-// The log path is derived server-side from the spawn ID and the daemon's log
-// directory — this matches the pool pattern (logFilePath) and prevents callers
-// from pointing at arbitrary files.
 func (d *Daemon) handleSpawnRegister(rawParams json.RawMessage) *Response {
 	var params SpawnRegisterParams
 	if len(rawParams) > 0 {
@@ -47,14 +45,11 @@ func (d *Daemon) handleSpawnRegister(rawParams json.RawMessage) *Response {
 		prompt = prompt[:maxSpawnPromptLen]
 	}
 
-	// Derive log path server-side from spawn ID, matching pool agent pattern.
-	logPath := filepath.Join(d.config.LogDir, filepath.Base(params.SpawnID)+".jsonl")
-
 	if err := d.spawns.Register(SpawnEntry{
 		SpawnID:   params.SpawnID,
 		PID:       params.PID,
+		State:     SpawnRunning,
 		Prompt:    prompt,
-		LogPath:   logPath,
 		SpawnTime: time.Now(),
 	}); err != nil {
 		return &Response{Success: false, Error: err.Error()}
@@ -63,8 +58,10 @@ func (d *Daemon) handleSpawnRegister(rawParams json.RawMessage) *Response {
 	d.log.Info("spawn registered",
 		"spawn_id", params.SpawnID,
 		"pid", params.PID,
-		"log_path", logPath,
 	)
+
+	// Session ID is captured when the session.created plugin event arrives
+	// at the daemon — see event_rpc.go claimSession.
 
 	return &Response{Success: true}
 }
@@ -74,7 +71,9 @@ type SpawnDeregisterParams struct {
 	SpawnID string `json:"spawn_id"`
 }
 
-// handleSpawnDeregister removes a spawned agent from the registry.
+// handleSpawnDeregister marks a spawned agent as exited in the registry.
+// The entry is kept (preserving the agent→session mapping for af status)
+// until the periodic sweep removes it after exitedSpawnTTL.
 func (d *Daemon) handleSpawnDeregister(rawParams json.RawMessage) *Response {
 	var params SpawnDeregisterParams
 	if len(rawParams) > 0 {
@@ -86,9 +85,25 @@ func (d *Daemon) handleSpawnDeregister(rawParams json.RawMessage) *Response {
 		return &Response{Success: false, Error: "spawn_id is required"}
 	}
 
-	d.spawns.Deregister(params.SpawnID)
+	if !d.spawns.MarkExited(params.SpawnID) {
+		d.log.Warn("spawn deregister: entry not found or already exited", "spawn_id", params.SpawnID)
+	} else {
+		d.log.Info("spawn exited", "spawn_id", params.SpawnID)
+	}
 
-	d.log.Info("spawn deregistered", "spawn_id", params.SpawnID)
+	// Update session status regardless — the session store may have a record
+	// even if the spawn registry entry was already cleaned up.
+	entry := d.spawns.Get(params.SpawnID)
+	if d.sstore != nil {
+		if entry != nil && entry.SessionID != "" {
+			if _, err := d.sstore.SetStatusBySession(d.config.ServerURL, entry.SessionID, sessions.StatusIdle); err != nil {
+				d.log.Warn("failed to update spawn session status by key", "spawn_id", params.SpawnID, "session_id", entry.SessionID, "status", sessions.StatusIdle, "error", err)
+			}
+		}
+		if _, err := d.sstore.SetStatusByWorkRef(sessions.OriginSpawn, params.SpawnID, sessions.StatusIdle); err != nil {
+			d.log.Warn("failed to update spawn session status", "spawn_id", params.SpawnID, "status", sessions.StatusIdle, "error", err)
+		}
+	}
 
 	return &Response{Success: true}
 }

@@ -24,11 +24,13 @@ type FullStatus struct {
 
 // SpawnStatus is the status of a spawned agent registered with the daemon.
 type SpawnStatus struct {
-	SpawnID   string    `json:"spawn_id"`
-	PID       int       `json:"pid"`
-	Prompt    string    `json:"prompt"`
-	LogPath   string    `json:"log_path"`
-	SpawnTime time.Time `json:"spawn_time"`
+	SpawnID   string     `json:"spawn_id"`
+	PID       int        `json:"pid"`
+	SessionID string     `json:"session_id,omitempty"`
+	State     SpawnState `json:"state"`
+	Prompt    string     `json:"prompt"`
+	SpawnTime time.Time  `json:"spawn_time"`
+	ExitedAt  time.Time  `json:"exited_at,omitempty"`
 }
 
 // AgentStatus enriches an Agent with task metadata from prog.
@@ -172,8 +174,10 @@ type StatusAgentParams struct {
 const defaultToolCallLimit = 20
 
 // BuildAgentDetail assembles detailed status for a single agent.
-// It fetches task metadata from prog and parses tool calls from the JSONL log.
-func BuildAgentDetail(ctx context.Context, pool *Pool, spawns *SpawnRegistry, cfg Config, runner CommandRunner, params StatusAgentParams) (*AgentDetail, error) {
+// It fetches task metadata from prog and reads tool calls from the event buffer.
+// Session ID comes from the agent's state (populated by claimSession on
+// session.created events from the plugin).
+func BuildAgentDetail(ctx context.Context, pool *Pool, spawns *SpawnRegistry, events *EventBuffer, cfg Config, runner CommandRunner, params StatusAgentParams) (*AgentDetail, error) {
 	// Find the agent in the pool by name.
 	var agent *Agent
 	if pool != nil {
@@ -189,7 +193,7 @@ func BuildAgentDetail(ctx context.Context, pool *Pool, spawns *SpawnRegistry, cf
 	// Check the spawn registry if not found in pool.
 	if agent == nil && spawns != nil {
 		if entry := spawns.Get(params.AgentName); entry != nil {
-			return buildSpawnDetail(ctx, entry, cfg, params)
+			return buildSpawnDetail(ctx, entry, events, cfg, params)
 		}
 	}
 
@@ -204,6 +208,7 @@ func BuildAgentDetail(ctx context.Context, pool *Pool, spawns *SpawnRegistry, cf
 			Role:      string(agent.Role),
 			PID:       agent.PID,
 			SpawnTime: agent.SpawnTime,
+			SessionID: agent.SessionID,
 		},
 	}
 
@@ -212,64 +217,25 @@ func BuildAgentDetail(ctx context.Context, pool *Pool, spawns *SpawnRegistry, cf
 		limit = defaultToolCallLimit
 	}
 
-	// Fetch task metadata and tool calls concurrently.
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var errors []string
+	// Extract tool calls from the event buffer using the agent's session ID.
+	if events != nil && agent.SessionID != "" {
+		evs := events.Events(agent.SessionID)
+		detail.ToolCalls = ToolCallsFromEvents(evs, limit)
+	}
 
-	// Fetch task title + last log from prog.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	// Fetch task title + last log from prog (only when prog enrichment is relevant).
+	if cfg.SpawnPolicy.Normalized().ProgEnrichmentEnabled() && agent.TaskID != "" {
 		callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 
 		title, lastLog, err := fetchTaskSummary(callCtx, agent.TaskID, cfg.Project, runner)
 		if err != nil {
-			mu.Lock()
-			errors = append(errors, fmt.Sprintf("prog show %s: %v", agent.TaskID, err))
-			mu.Unlock()
-			return
-		}
-		detail.TaskTitle = title
-		detail.LastLog = lastLog
-	}()
-
-	// Parse tool calls and session ID from JSONL log.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		parseCtx, parseCancel := context.WithTimeout(ctx, 5*time.Second)
-		defer parseCancel()
-
-		path := logFilePath(cfg.LogDir, agent.TaskID)
-		calls, skipped, err := ParseToolCalls(parseCtx, path, limit)
-		if err != nil {
-			mu.Lock()
-			errors = append(errors, fmt.Sprintf("parsing log %s: %v", path, err))
-			mu.Unlock()
-			return
-		}
-		if skipped > 0 {
-			mu.Lock()
-			errors = append(errors, fmt.Sprintf("skipped %d malformed lines in %s", skipped, path))
-			mu.Unlock()
-		}
-		detail.ToolCalls = calls
-
-		sessionID, err := ParseSessionID(parseCtx, path)
-		if err != nil {
-			mu.Lock()
-			errors = append(errors, fmt.Sprintf("parsing session ID from %s: %v", path, err))
-			mu.Unlock()
+			detail.Errors = append(detail.Errors, fmt.Sprintf("prog show %s: %v", agent.TaskID, err))
 		} else {
-			detail.SessionID = sessionID
+			detail.TaskTitle = title
+			detail.LastLog = lastLog
 		}
-	}()
-
-	wg.Wait()
-
-	detail.Errors = errors
+	}
 
 	return detail, nil
 }
@@ -279,7 +245,8 @@ const maxTitleDisplayRunes = 80
 
 // buildSpawnDetail assembles a detail view for a spawned agent.
 // Unlike pool agents, spawned agents don't have a prog task — the prompt is the spec.
-func buildSpawnDetail(ctx context.Context, entry *SpawnEntry, cfg Config, params StatusAgentParams) (*AgentDetail, error) {
+// Session ID comes from the spawn entry (populated by claimSession).
+func buildSpawnDetail(_ context.Context, entry *SpawnEntry, events *EventBuffer, _ Config, params StatusAgentParams) (*AgentDetail, error) {
 	detail := &AgentDetail{
 		AgentStatus: AgentStatus{
 			ID:        entry.SpawnID,
@@ -287,6 +254,7 @@ func buildSpawnDetail(ctx context.Context, entry *SpawnEntry, cfg Config, params
 			Role:      string(RoleSpawn),
 			PID:       entry.PID,
 			SpawnTime: entry.SpawnTime,
+			SessionID: entry.SessionID,
 			TaskTitle: truncatePrompt(entry.Prompt, maxTitleDisplayRunes),
 		},
 	}
@@ -296,29 +264,10 @@ func buildSpawnDetail(ctx context.Context, entry *SpawnEntry, cfg Config, params
 		limit = defaultToolCallLimit
 	}
 
-	// Parse tool calls from JSONL log with a dedicated timeout.
-	toolCtx, toolCancel := context.WithTimeout(ctx, 5*time.Second)
-	defer toolCancel()
-
-	calls, skipped, err := ParseToolCalls(toolCtx, entry.LogPath, limit)
-	if err != nil {
-		detail.Errors = append(detail.Errors, fmt.Sprintf("parsing log %s: %v", entry.LogPath, err))
-	} else {
-		if skipped > 0 {
-			detail.Errors = append(detail.Errors, fmt.Sprintf("skipped %d malformed lines in %s", skipped, entry.LogPath))
-		}
-		detail.ToolCalls = calls
-	}
-
-	// Parse session ID with its own timeout — don't share the tool call timeout.
-	sessCtx, sessCancel := context.WithTimeout(ctx, 2*time.Second)
-	defer sessCancel()
-
-	sessionID, err := ParseSessionID(sessCtx, entry.LogPath)
-	if err != nil {
-		detail.Errors = append(detail.Errors, fmt.Sprintf("parsing session ID from %s: %v", entry.LogPath, err))
-	} else {
-		detail.SessionID = sessionID
+	// Extract tool calls from the event buffer using the spawn's session ID.
+	if events != nil && entry.SessionID != "" {
+		evs := events.Events(entry.SessionID)
+		detail.ToolCalls = ToolCallsFromEvents(evs, limit)
 	}
 
 	return detail, nil

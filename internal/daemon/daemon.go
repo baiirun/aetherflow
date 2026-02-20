@@ -14,9 +14,13 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
+
+	"github.com/baiirun/aetherflow/internal/sessions"
 )
 
 const (
@@ -30,6 +34,10 @@ type Daemon struct {
 	poller   *Poller
 	pool     *Pool
 	spawns   *SpawnRegistry
+	sstore   *sessions.Store
+	events   *EventBuffer
+	server   *exec.Cmd
+	serverMu sync.Mutex
 	shutdown chan struct{}
 	log      *slog.Logger
 }
@@ -65,9 +73,16 @@ func New(cfg Config) *Daemon {
 
 	var poller *Poller
 	var pool *Pool
+	store, storeErr := sessions.Open(cfg.SessionDir)
+	if storeErr != nil && log != nil {
+		log.Warn("session registry unavailable", "error", storeErr)
+	}
 	if cfg.Project != "" {
 		poller = NewPoller(cfg.Project, cfg.PollInterval, cfg.Runner, log)
 		pool = NewPool(cfg, cfg.Runner, cfg.Starter, log)
+		if pool != nil {
+			pool.sstore = store
+		}
 	}
 
 	return &Daemon{
@@ -75,6 +90,8 @@ func New(cfg Config) *Daemon {
 		poller:   poller,
 		pool:     pool,
 		spawns:   NewSpawnRegistry(),
+		sstore:   store,
+		events:   NewEventBuffer(DefaultEventBufSize),
 		shutdown: make(chan struct{}),
 		log:      log,
 	}
@@ -138,6 +155,25 @@ func (d *Daemon) Run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	serverEnv := []string{
+		"AETHERFLOW_SOCKET=" + d.config.SocketPath,
+	}
+	startServer := d.config.ServerStarter
+	if startServer == nil {
+		startServer = StartManagedServer
+	}
+	serverCmd, err := startServer(ctx, d.config.ServerURL, serverEnv, func(msg string, args ...any) {
+		d.log.Info(msg, args...)
+	})
+	if err != nil {
+		_ = listener.Close()
+		return err
+	}
+	d.server = serverCmd
+	if serverCmd != nil {
+		go d.superviseServer(ctx)
+	}
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -191,6 +227,17 @@ func (d *Daemon) Run() error {
 	// Sweep dead spawned agents periodically.
 	go d.sweepSpawns(ctx)
 
+	// Backfill event buffer from the opencode REST API for sessions that
+	// existed before this daemon started. Runs in background so it doesn't
+	// block accepting connections — the daemon is usable immediately, and
+	// events from the plugin will flow as soon as agents start.
+	go func() {
+		bctx, bcancel := context.WithTimeout(ctx, backfillTimeout)
+		defer bcancel()
+		api := newOpencodeClient(d.config.ServerURL)
+		backfillEvents(bctx, api, d.sstore, d.events, d.log)
+	}()
+
 	// Accept connections
 	for {
 		conn, err := listener.Accept()
@@ -207,6 +254,44 @@ func (d *Daemon) Run() error {
 	}
 }
 
+func (d *Daemon) superviseServer(ctx context.Context) {
+	for {
+		d.serverMu.Lock()
+		cmd := d.server
+		d.serverMu.Unlock()
+		if cmd == nil {
+			return
+		}
+
+		err := cmd.Wait()
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		d.log.Warn("managed opencode server exited, restarting", "error", err)
+		time.Sleep(500 * time.Millisecond)
+		restartEnv := []string{
+			"AETHERFLOW_SOCKET=" + d.config.SocketPath,
+		}
+		restarted, startErr := StartManagedServer(ctx, d.config.ServerURL, restartEnv, func(msg string, args ...any) {
+			d.log.Info(msg, args...)
+		})
+		if startErr != nil {
+			d.log.Error("failed to restart managed opencode server", "error", startErr)
+			continue
+		}
+		if restarted == nil {
+			// Existing server is already up; nothing to supervise.
+			return
+		}
+		d.serverMu.Lock()
+		d.server = restarted
+		d.serverMu.Unlock()
+	}
+}
+
 // sweepSpawns periodically removes dead spawned agents from the registry.
 // This runs independently of the reconciler so spawn cleanup works even when
 // the reconciler is disabled (solo mode) or no project is configured.
@@ -219,8 +304,11 @@ func (d *Daemon) sweepSpawns(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if removed := d.spawns.SweepDead(); removed > 0 {
-				d.log.Info("spawn sweep: removed dead entries", "count", removed)
+			if result := d.spawns.SweepDead(); result.Total() > 0 {
+				d.log.Info("spawn sweep", "marked_exited", result.Marked, "removed", result.Removed)
+			}
+			if n := d.events.SweepIdle(); n > 0 {
+				d.log.Info("event buffer sweep", "sessions_removed", n)
 			}
 		}
 	}
@@ -252,8 +340,6 @@ func (d *Daemon) handleRequest(ctx context.Context, req *Request) *Response {
 		return d.handleStatusFull(ctx)
 	case "status.agent":
 		return d.handleStatusAgent(ctx, req.Params)
-	case "logs.path":
-		return d.handleLogsPath(req.Params)
 	case "pool.drain":
 		return d.handlePoolDrain()
 	case "pool.pause":
@@ -264,6 +350,10 @@ func (d *Daemon) handleRequest(ctx context.Context, req *Request) *Response {
 		return d.handleSpawnRegister(req.Params)
 	case "spawn.deregister":
 		return d.handleSpawnDeregister(req.Params)
+	case "session.event":
+		return d.handleSessionEvent(req.Params)
+	case "events.list":
+		return d.handleEventsList(req.Params)
 	case "shutdown":
 		return d.handleShutdown()
 	default:
@@ -293,7 +383,7 @@ func (d *Daemon) handleStatusAgent(ctx context.Context, rawParams json.RawMessag
 	}
 
 	start := time.Now()
-	detail, err := BuildAgentDetail(ctx, d.pool, d.spawns, d.config, d.config.Runner, params)
+	detail, err := BuildAgentDetail(ctx, d.pool, d.spawns, d.events, d.config, d.config.Runner, params)
 	if err != nil {
 		return &Response{Success: false, Error: err.Error()}
 	}

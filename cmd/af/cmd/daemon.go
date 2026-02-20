@@ -75,6 +75,9 @@ func buildConfig(cmd *cobra.Command) daemon.Config {
 	if cmd.Flags().Changed("spawn-cmd") {
 		cfg.SpawnCmd, _ = cmd.Flags().GetString("spawn-cmd")
 	}
+	if cmd.Flags().Changed("server-url") {
+		cfg.ServerURL, _ = cmd.Flags().GetString("server-url")
+	}
 	if cmd.Flags().Changed("spawn-policy") {
 		policy, _ := cmd.Flags().GetString("spawn-policy")
 		cfg.SpawnPolicy = daemon.SpawnPolicy(policy)
@@ -113,7 +116,7 @@ func startDetached(cmd *cobra.Command) {
 
 	// Forward all flags except --detach.
 	reArgs := []string{"daemon", "start"}
-	for _, name := range []string{"project", "poll-interval", "pool-size", "spawn-cmd", "spawn-policy", "max-retries", "solo", "config"} {
+	for _, name := range []string{"project", "poll-interval", "pool-size", "spawn-cmd", "server-url", "spawn-policy", "max-retries", "solo", "config"} {
 		if cmd.Flags().Changed(name) {
 			val, _ := cmd.Flags().GetString(name)
 			// Duration and int flags also work with GetString via pflag.
@@ -160,6 +163,7 @@ func init() {
 	f.Duration("poll-interval", daemon.DefaultPollInterval, "How often to poll prog for tasks")
 	f.Int("pool-size", daemon.DefaultPoolSize, "Maximum concurrent agent slots")
 	f.String("spawn-cmd", daemon.DefaultSpawnCmd, "Command to launch agent sessions")
+	f.String("server-url", daemon.DefaultServerURL, "Opencode server URL for attach-based session launches")
 	f.String("spawn-policy", string(daemon.DefaultSpawnPolicy), "Daemon spawn policy: auto (schedule from prog) or manual (spawn-only)")
 	f.Int("max-retries", daemon.DefaultMaxRetries, "Max crash respawns per task")
 	f.Bool("solo", false, "Solo mode: agents merge to main directly instead of creating PRs")

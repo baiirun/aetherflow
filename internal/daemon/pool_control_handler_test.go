@@ -12,7 +12,6 @@ func TestHandlePoolDrainHappyPath(t *testing.T) {
 		PoolSize:  2,
 		SpawnCmd:  "fake-agent",
 		PromptDir: "",
-		LogDir:    t.TempDir(),
 	}
 	cfg.ApplyDefaults()
 
@@ -44,7 +43,6 @@ func TestHandlePoolPauseHappyPath(t *testing.T) {
 		PoolSize:  2,
 		SpawnCmd:  "fake-agent",
 		PromptDir: "",
-		LogDir:    t.TempDir(),
 	}
 	cfg.ApplyDefaults()
 
@@ -73,7 +71,6 @@ func TestHandlePoolResumeHappyPath(t *testing.T) {
 		PoolSize:  2,
 		SpawnCmd:  "fake-agent",
 		PromptDir: "",
-		LogDir:    t.TempDir(),
 	}
 	cfg.ApplyDefaults()
 

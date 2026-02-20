@@ -81,12 +81,18 @@ type FullStatus struct {
 const (
 	SpawnPolicyAuto   = "auto"
 	SpawnPolicyManual = "manual"
+
+	// SpawnState constants for display code. These mirror the daemon's
+	// SpawnState type but are plain strings — the client package doesn't
+	// import daemon types. The JSON wire format is the boundary.
+	SpawnStateRunning = "running"
+	SpawnStateExited  = "exited"
 )
 
 // NormalizedSpawnPolicy returns the effective spawn policy for status display.
 func (s *FullStatus) NormalizedSpawnPolicy() string {
 	if s.SpawnPolicy == "" {
-		return SpawnPolicyAuto
+		return SpawnPolicyManual
 	}
 	return s.SpawnPolicy
 }
@@ -100,9 +106,11 @@ func (s *FullStatus) IsManualSpawnPolicy() bool {
 type SpawnStatus struct {
 	SpawnID   string    `json:"spawn_id"`
 	PID       int       `json:"pid"`
+	SessionID string    `json:"session_id,omitempty"`
+	State     string    `json:"state"`
 	Prompt    string    `json:"prompt"`
-	LogPath   string    `json:"log_path"`
 	SpawnTime time.Time `json:"spawn_time"`
+	ExitedAt  time.Time `json:"exited_at,omitempty"`
 }
 
 // AgentStatus is a single agent's enriched status.
@@ -124,7 +132,7 @@ type Task struct {
 	Title    string `json:"title"`
 }
 
-// ToolCall is a single tool invocation from the agent's JSONL log.
+// ToolCall is a single tool invocation from the agent's event stream.
 type ToolCall struct {
 	Timestamp  time.Time `json:"timestamp"`
 	Tool       string    `json:"tool"`
@@ -166,24 +174,29 @@ func (c *Client) StatusFull() (*FullStatus, error) {
 	return &result, nil
 }
 
-// LogsPathParams are the parameters for the logs.path RPC.
-type LogsPathParams struct {
-	AgentName string `json:"agent_name"`
+// EventsListParams are the parameters for the events.list RPC.
+type EventsListParams struct {
+	AgentName      string `json:"agent_name"`
+	AfterTimestamp int64  `json:"after_timestamp,omitempty"`
+	Raw            bool   `json:"raw,omitempty"`
 }
 
-// LogsPathResult is the response for the logs.path RPC.
-type LogsPathResult struct {
-	Path string `json:"path"`
+// EventsListResult is the response for the events.list RPC.
+type EventsListResult struct {
+	Lines     []string `json:"lines,omitempty"`
+	SessionID string   `json:"session_id,omitempty"`
+	LastTS    int64    `json:"last_ts"`
 }
 
-// LogsPath returns the JSONL log file path for a running agent.
-func (c *Client) LogsPath(agentName string) (string, error) {
-	params := LogsPathParams{AgentName: agentName}
-	var result LogsPathResult
-	if err := c.call("logs.path", params, &result); err != nil {
-		return "", err
+// EventsList returns events for an agent from the daemon's event buffer.
+// When afterTimestamp is set, only events after that timestamp are returned.
+func (c *Client) EventsList(agentName string, afterTimestamp int64) (*EventsListResult, error) {
+	params := EventsListParams{AgentName: agentName, AfterTimestamp: afterTimestamp}
+	var result EventsListResult
+	if err := c.call("events.list", params, &result); err != nil {
+		return nil, err
 	}
-	return result.Path, nil
+	return &result, nil
 }
 
 // PoolModeResult is the response for pool control RPCs.
@@ -220,8 +233,6 @@ func (c *Client) PoolResume() (*PoolModeResult, error) {
 }
 
 // SpawnRegisterParams are the parameters for the spawn.register RPC.
-// LogPath is intentionally omitted — the daemon derives it server-side
-// from the spawn ID and its configured log directory.
 type SpawnRegisterParams struct {
 	SpawnID string `json:"spawn_id"`
 	PID     int    `json:"pid"`
@@ -235,7 +246,7 @@ func (c *Client) SpawnRegister(params SpawnRegisterParams) error {
 	return c.call("spawn.register", params, nil)
 }
 
-// SpawnDeregister removes a spawned agent from the daemon's registry.
+// SpawnDeregister marks a spawned agent as exited in the daemon's registry.
 func (c *Client) SpawnDeregister(spawnID string) error {
 	return c.call("spawn.deregister", struct {
 		SpawnID string `json:"spawn_id"`

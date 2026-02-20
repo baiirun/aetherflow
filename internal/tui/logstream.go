@@ -1,41 +1,32 @@
 package tui
 
 import (
-	"bufio"
 	"fmt"
-	"os"
 	"strings"
 
-	"github.com/baiirun/aetherflow/internal/daemon"
+	"github.com/baiirun/aetherflow/internal/client"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// logStreamMsg carries newly read log lines from the file.
-type logStreamMsg struct {
-	lines    []string
-	newCount int // updated raw line count for next read
-	err      error
+// logEventsMsg carries newly fetched event lines from the daemon RPC.
+type logEventsMsg struct {
+	lines  []string
+	lastTS int64 // for incremental polling
+	err    error
 }
 
-// logPathMsg carries the result of fetching the log file path from the daemon.
-type logPathMsg struct {
-	path string
-	err  error
-}
-
-// LogStreamModel is the full-screen JSONL log viewer.
-// It reads from the agent's log file directly, formats each line with
-// daemon.FormatLogLine, and renders in a scrollable viewport.
-// New lines are polled on each tick (every 2s from the parent).
+// LogStreamModel is the full-screen event log viewer.
+// It reads events from the daemon's in-memory buffer via the events.list RPC,
+// formats them, and renders in a scrollable viewport.
+// New events are polled on each tick (every 2s from the parent).
 type LogStreamModel struct {
 	agentID string
-	path    string // log file path (empty until fetched)
-	pathErr error  // error fetching path
+	client  *client.Client
 
 	vp         viewport.Model
 	lines      []string // formatted lines
-	lineCount  int      // total raw lines read so far (for incremental reads)
+	lastTS     int64    // last event timestamp for incremental reads
 	autoScroll bool     // scroll to bottom on new content
 
 	ready  bool
@@ -49,9 +40,10 @@ const (
 )
 
 // NewLogStreamModel creates a new log stream viewer for the given agent.
-func NewLogStreamModel(agentID string, width, height int) LogStreamModel {
+func NewLogStreamModel(agentID string, c *client.Client, width, height int) LogStreamModel {
 	m := LogStreamModel{
 		agentID:    agentID,
+		client:     c,
 		width:      width,
 		height:     height,
 		autoScroll: true,
@@ -65,13 +57,13 @@ func NewLogStreamModel(agentID string, width, height int) LogStreamModel {
 func (m *LogStreamModel) initViewport() {
 	vpH := max(4, m.height-logHeaderRows-logFooterRows)
 	m.vp = viewport.New(m.width-2, vpH) // -2 for left margin
-	m.vp.SetContent(dimStyle.Render("Loading logs..."))
+	m.vp.SetContent(dimStyle.Render("Loading events..."))
 	m.ready = true
 }
 
-// Init returns a no-op — the parent kicks off the log path fetch.
+// Init returns the initial fetch command.
 func (m LogStreamModel) Init() tea.Cmd {
-	return nil
+	return m.fetchEventsCmd()
 }
 
 // Update handles messages for the log stream screen.
@@ -106,24 +98,14 @@ func (m LogStreamModel) Update(msg tea.Msg) (LogStreamModel, tea.Cmd) {
 			m.autoScroll = false
 		}
 
-	case logPathMsg:
+	case logEventsMsg:
 		if msg.err != nil {
-			m.pathErr = msg.err
-			if m.ready {
-				m.vp.SetContent(redStyle.Render(fmt.Sprintf("Error: %v", msg.err)))
-			}
+			// Non-fatal — daemon may be temporarily unavailable.
 			return m, nil
 		}
-		m.path = msg.path
-		// Do an initial read immediately.
-		return m, m.readNewLinesCmd()
-
-	case logStreamMsg:
-		if msg.err != nil {
-			// Non-fatal — file may not exist yet. Show error but keep polling.
-			return m, nil
+		if msg.lastTS > m.lastTS {
+			m.lastTS = msg.lastTS
 		}
-		m.lineCount = msg.newCount
 		if len(msg.lines) > 0 {
 			m.lines = append(m.lines, msg.lines...)
 			m.refreshContent()
@@ -146,7 +128,7 @@ func (m *LogStreamModel) refreshContent() {
 		return
 	}
 	if len(m.lines) == 0 {
-		m.vp.SetContent(dimStyle.Render("No log output yet..."))
+		m.vp.SetContent(dimStyle.Render("No events yet..."))
 		return
 	}
 	m.vp.SetContent(strings.Join(m.lines, "\n"))
@@ -155,56 +137,19 @@ func (m *LogStreamModel) refreshContent() {
 	}
 }
 
-// readNewLinesCmd returns a Cmd that reads new lines from the log file.
-// It reads from the current lineCount offset so we only get new data.
-func (m LogStreamModel) readNewLinesCmd() tea.Cmd {
-	path := m.path
-	offset := m.lineCount
+// fetchEventsCmd returns a Cmd that fetches events from the daemon RPC.
+// Uses lastTS for incremental reads so we only get new events.
+func (m LogStreamModel) fetchEventsCmd() tea.Cmd {
+	agentID := m.agentID
+	c := m.client
+	afterTS := m.lastTS
 	return func() tea.Msg {
-		result, err := readLogLines(path, offset)
+		result, err := c.EventsList(agentID, afterTS)
 		if err != nil {
-			return logStreamMsg{err: err}
+			return logEventsMsg{err: err}
 		}
-		return logStreamMsg{lines: result.lines, newCount: result.newCount}
+		return logEventsMsg{lines: result.Lines, lastTS: result.LastTS}
 	}
-}
-
-// logReadResult holds formatted lines and the new total raw line count.
-type logReadResult struct {
-	lines    []string
-	newCount int // total raw lines in file after this read
-}
-
-// readLogLines reads a JSONL file from the given line offset, formats
-// each line with daemon.FormatLogLine, and returns the new formatted lines
-// plus the updated total line count (so the next read can skip already-seen lines).
-func readLogLines(path string, offset int) (*logReadResult, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	var formatted []string
-	lineNum := 0
-	for scanner.Scan() {
-		lineNum++
-		if lineNum <= offset {
-			continue
-		}
-		line := scanner.Text()
-		out := daemon.FormatLogLine([]byte(line))
-		if out != "" {
-			formatted = append(formatted, out)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return &logReadResult{lines: formatted, newCount: lineNum}, err
-	}
-	return &logReadResult{lines: formatted, newCount: lineNum}, nil
 }
 
 // View renders the full-screen log stream.

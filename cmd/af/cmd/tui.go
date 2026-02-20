@@ -16,7 +16,7 @@ var tuiCmd = &cobra.Command{
 The TUI provides a k9s/btop-style interface with:
   - Dashboard: pool overview, agent table, task queue
   - Agent detail: task info, prog logs, tool call stream
-  - Log stream: full-screen JSONL log tail
+  - Log stream: full-screen event log tail
 
 Navigation:
   j/k    Navigate / scroll

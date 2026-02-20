@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"time"
@@ -14,10 +16,10 @@ import (
 
 const (
 	DefaultPoolSize          = 3
-	DefaultSpawnCmd          = "opencode run --format json"
+	DefaultServerURL         = "http://127.0.0.1:4096"
+	DefaultSpawnCmd          = "opencode run --attach " + DefaultServerURL + " --format json"
 	DefaultMaxRetries        = 3
-	DefaultSpawnPolicy       = SpawnPolicyAuto
-	DefaultLogDir            = ".aetherflow/logs"
+	DefaultSpawnPolicy       = SpawnPolicyManual
 	DefaultReconcileInterval = 30 * time.Second
 )
 
@@ -83,6 +85,10 @@ type Config struct {
 	// SpawnCmd is the command used to launch agent sessions.
 	SpawnCmd string `yaml:"spawn_cmd"`
 
+	// ServerURL is the opencode server target for server-first session launches.
+	// Expected format: http://host:port
+	ServerURL string `yaml:"server_url"`
+
 	// SpawnPolicy controls daemon auto-scheduling behavior.
 	// "auto" polls prog and fills the pool; "manual" disables auto-spawn.
 	SpawnPolicy SpawnPolicy `yaml:"spawn_policy"`
@@ -100,9 +106,9 @@ type Config struct {
 	// or when you want autonomous end-to-end delivery without a review gate.
 	Solo bool `yaml:"solo"`
 
-	// LogDir is the directory for agent JSONL log files.
-	// Each task gets a <taskID>.jsonl file in this directory.
-	LogDir string `yaml:"log_dir"`
+	// SessionDir is the global session registry directory.
+	// Empty uses ~/.config/aetherflow/sessions.
+	SessionDir string `yaml:"session_dir"`
 
 	// ReconcileInterval is how often the daemon checks if reviewing tasks
 	// have been merged to main. When a task's af/<task-id> branch is an
@@ -115,6 +121,11 @@ type Config struct {
 
 	// Starter is the process spawning function. Not configurable via file/flags.
 	Starter ProcessStarter `yaml:"-"`
+
+	// ServerStarter launches the managed opencode server. When nil, the daemon
+	// uses StartManagedServer (the real implementation). Tests inject a no-op
+	// to avoid requiring opencode on PATH.
+	ServerStarter func(ctx context.Context, serverURL string, env []string, logf func(string, ...any)) (*exec.Cmd, error) `yaml:"-"`
 
 	// Logger is the structured logger. Not configurable via file/flags.
 	Logger *slog.Logger `yaml:"-"`
@@ -134,6 +145,9 @@ func (c *Config) ApplyDefaults() {
 	if c.SpawnCmd == "" {
 		c.SpawnCmd = DefaultSpawnCmd
 	}
+	if c.ServerURL == "" {
+		c.ServerURL = DefaultServerURL
+	}
 	if c.SpawnPolicy == "" {
 		c.SpawnPolicy = DefaultSpawnPolicy
 	}
@@ -143,9 +157,6 @@ func (c *Config) ApplyDefaults() {
 	// PromptDir intentionally has no default — empty means use embedded prompts.
 	if c.ReconcileInterval == 0 {
 		c.ReconcileInterval = DefaultReconcileInterval
-	}
-	if c.LogDir == "" {
-		c.LogDir = DefaultLogDir
 	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()
@@ -163,6 +174,15 @@ func (c *Config) Validate() error {
 	}
 	if c.SpawnCmd == "" {
 		return fmt.Errorf("spawn-cmd must not be empty")
+	}
+	if c.ServerURL == "" {
+		c.ServerURL = DefaultServerURL
+	}
+	if _, err := ValidateServerURLLocal(c.ServerURL); err != nil {
+		return err
+	}
+	if !spawnCmdHasAttach(c.SpawnCmd) {
+		c.SpawnCmd = EnsureAttachSpawnCmd(c.SpawnCmd, c.ServerURL)
 	}
 	if c.SpawnPolicy == "" {
 		c.SpawnPolicy = DefaultSpawnPolicy
@@ -210,15 +230,6 @@ func (c *Config) Validate() error {
 		c.Logger.Info("using embedded prompts")
 	}
 
-	// Resolve LogDir to absolute path so detached daemons don't depend on cwd.
-	if !filepath.IsAbs(c.LogDir) {
-		abs, err := filepath.Abs(c.LogDir)
-		if err != nil {
-			return fmt.Errorf("resolving log-dir %q: %w", c.LogDir, err)
-		}
-		c.LogDir = abs
-	}
-
 	return nil
 }
 
@@ -259,6 +270,9 @@ func mergeConfig(src, dst *Config) {
 	if dst.SpawnCmd == "" {
 		dst.SpawnCmd = src.SpawnCmd
 	}
+	if dst.ServerURL == "" {
+		dst.ServerURL = src.ServerURL
+	}
 	if dst.SpawnPolicy == "" {
 		dst.SpawnPolicy = src.SpawnPolicy
 	}
@@ -276,7 +290,7 @@ func mergeConfig(src, dst *Config) {
 	if src.Solo && !dst.Solo {
 		dst.Solo = true
 	}
-	if dst.LogDir == "" {
-		dst.LogDir = src.LogDir
+	if dst.SessionDir == "" {
+		dst.SessionDir = src.SessionDir
 	}
 }

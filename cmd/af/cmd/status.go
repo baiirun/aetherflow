@@ -24,7 +24,7 @@ Without arguments, shows the swarm overview:
 
 With an agent name, shows detailed agent info:
   Task details, uptime, last prog log, and recent tool call history
-  parsed from the agent's JSONL log.
+  from the agent's event stream.
 
 Use -w/--watch or -f/--follow for continuous monitoring (refreshes every 2s by default).
 
@@ -227,7 +227,19 @@ func printStatus(s *client.FullStatus) {
 
 	// Show spawned agents (outside the pool).
 	if len(s.Spawns) > 0 {
-		fmt.Printf("%s %s\n", term.Bold("Spawns:"), term.Cyan(fmt.Sprintf("%d running", len(s.Spawns))))
+		var running, exited int
+		for _, sp := range s.Spawns {
+			if sp.State == client.SpawnStateExited {
+				exited++
+			} else {
+				running++
+			}
+		}
+		spawnSummary := fmt.Sprintf("%d running", running)
+		if exited > 0 {
+			spawnSummary += fmt.Sprintf(", %d exited", exited)
+		}
+		fmt.Printf("%s %s\n", term.Bold("Spawns:"), term.Cyan(spawnSummary))
 		width := term.Width(100)
 		promptMax := width - 2 - colID - 1 - colUptime - 2
 		if promptMax < 20 {
@@ -236,9 +248,15 @@ func printStatus(s *client.FullStatus) {
 		for _, sp := range s.Spawns {
 			uptime := formatUptime(sp.SpawnTime)
 			prompt := truncate(stripANSI(sp.Prompt), promptMax)
+			nameColor := term.Cyan
+			uptimeColor := term.Green
+			if sp.State == client.SpawnStateExited {
+				nameColor = term.Dim
+				uptimeColor = term.Dim
+			}
 			fmt.Printf("  %s %s  %s\n",
-				term.PadRight(sp.SpawnID, colID, term.Cyan),
-				term.PadLeft(uptime, colUptime, term.Green),
+				term.PadRight(sp.SpawnID, colID, nameColor),
+				term.PadLeft(uptime, colUptime, uptimeColor),
 				term.Dim(quote(prompt)),
 			)
 		}

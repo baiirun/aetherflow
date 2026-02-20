@@ -94,7 +94,6 @@ func TestReclaimSpawnsOrphanedTasks(t *testing.T) {
 		Project:  "testproject",
 		PoolSize: 3,
 		SpawnCmd: "fake-agent",
-		LogDir:   t.TempDir(),
 	}
 	cfg.ApplyDefaults()
 	pool := NewPool(cfg, runner, starter, slog.Default())
@@ -202,7 +201,6 @@ func TestReclaimRespectsPoolSize(t *testing.T) {
 		Project:  "testproject",
 		PoolSize: 2, // Only 2 slots.
 		SpawnCmd: "fake-agent",
-		LogDir:   t.TempDir(),
 	}
 	cfg.ApplyDefaults()
 	pool := NewPool(cfg, runner, starter, slog.Default())
@@ -255,7 +253,6 @@ func TestReclaimPartialMetadataFailure(t *testing.T) {
 		Project:  "testproject",
 		PoolSize: 5,
 		SpawnCmd: "fake-agent",
-		LogDir:   t.TempDir(),
 	}
 	cfg.ApplyDefaults()
 	pool := NewPool(cfg, runner, starter, slog.Default())

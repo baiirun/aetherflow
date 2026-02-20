@@ -2,19 +2,18 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/baiirun/aetherflow/internal/protocol"
+	"github.com/baiirun/aetherflow/internal/sessions"
 )
 
 // PoolMode controls pool scheduling behavior.
@@ -48,6 +47,7 @@ type Agent struct {
 	TaskID    string           `json:"task_id"`
 	Role      Role             `json:"role"`
 	PID       int              `json:"pid"`
+	SessionID string           `json:"session_id,omitempty"`
 	SpawnTime time.Time        `json:"spawn_time"`
 	State     AgentState       `json:"state"`
 	ExitCode  int              `json:"exit_code,omitempty"`
@@ -64,9 +64,8 @@ type Process interface {
 
 // ProcessStarter spawns a long-running agent process.
 // The prompt is the rendered role prompt passed as the message argument to the spawn command.
-// agentID is set as the AETHERFLOW_AGENT_ID environment variable on the spawned process
-// so plugins inside the agent session can identify which agent they belong to.
-// stdout receives the process's standard output (typically a log file for JSONL capture).
+// agentID is set as the AETHERFLOW_AGENT_ID environment variable on the spawned process.
+// stdout receives the process's standard output (typically a log file).
 // This is the seam for testing — swap with a fake that returns immediately.
 type ProcessStarter func(ctx context.Context, spawnCmd string, prompt string, agentID string, stdout io.Writer) (Process, error)
 
@@ -81,9 +80,8 @@ func (p *execProcess) PID() int    { return p.cmd.Process.Pid }
 // ExecProcessStarter spawns a real OS process.
 // The prompt is appended as the final argument to the spawn command,
 // e.g. "opencode run --format json" becomes ["opencode", "run", "--format", "json", "<prompt>"].
-// agentID is exposed as the AETHERFLOW_AGENT_ID environment variable so plugins
-// running inside the agent session can identify which agent they belong to.
-// stdout receives the process's standard output (typically a JSONL log file).
+// agentID is exposed as the AETHERFLOW_AGENT_ID environment variable.
+// stdout receives the process's standard output (typically a log file).
 func ExecProcessStarter(ctx context.Context, spawnCmd string, prompt string, agentID string, stdout io.Writer) (Process, error) {
 	parts := strings.Fields(spawnCmd)
 	if len(parts) == 0 {
@@ -106,29 +104,6 @@ func ExecProcessStarter(ctx context.Context, spawnCmd string, prompt string, age
 	return &execProcess{cmd: cmd}, nil
 }
 
-// logFilePath returns the path for a task's JSONL log file.
-// taskID is sanitized with filepath.Base to prevent path traversal.
-func logFilePath(logDir, taskID string) string {
-	return filepath.Join(logDir, filepath.Base(taskID)+".jsonl")
-}
-
-// openLogFile creates the log directory if needed and opens the log file for appending.
-// Log files are owner-only (0600) since agent stdout may contain sensitive data.
-//
-// Note: writes are not fsynced — a daemon crash may lose buffered JSONL lines.
-// This is acceptable for observability data; the agent process is unaffected.
-func openLogFile(logDir, taskID string) (*os.File, error) {
-	if err := os.MkdirAll(logDir, 0700); err != nil {
-		return nil, fmt.Errorf("creating log directory %s: %w", logDir, err)
-	}
-	path := logFilePath(logDir, taskID)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-	if err != nil {
-		return nil, fmt.Errorf("opening log file %s: %w", path, err)
-	}
-	return f, nil
-}
-
 // Pool manages a fixed number of agent slots.
 type Pool struct {
 	mu      sync.RWMutex
@@ -137,9 +112,10 @@ type Pool struct {
 	retries map[string]int    // crash count per task ID
 	names   *protocol.NameGenerator
 	config  Config
-	logDir  string // absolute path to JSONL log directory
 	runner  CommandRunner
 	starter ProcessStarter
+	sstore  *sessions.Store
+	work    WorkSource
 	log     *slog.Logger
 	ctx     context.Context // stored for respawn goroutines
 
@@ -178,9 +154,10 @@ func NewPool(cfg Config, runner CommandRunner, starter ProcessStarter, log *slog
 		retries:  make(map[string]int),
 		names:    protocol.NewNameGenerator(),
 		config:   cfg,
-		logDir:   cfg.LogDir,
 		runner:   runner,
 		starter:  starter,
+		sstore:   nil,
+		work:     NewProgWorkSource(runner),
 		log:      log,
 		pidAlive: defaultPIDAlive,
 	}
@@ -270,7 +247,7 @@ func (p *Pool) schedule(ctx context.Context, tasks []Task) {
 // the task in "in_progress" state with no agent.
 func (p *Pool) spawn(ctx context.Context, task Task) {
 	// Prep: fetch metadata and infer role before claiming.
-	meta, err := FetchTaskMeta(ctx, task.ID, p.config.Project, p.runner)
+	meta, err := p.work.GetMeta(ctx, task.ID, p.config.Project)
 	if err != nil {
 		p.log.Error("failed to fetch task metadata",
 			"task_id", task.ID,
@@ -291,23 +268,11 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 		return
 	}
 
-	// Prep: open log file before claiming task. If this fails, the task stays
-	// in the queue rather than being orphaned in in_progress with no agent.
-	logFile, err := openLogFile(p.logDir, task.ID)
-	if err != nil {
-		p.log.Error("failed to open log file",
-			"task_id", task.ID,
-			"error", err,
-		)
-		return
-	}
-
 	// Claim the task in prog. This is the point of no return — after this,
 	// the task is in_progress and we must either spawn an agent or leave it
 	// for manual recovery.
-	_, err = p.runner(ctx, "prog", "start", task.ID, "-p", p.config.Project)
+	err = p.work.Claim(ctx, task.ID, p.config.Project)
 	if err != nil {
-		_ = logFile.Close()
 		p.log.Error("failed to claim task",
 			"task_id", task.ID,
 			"error", err,
@@ -317,9 +282,9 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 
 	agentID := p.names.Generate()
 
-	proc, err := p.starter(ctx, p.config.SpawnCmd, prompt, string(agentID), logFile)
+	launchCmd := EnsureAttachSpawnCmd(p.config.SpawnCmd, p.config.ServerURL)
+	proc, err := p.starter(ctx, launchCmd, prompt, string(agentID), io.Discard)
 	if err != nil {
-		_ = logFile.Close()
 		p.log.Error("failed to spawn agent",
 			"task_id", task.ID,
 			"agent_id", agentID,
@@ -349,21 +314,16 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 		"pid", proc.PID(),
 	)
 
+	// Session ID is captured when the session.created plugin event arrives
+	// at the daemon — see event_rpc.go claimSession.
+
 	// Wait for process exit in background.
-	go p.reap(agent, proc, logFile)
+	go p.reap(agent, proc)
 }
 
 // reap waits for a process to exit, frees the slot, and respawns on crash.
-// cleanup is closed after the process exits (typically the log file).
-func (p *Pool) reap(agent *Agent, proc Process, cleanup io.Closer) {
+func (p *Pool) reap(agent *Agent, proc Process) {
 	err := proc.Wait()
-	if closeErr := cleanup.Close(); closeErr != nil {
-		p.log.Warn("failed to close log file",
-			"agent_id", agent.ID,
-			"task_id", agent.TaskID,
-			"error", closeErr,
-		)
-	}
 
 	exitCode := 0
 	if err != nil {
@@ -376,22 +336,30 @@ func (p *Pool) reap(agent *Agent, proc Process, cleanup io.Closer) {
 
 	duration := time.Since(agent.SpawnTime).Round(time.Second)
 
-	// Single lock to update all state atomically: remove agent, update retries.
+	var targetStatus sessions.Status
+	var sessionID string
+
+	// Single lock to update all pool state atomically.
 	p.mu.Lock()
 	agent.State = AgentExited
 	agent.ExitCode = exitCode
+	sessionID = agent.SessionID
 	delete(p.agents, agent.TaskID)
 	p.names.Release(agent.ID)
 
 	if err == nil {
 		// Clean exit — clear retry count.
 		delete(p.retries, agent.TaskID)
+		targetStatus = sessions.StatusIdle
 	} else {
 		// Crash — bump retry counter.
 		p.retries[agent.TaskID]++
+		targetStatus = sessions.StatusTerminated
 	}
 	attempts := p.retries[agent.TaskID]
 	p.mu.Unlock()
+
+	p.updateSessionStatus(sessionID, sessions.OriginPool, agent.TaskID, targetStatus)
 
 	// Clean exit — agent finished normally.
 	if err == nil {
@@ -468,23 +436,11 @@ func (p *Pool) respawn(taskID string, role Role) {
 		return
 	}
 
-	// Reopen the same log file in append mode.
-	// Uses openLogFile (with MkdirAll) rather than assuming the directory exists,
-	// so respawn is resilient to the log dir being removed between spawns.
-	logFile, err := openLogFile(p.logDir, taskID)
-	if err != nil {
-		p.log.Error("failed to open log file for respawn",
-			"task_id", taskID,
-			"error", err,
-		)
-		return
-	}
-
 	agentID := p.names.Generate()
 
-	proc, err := p.starter(p.ctx, p.config.SpawnCmd, prompt, string(agentID), logFile)
+	launchCmd := EnsureAttachSpawnCmd(p.config.SpawnCmd, p.config.ServerURL)
+	proc, err := p.starter(p.ctx, launchCmd, prompt, string(agentID), io.Discard)
 	if err != nil {
-		_ = logFile.Close()
 		p.log.Error("failed to respawn agent",
 			"task_id", taskID,
 			"agent_id", agentID,
@@ -514,7 +470,58 @@ func (p *Pool) respawn(taskID string, role Role) {
 		"pid", proc.PID(),
 	)
 
-	go p.reap(agent, proc, logFile)
+	// Session ID is captured when the session.created plugin event arrives
+	// at the daemon — see event_rpc.go claimSession.
+
+	go p.reap(agent, proc)
+}
+
+func (p *Pool) updateSessionStatus(sessionID string, origin sessions.OriginType, workRef string, status sessions.Status) {
+	if p.sstore == nil {
+		return
+	}
+	if sessionID != "" {
+		if changed, err := p.sstore.SetStatusBySession(p.config.ServerURL, sessionID, status); err != nil {
+			p.log.Warn("failed to update session status by key", "session_id", sessionID, "status", status, "error", err)
+		} else if changed {
+			return
+		}
+	}
+	if workRef == "" {
+		return
+	}
+	if changed, err := p.sstore.SetStatusByWorkRef(origin, workRef, status); err != nil {
+		p.log.Warn("failed to update session status", "work_ref", workRef, "status", status, "error", err)
+	} else if !changed {
+		p.log.Debug("session status update skipped (record not found yet)", "work_ref", workRef, "status", status)
+	}
+}
+
+// SetSessionID assigns a session ID to the pool agent with the given name.
+// Returns false if the agent is not found.
+func (p *Pool) SetSessionID(agentName, sessionID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, a := range p.agents {
+		if string(a.ID) == agentName {
+			a.SessionID = sessionID
+			return true
+		}
+	}
+	return false
+}
+
+// TaskIDForAgent returns the task ID for the pool agent with the given name.
+// Returns empty string if the agent is not found.
+func (p *Pool) TaskIDForAgent(agentName string) string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, a := range p.agents {
+		if string(a.ID) == agentName {
+			return a.TaskID
+		}
+	}
+	return ""
 }
 
 // runningCount returns the number of currently running agents.
@@ -602,63 +609,4 @@ func (p *Pool) Resume() {
 	prev := p.mode
 	p.mode = PoolActive
 	p.log.Info("pool mode changed", "from", prev, "to", PoolActive)
-}
-
-// PoolState is the persisted pool state for daemon restart recovery.
-type PoolState struct {
-	Agents []Agent `json:"agents"`
-}
-
-// SaveState writes the pool state to a file.
-func (p *Pool) SaveState(path string) error {
-	// Status() handles its own locking — don't double-lock.
-	state := PoolState{Agents: p.Status()}
-
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshaling pool state: %w", err)
-	}
-
-	// Write to temp file and rename for atomicity.
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".pool-state-*.json")
-	if err != nil {
-		return fmt.Errorf("creating temp file: %w", err)
-	}
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-		return fmt.Errorf("writing pool state: %w", err)
-	}
-
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmp.Name())
-		return fmt.Errorf("closing temp file: %w", err)
-	}
-
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		_ = os.Remove(tmp.Name())
-		return fmt.Errorf("renaming pool state: %w", err)
-	}
-
-	return nil
-}
-
-// LoadState reads persisted pool state. Returns empty state if file doesn't exist.
-func LoadState(path string) (PoolState, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return PoolState{}, nil
-		}
-		return PoolState{}, fmt.Errorf("reading pool state: %w", err)
-	}
-
-	var state PoolState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return PoolState{}, fmt.Errorf("parsing pool state: %w", err)
-	}
-
-	return state, nil
 }

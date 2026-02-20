@@ -2,17 +2,15 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
 func TestBuildAgentDetailHappyPath(t *testing.T) {
 	// Set up a pool with one running agent.
-	logDir := t.TempDir()
 	proc, release := newFakeProcess(1234)
 	defer release()
 
@@ -21,11 +19,11 @@ func TestBuildAgentDetailHappyPath(t *testing.T) {
 	}
 
 	cfg := Config{
-		Project:   "testproject",
-		PoolSize:  2,
-		SpawnCmd:  "fake-agent",
-		PromptDir: "",
-		LogDir:    logDir,
+		Project:     "testproject",
+		PoolSize:    2,
+		SpawnCmd:    "fake-agent",
+		PromptDir:   "",
+		SpawnPolicy: SpawnPolicyAuto,
 	}
 	cfg.ApplyDefaults()
 
@@ -48,21 +46,32 @@ func TestBuildAgentDetailHappyPath(t *testing.T) {
 		return len(pool.Status()) == 1
 	})
 
-	// Write a JSONL log file for the agent's task.
-	logPath := filepath.Join(logDir, "ts-abc.jsonl")
-	lines := []string{
-		`{"type":"tool_use","timestamp":1770499345000,"sessionID":"ses_1","part":{"tool":"read","title":"auth.go","state":{"status":"completed","input":{"filePath":"/project/auth.go"},"time":{"start":1770499344000,"end":1770499345000}}}}`,
-		`{"type":"tool_use","timestamp":1770499346000,"sessionID":"ses_1","part":{"tool":"bash","state":{"status":"completed","input":{"command":"go test ./..."},"time":{"start":1770499345500,"end":1770499346000}}}}`,
-	}
-	writeLines(t, logPath, lines)
-
 	// Get the agent name from the pool (it's generated).
 	agents := pool.Status()
 	agentName := string(agents[0].ID)
+	sessionID := "ses_test123"
+
+	// Simulate session claim — set session ID on the agent.
+	pool.SetSessionID(agentName, sessionID)
+
+	// Push tool call events into the event buffer.
+	events := NewEventBuffer(DefaultEventBufSize)
+	events.Push(SessionEvent{
+		EventType: "message.part.updated",
+		SessionID: sessionID,
+		Timestamp: 1770499345000,
+		Data:      json.RawMessage(`{"part":{"id":"prt_1","sessionID":"ses_test123","messageID":"msg_1","type":"tool","tool":"read","state":{"status":"completed","input":{"filePath":"/project/auth.go"},"title":"auth.go","time":{"start":1770499344000,"end":1770499345000}}}}`),
+	})
+	events.Push(SessionEvent{
+		EventType: "message.part.updated",
+		SessionID: sessionID,
+		Timestamp: 1770499346000,
+		Data:      json.RawMessage(`{"part":{"id":"prt_2","sessionID":"ses_test123","messageID":"msg_1","type":"tool","tool":"bash","state":{"status":"completed","input":{"command":"go test ./..."},"time":{"start":1770499345500,"end":1770499346000}}}}`),
+	})
 
 	// Build the detail.
 	cfg.Runner = runner
-	detail, err := BuildAgentDetail(ctx, pool, nil, cfg, runner, StatusAgentParams{
+	detail, err := BuildAgentDetail(ctx, pool, nil, events, cfg, runner, StatusAgentParams{
 		AgentName: agentName,
 	})
 	if err != nil {
@@ -82,13 +91,19 @@ func TestBuildAgentDetailHappyPath(t *testing.T) {
 	if detail.LastLog != "Tests passing, running review" {
 		t.Errorf("LastLog = %q, want %q", detail.LastLog, "Tests passing, running review")
 	}
+	if detail.SessionID != sessionID {
+		t.Errorf("SessionID = %q, want %q", detail.SessionID, sessionID)
+	}
 
-	// Verify tool calls.
+	// Verify tool calls from event buffer.
 	if len(detail.ToolCalls) != 2 {
 		t.Fatalf("got %d tool calls, want 2", len(detail.ToolCalls))
 	}
 	if detail.ToolCalls[0].Tool != "read" {
 		t.Errorf("call[0].Tool = %q, want %q", detail.ToolCalls[0].Tool, "read")
+	}
+	if detail.ToolCalls[0].Input != "/project/auth.go" {
+		t.Errorf("call[0].Input = %q, want %q", detail.ToolCalls[0].Input, "/project/auth.go")
 	}
 	if detail.ToolCalls[1].Tool != "bash" {
 		t.Errorf("call[1].Tool = %q, want %q", detail.ToolCalls[1].Tool, "bash")
@@ -100,20 +115,18 @@ func TestBuildAgentDetailHappyPath(t *testing.T) {
 }
 
 func TestBuildAgentDetailAgentNotFound(t *testing.T) {
-	logDir := t.TempDir()
 	cfg := Config{
 		Project:   "testproject",
 		PoolSize:  2,
 		SpawnCmd:  "fake-agent",
 		PromptDir: "",
-		LogDir:    logDir,
 	}
 	cfg.ApplyDefaults()
 
 	pool := NewPool(cfg, nil, nil, testLogger())
 	pool.ctx = context.Background()
 
-	_, err := BuildAgentDetail(context.Background(), pool, nil, cfg, nil, StatusAgentParams{
+	_, err := BuildAgentDetail(context.Background(), pool, nil, nil, cfg, nil, StatusAgentParams{
 		AgentName: "nonexistent_agent",
 	})
 	if err == nil {
@@ -122,7 +135,7 @@ func TestBuildAgentDetailAgentNotFound(t *testing.T) {
 }
 
 func TestBuildAgentDetailNilPool(t *testing.T) {
-	_, err := BuildAgentDetail(context.Background(), nil, nil, Config{}, nil, StatusAgentParams{
+	_, err := BuildAgentDetail(context.Background(), nil, nil, nil, Config{}, nil, StatusAgentParams{
 		AgentName: "some_agent",
 	})
 	if err == nil {
@@ -130,9 +143,8 @@ func TestBuildAgentDetailNilPool(t *testing.T) {
 	}
 }
 
-func TestBuildAgentDetailNoLogFile(t *testing.T) {
-	// Agent exists but no JSONL file — tool calls should be empty, not an error.
-	logDir := t.TempDir()
+func TestBuildAgentDetailNoSessionID(t *testing.T) {
+	// Agent exists but has no session ID yet — tool calls should be empty.
 	proc, release := newFakeProcess(1234)
 	defer release()
 
@@ -141,11 +153,11 @@ func TestBuildAgentDetailNoLogFile(t *testing.T) {
 	}
 
 	cfg := Config{
-		Project:   "testproject",
-		PoolSize:  2,
-		SpawnCmd:  "fake-agent",
-		PromptDir: "",
-		LogDir:    logDir,
+		Project:     "testproject",
+		PoolSize:    2,
+		SpawnCmd:    "fake-agent",
+		PromptDir:   "",
+		SpawnPolicy: SpawnPolicyAuto,
 	}
 	cfg.ApplyDefaults()
 
@@ -164,13 +176,13 @@ func TestBuildAgentDetailNoLogFile(t *testing.T) {
 		return len(pool.Status()) == 1
 	})
 
-	// Delete the log file that spawn created (to simulate no log data).
-	_ = os.Remove(filepath.Join(logDir, "ts-abc.jsonl"))
-
 	agents := pool.Status()
 	agentName := string(agents[0].ID)
 
-	detail, err := BuildAgentDetail(ctx, pool, nil, cfg, runner, StatusAgentParams{
+	// Event buffer exists but agent has no session ID — no events to extract.
+	events := NewEventBuffer(DefaultEventBufSize)
+
+	detail, err := BuildAgentDetail(ctx, pool, nil, events, cfg, runner, StatusAgentParams{
 		AgentName: agentName,
 	})
 	if err != nil {
@@ -178,13 +190,12 @@ func TestBuildAgentDetailNoLogFile(t *testing.T) {
 	}
 
 	if len(detail.ToolCalls) != 0 {
-		t.Errorf("expected 0 tool calls for missing log, got %d", len(detail.ToolCalls))
+		t.Errorf("expected 0 tool calls for agent without session ID, got %d", len(detail.ToolCalls))
 	}
 }
 
 func TestBuildAgentDetailProgShowFails(t *testing.T) {
 	// Prog show fails but tool calls still work — partial success.
-	logDir := t.TempDir()
 	proc, release := newFakeProcess(1234)
 	defer release()
 
@@ -193,11 +204,11 @@ func TestBuildAgentDetailProgShowFails(t *testing.T) {
 	}
 
 	cfg := Config{
-		Project:   "testproject",
-		PoolSize:  2,
-		SpawnCmd:  "fake-agent",
-		PromptDir: "",
-		LogDir:    logDir,
+		Project:     "testproject",
+		PoolSize:    2,
+		SpawnCmd:    "fake-agent",
+		PromptDir:   "",
+		SpawnPolicy: SpawnPolicyAuto,
 	}
 	cfg.ApplyDefaults()
 
@@ -218,24 +229,28 @@ func TestBuildAgentDetailProgShowFails(t *testing.T) {
 		return len(pool.Status()) == 1
 	})
 
-	// Write a log file so tool calls succeed.
-	logPath := filepath.Join(logDir, "ts-abc.jsonl")
-	lines := []string{
-		`{"type":"tool_use","timestamp":1770499345000,"sessionID":"ses_1","part":{"tool":"read","state":{"status":"completed","input":{"filePath":"/foo"},"time":{"start":1,"end":2}}}}`,
-	}
-	writeLines(t, logPath, lines)
-
 	agents := pool.Status()
 	agentName := string(agents[0].ID)
+	sessionID := "ses_test_fail"
 
-	detail, err := BuildAgentDetail(ctx, pool, nil, cfg, runner, StatusAgentParams{
+	// Set session ID on the agent and push an event into the buffer.
+	pool.SetSessionID(agentName, sessionID)
+	events := NewEventBuffer(DefaultEventBufSize)
+	events.Push(SessionEvent{
+		EventType: "message.part.updated",
+		SessionID: sessionID,
+		Timestamp: 1770499345000,
+		Data:      json.RawMessage(`{"part":{"id":"prt_1","type":"tool","tool":"read","state":{"status":"completed","input":{"filePath":"/foo"},"time":{"start":1,"end":2}}}}`),
+	})
+
+	detail, err := BuildAgentDetail(ctx, pool, nil, events, cfg, runner, StatusAgentParams{
 		AgentName: agentName,
 	})
 	if err != nil {
 		t.Fatalf("BuildAgentDetail: %v", err)
 	}
 
-	// Tool calls should still be populated.
+	// Tool calls should still be populated from event buffer.
 	if len(detail.ToolCalls) != 1 {
 		t.Errorf("expected 1 tool call, got %d", len(detail.ToolCalls))
 	}
@@ -243,6 +258,95 @@ func TestBuildAgentDetailProgShowFails(t *testing.T) {
 	// Should have an error from prog show.
 	if len(detail.Errors) == 0 {
 		t.Error("expected error from failed prog show")
+	}
+}
+
+func TestBuildAgentDetailSpawnWithEvents(t *testing.T) {
+	// Spawned agent found via spawn registry, tool calls come from event buffer.
+	sessionID := "ses_spawn_test"
+
+	spawns := NewSpawnRegistry()
+	_ = spawns.Register(SpawnEntry{
+		SpawnID:   "spawn-abc",
+		PID:       9999,
+		State:     SpawnRunning,
+		SessionID: sessionID,
+		Prompt:    "fix the authentication bug in the login flow",
+	})
+
+	events := NewEventBuffer(DefaultEventBufSize)
+	events.Push(SessionEvent{
+		EventType: "message.part.updated",
+		SessionID: sessionID,
+		Timestamp: 1000,
+		Data:      json.RawMessage(`{"part":{"id":"prt_1","type":"tool","tool":"read","state":{"status":"completed","input":{"filePath":"/src/auth.go"},"title":"auth.go","time":{"start":500,"end":1000}}}}`),
+	})
+	events.Push(SessionEvent{
+		EventType: "message.part.updated",
+		SessionID: sessionID,
+		Timestamp: 2000,
+		Data:      json.RawMessage(`{"part":{"id":"prt_2","type":"tool","tool":"edit","state":{"status":"completed","input":{"filePath":"/src/auth.go"},"title":"auth.go","time":{"start":1500,"end":2000}}}}`),
+	})
+
+	detail, err := BuildAgentDetail(context.Background(), nil, spawns, events, Config{}, nil, StatusAgentParams{
+		AgentName: "spawn-abc",
+	})
+	if err != nil {
+		t.Fatalf("BuildAgentDetail for spawn: %v", err)
+	}
+
+	if detail.ID != "spawn-abc" {
+		t.Errorf("ID = %q, want %q", detail.ID, "spawn-abc")
+	}
+	if detail.Role != string(RoleSpawn) {
+		t.Errorf("Role = %q, want %q", detail.Role, RoleSpawn)
+	}
+	if detail.SessionID != sessionID {
+		t.Errorf("SessionID = %q, want %q", detail.SessionID, sessionID)
+	}
+	if detail.TaskTitle != "fix the authentication bug in the login flow" {
+		t.Errorf("TaskTitle = %q, want prompt text", detail.TaskTitle)
+	}
+
+	if len(detail.ToolCalls) != 2 {
+		t.Fatalf("got %d tool calls, want 2", len(detail.ToolCalls))
+	}
+	if detail.ToolCalls[0].Tool != "read" {
+		t.Errorf("call[0].Tool = %q, want %q", detail.ToolCalls[0].Tool, "read")
+	}
+	if detail.ToolCalls[1].Tool != "edit" {
+		t.Errorf("call[1].Tool = %q, want %q", detail.ToolCalls[1].Tool, "edit")
+	}
+
+	if len(detail.Errors) != 0 {
+		t.Errorf("unexpected errors: %v", detail.Errors)
+	}
+}
+
+func TestBuildAgentDetailSpawnNoSessionID(t *testing.T) {
+	// Spawned agent with no session ID — tool calls should be empty.
+	spawns := NewSpawnRegistry()
+	_ = spawns.Register(SpawnEntry{
+		SpawnID: "spawn-nostream",
+		PID:     9999,
+		State:   SpawnRunning,
+		Prompt:  "do something",
+	})
+
+	events := NewEventBuffer(DefaultEventBufSize)
+
+	detail, err := BuildAgentDetail(context.Background(), nil, spawns, events, Config{}, nil, StatusAgentParams{
+		AgentName: "spawn-nostream",
+	})
+	if err != nil {
+		t.Fatalf("BuildAgentDetail for spawn: %v", err)
+	}
+
+	if detail.SessionID != "" {
+		t.Errorf("SessionID = %q, want empty", detail.SessionID)
+	}
+	if len(detail.ToolCalls) != 0 {
+		t.Errorf("expected 0 tool calls, got %d", len(detail.ToolCalls))
 	}
 }
 

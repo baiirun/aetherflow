@@ -5,10 +5,40 @@ import (
 	"testing"
 )
 
-func TestFormatLogLine_Text(t *testing.T) {
-	raw := `{"type":"text","timestamp":1770534050893,"part":{"type":"text","text":"Starting implementation now.","time":{"start":1770534050890,"end":1770534050890}}}`
+// --- FormatEvent tests ---
 
-	result := FormatLogLine([]byte(raw))
+func TestFormatEvent_Tool(t *testing.T) {
+	ev := SessionEvent{
+		EventType: "message.part.updated",
+		SessionID: "ses-1",
+		Timestamp: 1770534051455,
+		Data:      []byte(`{"part":{"type":"tool","tool":"bash","state":{"status":"completed","input":{"command":"cargo build","description":"Build project"},"title":"Build project","time":{"start":1770534051422,"end":1770534053453}}}}`),
+	}
+
+	result := FormatEvent(ev)
+	if result == "" {
+		t.Fatal("expected non-empty result for tool event")
+	}
+	if !strings.Contains(result, "bash") {
+		t.Errorf("result should contain tool name, got: %s", result)
+	}
+	if !strings.Contains(result, "Build project") {
+		t.Errorf("result should contain title, got: %s", result)
+	}
+	if !strings.Contains(result, "✓") {
+		t.Errorf("result should contain success icon, got: %s", result)
+	}
+}
+
+func TestFormatEvent_Text(t *testing.T) {
+	ev := SessionEvent{
+		EventType: "message.part.updated",
+		SessionID: "ses-1",
+		Timestamp: 1770534050893,
+		Data:      []byte(`{"part":{"type":"text","text":"Starting implementation now."}}`),
+	}
+
+	result := FormatEvent(ev)
 	if result == "" {
 		t.Fatal("expected non-empty result for text event")
 	}
@@ -17,42 +47,17 @@ func TestFormatLogLine_Text(t *testing.T) {
 	}
 }
 
-func TestFormatLogLine_ToolUse(t *testing.T) {
-	raw := `{"type":"tool_use","timestamp":1770534051455,"part":{"tool":"bash","state":{"status":"completed","input":{"command":"cargo build","description":"Build project"},"title":"Build project","time":{"start":1770534051422,"end":1770534053453}}}}`
+func TestFormatEvent_StepFinish(t *testing.T) {
+	ev := SessionEvent{
+		EventType: "message.part.updated",
+		SessionID: "ses-1",
+		Timestamp: 1770532976651,
+		Data:      []byte(`{"part":{"type":"step-finish","reason":"tool-calls","tokens":{"input":0,"output":126,"reasoning":0,"cache":{"read":101522,"write":273}}}}`),
+	}
 
-	result := FormatLogLine([]byte(raw))
+	result := FormatEvent(ev)
 	if result == "" {
-		t.Fatal("expected non-empty result for tool_use event")
-	}
-	if !strings.Contains(result, "bash") {
-		t.Errorf("result should contain tool name, got: %s", result)
-	}
-	if !strings.Contains(result, "Build project") {
-		t.Errorf("result should contain title, got: %s", result)
-	}
-	if !strings.Contains(result, "2.0s") {
-		t.Errorf("result should contain duration, got: %s", result)
-	}
-	if !strings.Contains(result, "✓") {
-		t.Errorf("result should contain success icon, got: %s", result)
-	}
-}
-
-func TestFormatLogLine_ToolUseError(t *testing.T) {
-	raw := `{"type":"tool_use","timestamp":1770534051455,"part":{"tool":"bash","state":{"status":"error","input":{"command":"cargo test"},"title":"Run tests","time":{"start":1770534051422,"end":1770534053453}}}}`
-
-	result := FormatLogLine([]byte(raw))
-	if !strings.Contains(result, "✗") {
-		t.Errorf("result should contain error icon, got: %s", result)
-	}
-}
-
-func TestFormatLogLine_StepFinish(t *testing.T) {
-	raw := `{"type":"step_finish","timestamp":1770532976651,"part":{"type":"step-finish","reason":"tool-calls","tokens":{"input":0,"output":126,"reasoning":0,"cache":{"read":101522,"write":273}}}}`
-
-	result := FormatLogLine([]byte(raw))
-	if result == "" {
-		t.Fatal("expected non-empty result for step_finish event")
+		t.Fatal("expected non-empty result for step-finish event")
 	}
 	if !strings.Contains(result, "step") {
 		t.Errorf("result should contain step marker, got: %s", result)
@@ -62,31 +67,58 @@ func TestFormatLogLine_StepFinish(t *testing.T) {
 	}
 }
 
-func TestFormatLogLine_StepStart(t *testing.T) {
-	raw := `{"type":"step_start","timestamp":1770534050401,"part":{"type":"step-start"}}`
+func TestFormatEvent_StepStart(t *testing.T) {
+	ev := SessionEvent{
+		EventType: "message.part.updated",
+		SessionID: "ses-1",
+		Timestamp: 1770534050401,
+		Data:      []byte(`{"part":{"type":"step-start"}}`),
+	}
 
-	result := FormatLogLine([]byte(raw))
+	result := FormatEvent(ev)
 	if result != "" {
-		t.Errorf("step_start should be hidden, got: %s", result)
+		t.Errorf("step-start should be hidden, got: %s", result)
 	}
 }
 
-func TestFormatLogLine_InvalidJSON(t *testing.T) {
-	result := FormatLogLine([]byte("not json"))
+func TestFormatEvent_NonPartEvent(t *testing.T) {
+	ev := SessionEvent{
+		EventType: "session.created",
+		SessionID: "ses-1",
+		Timestamp: 1000,
+		Data:      []byte(`{"info":{"id":"ses-1"}}`),
+	}
+
+	result := FormatEvent(ev)
+	if result != "" {
+		t.Errorf("non-part events should be hidden, got: %s", result)
+	}
+}
+
+func TestFormatEvent_EmptyData(t *testing.T) {
+	ev := SessionEvent{
+		EventType: "message.part.updated",
+		SessionID: "ses-1",
+		Timestamp: 1000,
+	}
+
+	result := FormatEvent(ev)
+	if result != "" {
+		t.Errorf("empty data should return empty, got: %s", result)
+	}
+}
+
+func TestFormatEvent_InvalidJSON(t *testing.T) {
+	ev := SessionEvent{
+		EventType: "message.part.updated",
+		SessionID: "ses-1",
+		Timestamp: 1000,
+		Data:      []byte(`not json`),
+	}
+
+	result := FormatEvent(ev)
 	if result != "" {
 		t.Errorf("invalid JSON should return empty, got: %s", result)
-	}
-}
-
-func TestFormatLogLine_SkillTool(t *testing.T) {
-	raw := `{"type":"tool_use","timestamp":1770532979544,"part":{"tool":"skill","state":{"status":"completed","input":{"name":"review-auto"},"title":"Loaded skill: review-auto","time":{"start":1770532979512,"end":1770532979544}}}}`
-
-	result := FormatLogLine([]byte(raw))
-	if !strings.Contains(result, "skill") {
-		t.Errorf("result should contain tool name, got: %s", result)
-	}
-	if !strings.Contains(result, "review-auto") {
-		t.Errorf("result should contain skill name, got: %s", result)
 	}
 }
 

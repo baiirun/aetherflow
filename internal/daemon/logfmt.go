@@ -1,14 +1,16 @@
-// Package daemon provides the log formatter for human-readable JSONL output.
 package daemon
 
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
 
-// LogEvent is a parsed JSONL log line with all event types supported.
+// LogEvent is the internal formatting target for event display.
+// FormatEvent parses SessionEvent data into this structure to reuse
+// the shared formatting functions (formatText, formatToolUse, formatStepFinish).
 type LogEvent struct {
 	Type      string `json:"type"`
 	Timestamp int64  `json:"timestamp"` // Unix millis
@@ -44,25 +46,57 @@ type LogEvent struct {
 	} `json:"part"`
 }
 
-// FormatLogLine parses a raw JSONL line and returns a human-readable string.
-// Returns empty string for events that should be hidden (e.g. step_start).
-func FormatLogLine(raw []byte) string {
-	var ev LogEvent
-	if err := json.Unmarshal(raw, &ev); err != nil {
+// FormatEvent formats a SessionEvent from the plugin event pipeline into a
+// human-readable string. Returns empty string for events that should be hidden.
+//
+// Plugin events use "message.part.updated" with data: {"part": {...}} where
+// the part has type "text", "tool", "step-start", "step-finish", etc. This
+// function handles text, tool, and step-finish event types from the plugin
+// event shape.
+func FormatEvent(ev SessionEvent) string {
+	if ev.EventType != "message.part.updated" {
+		return ""
+	}
+	if len(ev.Data) == 0 {
+		return ""
+	}
+
+	var envelope struct {
+		Part json.RawMessage `json:"part"`
+	}
+	if err := json.Unmarshal(ev.Data, &envelope); err != nil {
+		slog.Debug("FormatEvent: failed to parse envelope",
+			"event_type", ev.EventType, "session_id", ev.SessionID, "error", err)
+		return ""
+	}
+	if len(envelope.Part) == 0 {
+		return ""
+	}
+
+	// Parse the part directly into a LogEvent — no intermediate struct.
+	var logEv LogEvent
+	logEv.Timestamp = ev.Timestamp
+	if err := json.Unmarshal(envelope.Part, &logEv.Part); err != nil {
+		slog.Debug("FormatEvent: failed to parse part",
+			"event_type", ev.EventType, "session_id", ev.SessionID, "error", err)
 		return ""
 	}
 
 	ts := time.UnixMilli(ev.Timestamp).Format("15:04:05")
 
-	switch ev.Type {
+	switch logEv.Part.Type {
 	case "text":
-		return formatText(ts, ev)
-	case "tool_use":
-		return formatToolUse(ts, ev)
-	case "step_finish":
-		return formatStepFinish(ts, ev)
+		logEv.Type = "text"
+		return formatText(ts, logEv)
+	case "tool":
+		logEv.Type = "tool_use"
+		return formatToolUse(ts, logEv)
+	case "step-finish":
+		logEv.Type = "step_finish"
+		return formatStepFinish(ts, logEv)
 	default:
-		// step_start, etc. — skip
+		slog.Debug("FormatEvent: unhandled part type",
+			"part_type", logEv.Part.Type, "session_id", ev.SessionID)
 		return ""
 	}
 }

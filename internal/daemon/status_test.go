@@ -77,7 +77,7 @@ func TestBuildFullStatus(t *testing.T) {
 	readyOutput := "ID           PRI  TITLE\nts-ghi    1    Fix auth token expiry\nts-jkl    2    Refactor config loading\n"
 
 	pool := statusPool(t, agents)
-	cfg := Config{Project: "testproject", PoolSize: 3}
+	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyAuto}
 	runner := statusRunner(showResponses, readyOutput)
 
 	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
@@ -130,7 +130,7 @@ func TestBuildFullStatus(t *testing.T) {
 
 func TestBuildFullStatusNoAgents(t *testing.T) {
 	pool := statusPool(t, nil)
-	cfg := Config{Project: "testproject", PoolSize: 3}
+	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyAuto}
 
 	readyOutput := "ID           PRI  TITLE\nts-aaa    1    Some task\n"
 	runner := statusRunner(nil, readyOutput)
@@ -195,13 +195,15 @@ func TestBuildFullStatusManualSkipsProgCalls(t *testing.T) {
 
 func TestBuildFullStatusIncludesSpawnsWithoutPool(t *testing.T) {
 	spawns := NewSpawnRegistry()
-	spawns.Register(SpawnEntry{
+	if err := spawns.Register(SpawnEntry{
 		SpawnID:   "spawn-1",
 		PID:       999,
+		State:     SpawnRunning,
 		Prompt:    "test prompt",
-		LogPath:   "/tmp/spawn-1.jsonl",
 		SpawnTime: time.Now(),
-	})
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
 
 	cfg := Config{PoolSize: 3, SpawnPolicy: SpawnPolicyManual}
 	status := BuildFullStatus(context.Background(), nil, spawns, cfg, nil)
@@ -227,7 +229,7 @@ func TestBuildFullStatusProgShowFails(t *testing.T) {
 	// prog show will fail for ts-abc (not in map).
 	runner := statusRunner(nil, "ID           PRI  TITLE\n")
 	pool := statusPool(t, agents)
-	cfg := Config{Project: "testproject", PoolSize: 3}
+	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyAuto}
 
 	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
 
@@ -282,7 +284,7 @@ func TestBuildFullStatusProgReadyFails(t *testing.T) {
 	}
 
 	pool := statusPool(t, agents)
-	cfg := Config{Project: "testproject", PoolSize: 3}
+	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyAuto}
 
 	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
 
@@ -323,7 +325,7 @@ func TestBuildFullStatusNoLogs(t *testing.T) {
 
 	runner := statusRunner(showResponses, "ID           PRI  TITLE\n")
 	pool := statusPool(t, agents)
-	cfg := Config{Project: "testproject", PoolSize: 3}
+	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyAuto}
 
 	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
 
@@ -347,15 +349,15 @@ func TestBuildFullStatusWithSpawns(t *testing.T) {
 	_ = spawns.Register(SpawnEntry{
 		SpawnID:   "spawn-ghost_wolf",
 		PID:       9999,
+		State:     SpawnRunning,
 		Prompt:    "refactor auth module",
-		LogPath:   "/tmp/logs/spawn-ghost_wolf.jsonl",
 		SpawnTime: time.Now().Add(-5 * time.Minute),
 	})
 	_ = spawns.Register(SpawnEntry{
 		SpawnID:   "spawn-neon_fox",
 		PID:       8888,
+		State:     SpawnRunning,
 		Prompt:    "fix flaky test",
-		LogPath:   "/tmp/logs/spawn-neon_fox.jsonl",
 		SpawnTime: time.Now().Add(-2 * time.Minute),
 	})
 

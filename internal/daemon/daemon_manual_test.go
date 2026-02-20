@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -11,6 +12,13 @@ import (
 
 	"github.com/baiirun/aetherflow/internal/client"
 )
+
+// noopServerStarter skips the real opencode server startup in tests.
+// CI environments don't have opencode installed, so the managed server
+// would fail to start and cause the daemon socket to never become ready.
+func noopServerStarter(_ context.Context, _ string, _ []string, _ func(string, ...any)) (*exec.Cmd, error) {
+	return nil, nil
+}
 
 func testSocketPath(prefix string) string {
 	return fmt.Sprintf("/tmp/%s-%d-%d.sock", prefix, os.Getpid(), time.Now().UnixNano())
@@ -61,6 +69,7 @@ func TestDaemonManualPolicySkipsProgRunnerCalls(t *testing.T) {
 		SpawnPolicy:       SpawnPolicyManual,
 		ReconcileInterval: DefaultReconcileInterval,
 		Runner:            runner,
+		ServerStarter:     noopServerStarter,
 	}
 
 	d := New(cfg)
@@ -105,6 +114,7 @@ func TestDaemonAutoPolicyUsesRunnerCalls(t *testing.T) {
 		SpawnPolicy:       SpawnPolicyAuto,
 		ReconcileInterval: DefaultReconcileInterval,
 		Runner:            runner,
+		ServerStarter:     noopServerStarter,
 	}
 
 	d := New(cfg)
@@ -141,6 +151,7 @@ func TestDaemonSecondInstanceSameSocketFailsFast(t *testing.T) {
 		SpawnCmd:          "echo test",
 		SpawnPolicy:       SpawnPolicyManual,
 		ReconcileInterval: DefaultReconcileInterval,
+		ServerStarter:     noopServerStarter,
 	}
 
 	d1 := New(cfg)
@@ -215,7 +226,9 @@ func TestDaemonRunRejectsNonSocketPathCollision(t *testing.T) {
 	if err := os.WriteFile(path, []byte("not a socket"), 0644); err != nil {
 		t.Fatalf("failed to create collision file: %v", err)
 	}
-	defer os.Remove(path)
+	defer func() {
+		_ = os.Remove(path)
+	}()
 
 	cfg := Config{
 		SocketPath:        path,

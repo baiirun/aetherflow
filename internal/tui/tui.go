@@ -223,11 +223,14 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// fetchLogPathCmd returns a Cmd that fetches the log file path for an agent.
-func fetchLogPathCmd(c *client.Client, agentID string) tea.Cmd {
+// fetchInitialEventsCmd returns a Cmd that fetches the initial events for an agent.
+func fetchInitialEventsCmd(c *client.Client, agentID string) tea.Cmd {
 	return func() tea.Msg {
-		path, err := c.LogsPath(agentID)
-		return logPathMsg{path: path, err: err}
+		result, err := c.EventsList(agentID, 0)
+		if err != nil {
+			return logEventsMsg{err: err}
+		}
+		return logEventsMsg{lines: result.Lines, lastTS: result.LastTS}
 	}
 }
 
@@ -244,8 +247,8 @@ func (m Model) updatePanel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "l":
 			// Open full-screen log stream for the current agent.
 			m.screen = screenLogStream
-			m.logStream = NewLogStreamModel(m.panel.agent.ID, m.width, m.height)
-			return m, fetchLogPathCmd(m.client, m.panel.agent.ID)
+			m.logStream = NewLogStreamModel(m.panel.agent.ID, m.client, m.width, m.height)
+			return m, fetchInitialEventsCmd(m.client, m.panel.agent.ID)
 		}
 	}
 
@@ -296,12 +299,9 @@ func (m Model) updateLogStream(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = wsMsg.Height
 	}
 
-	// On tick, poll for new log lines if we have the path.
+	// On tick, poll for new events from the daemon.
 	if _, ok := msg.(tickMsg); ok {
-		cmds := []tea.Cmd{tick()}
-		if m.logStream.path != "" {
-			cmds = append(cmds, m.logStream.readNewLinesCmd())
-		}
+		cmds := []tea.Cmd{tick(), m.logStream.fetchEventsCmd()}
 		// Forward tick to logStream.
 		var lsCmd tea.Cmd
 		m.logStream, lsCmd = m.logStream.Update(msg)
