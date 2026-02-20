@@ -439,16 +439,16 @@ No process spawning, no JSONL piping, no stdout capture. Daemon becomes a pure A
 - [x] Attach/detach works on active sessions without ending the underlying session.
 - [x] Minimal WorkSource boundary is in place before deeper session lifecycle refactors.
 
-### Phase A.1 (CURRENT)
+### Phase A.1 (COMPLETE)
 
-- [ ] Opencode plugin (`aetherflow-events.ts`) installed and forwarding events to daemon.
-- [ ] Daemon receives and buffers plugin events per agent.
-- [ ] Session ID captured from `session.created` plugin event (replaces JSONL polling).
-- [ ] `af status <agent>` shows tool calls and session ID from event buffer.
-- [ ] `af logs <agent>` shows formatted events from event buffer.
-- [ ] `af logs -f` streams new events in real-time.
-- [ ] TUI log viewer works with event buffer.
-- [ ] JSONL log file reads removed from hot paths.
+- [x] Opencode plugin (`aetherflow-events.ts`) installed and forwarding events to daemon.
+- [x] Daemon receives and buffers plugin events per agent.
+- [x] Session ID captured from `session.created` plugin event (replaces JSONL polling).
+- [x] `af status <agent>` shows tool calls and session ID from event buffer.
+- [x] `af logs <agent>` shows formatted events from event buffer.
+- [x] `af logs -f` streams new events in real-time.
+- [x] TUI log viewer works with event buffer.
+- [x] JSONL log file reads removed from hot paths.
 
 ### Phase B
 
