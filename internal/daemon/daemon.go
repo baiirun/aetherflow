@@ -303,6 +303,9 @@ func (d *Daemon) sweepSpawns(ctx context.Context) {
 			if result := d.spawns.SweepDead(); result.Total() > 0 {
 				d.log.Info("spawn sweep", "marked_exited", result.Marked, "removed", result.Removed)
 			}
+			if n := d.events.SweepIdle(); n > 0 {
+				d.log.Info("event buffer sweep", "sessions_removed", n)
+			}
 		}
 	}
 }

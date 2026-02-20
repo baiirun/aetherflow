@@ -15,7 +15,7 @@ Expected behaviors and their verification status. This is the project's oracle â
 | Pool | Tracks last 20 exited agents in ring buffer with exit state | `go test ./internal/daemon/... -run TestPoolRecentHistory` | covered | 2026-02-10 |
 | Pool | Ring buffer wraps correctly when exceeding capacity | `go test ./internal/daemon/... -run TestPoolRecentHistoryRingBuffer` | covered | 2026-02-10 |
 | Status | af status displays Recent section with exited agents | Manual: `af status` (daemon required) | manual | 2026-02-10 |
-| JSONL | ParseSessionID extracts session ID from first JSONL line | `go test ./internal/daemon/... -run TestParseSessionID` | covered | 2026-02-10 |
+| Events | Session ID captured from plugin session.created event | `go test ./internal/daemon/... -run TestClaimSessionPoolAgent` | covered | 2026-02-19 |
 | Status | Agent detail shows opencode session ID in TUI meta pane | Manual: TUI agent detail view | manual | 2026-02-10 |
 | Agent Control | af kill <agent> sends SIGTERM and validates agent state | `go test ./internal/daemon/... -run TestHandleAgentKill` | covered | 2026-02-10 |
 | Agent Control | Kill rejects invalid PIDs (0 or negative) | `go test ./internal/daemon/... -run TestHandleAgentKillInvalidPID` | covered | 2026-02-10 |

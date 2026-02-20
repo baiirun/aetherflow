@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -63,55 +64,27 @@ func FormatEvent(ev SessionEvent) string {
 	var envelope struct {
 		Part json.RawMessage `json:"part"`
 	}
-	if err := json.Unmarshal(ev.Data, &envelope); err != nil || len(envelope.Part) == 0 {
+	if err := json.Unmarshal(ev.Data, &envelope); err != nil {
+		slog.Debug("FormatEvent: failed to parse envelope",
+			"event_type", ev.EventType, "session_id", ev.SessionID, "error", err)
+		return ""
+	}
+	if len(envelope.Part) == 0 {
 		return ""
 	}
 
-	// Parse the part into a LogEvent-compatible structure.
-	var part struct {
-		Type  string `json:"type"`
-		Text  string `json:"text"`
-		Tool  string `json:"tool"`
-		State struct {
-			Status string          `json:"status"`
-			Input  json.RawMessage `json:"input"`
-			Output string          `json:"output"`
-			Title  string          `json:"title"`
-			Time   struct {
-				Start int64 `json:"start"`
-				End   int64 `json:"end"`
-			} `json:"time"`
-		} `json:"state"`
-		Reason string  `json:"reason"`
-		Cost   float64 `json:"cost"`
-		Tokens struct {
-			Input     int `json:"input"`
-			Output    int `json:"output"`
-			Reasoning int `json:"reasoning"`
-			Cache     struct {
-				Read  int `json:"read"`
-				Write int `json:"write"`
-			} `json:"cache"`
-		} `json:"tokens"`
-	}
-	if err := json.Unmarshal(envelope.Part, &part); err != nil {
+	// Parse the part directly into a LogEvent — no intermediate struct.
+	var logEv LogEvent
+	logEv.Timestamp = ev.Timestamp
+	if err := json.Unmarshal(envelope.Part, &logEv.Part); err != nil {
+		slog.Debug("FormatEvent: failed to parse part",
+			"event_type", ev.EventType, "session_id", ev.SessionID, "error", err)
 		return ""
 	}
 
 	ts := time.UnixMilli(ev.Timestamp).Format("15:04:05")
 
-	// Map plugin part types to the existing formatting functions via LogEvent.
-	var logEv LogEvent
-	logEv.Timestamp = ev.Timestamp
-	logEv.Part.Type = part.Type
-	logEv.Part.Text = part.Text
-	logEv.Part.Tool = part.Tool
-	logEv.Part.State = part.State
-	logEv.Part.Reason = part.Reason
-	logEv.Part.Cost = part.Cost
-	logEv.Part.Tokens = part.Tokens
-
-	switch part.Type {
+	switch logEv.Part.Type {
 	case "text":
 		logEv.Type = "text"
 		return formatText(ts, logEv)
@@ -122,6 +95,8 @@ func FormatEvent(ev SessionEvent) string {
 		logEv.Type = "step_finish"
 		return formatStepFinish(ts, logEv)
 	default:
+		slog.Debug("FormatEvent: unhandled part type",
+			"part_type", logEv.Part.Type, "session_id", ev.SessionID)
 		return ""
 	}
 }

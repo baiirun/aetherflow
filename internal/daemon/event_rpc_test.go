@@ -115,6 +115,38 @@ func TestHandleSessionEventInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestHandleSessionEventOversizedData(t *testing.T) {
+	d := newTestDaemonForEvents()
+
+	// Create data that exceeds maxEventDataBytes.
+	bigData := make([]byte, maxEventDataBytes+1)
+	for i := range bigData {
+		bigData[i] = 'x'
+	}
+	// Wrap in valid JSON.
+	rawData := json.RawMessage(`"` + string(bigData) + `"`)
+
+	params, _ := json.Marshal(SessionEventParams{
+		EventType: "message.part.updated",
+		SessionID: "ses-big",
+		Timestamp: 1000,
+		Data:      rawData,
+	})
+
+	resp := d.handleSessionEvent(params)
+	if resp.Success {
+		t.Fatal("expected failure for oversized event data")
+	}
+	if !containsStr(resp.Error, "too large") {
+		t.Errorf("Error = %q, want to contain 'too large'", resp.Error)
+	}
+
+	// Verify the event was NOT stored.
+	if d.events.Len("ses-big") != 0 {
+		t.Errorf("expected 0 events (rejected), got %d", d.events.Len("ses-big"))
+	}
+}
+
 func TestHandleSessionEventMultipleEvents(t *testing.T) {
 	d := newTestDaemonForEvents()
 

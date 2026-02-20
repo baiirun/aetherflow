@@ -281,7 +281,7 @@ In `--spawn-policy=manual`, auto task lifecycle loops are intentionally disabled
 **Spawn sequence**: For each task, the pool:
 1. Fetches task metadata from prog (`prog show --json`) to infer the agent role
 2. Renders the role prompt template, replacing `{{task_id}}` and landing instructions
-3. Opens a JSONL log file at `.aetherflow/logs/<task-id>.jsonl`
+3. Opens a log file at `.aetherflow/logs/<task-id>.jsonl`
 4. Claims the task in prog (`prog start <id>`)
 5. Launches an opencode session with the rendered prompt as the first message
 
@@ -310,7 +310,7 @@ Each agent runs in an isolated git worktree at `.aetherflow/worktrees/<task-id>`
 Agents run as child processes of the daemon. Each gets:
 - Its own process group (`Setsid: true`) so terminal signals don't propagate
 - `AETHERFLOW_AGENT_ID` environment variable for plugin identification
-- JSONL stdout captured to `.aetherflow/logs/<task-id>.jsonl`
+- Stdout captured to `.aetherflow/logs/<task-id>.jsonl`
 - stderr passed through to the daemon's stderr
 
 The spawn command is configurable (`--spawn-cmd`, default `opencode run --format json`). The rendered prompt is appended as the final argument.
@@ -349,7 +349,7 @@ Cycle focus between panes with `tab`/`shift+tab`. Scroll the focused pane with `
 
 ### Log Stream
 
-Full-screen JSONL log viewer that reads directly from `.aetherflow/logs/<task-id>.jsonl`. Auto-scrolls to follow new output (`[follow]` indicator). Disable auto-scroll by scrolling up; re-enable with `G` (jump to bottom). Press `g` to jump to top.
+Full-screen event log viewer that reads from the daemon's event buffer. Auto-scrolls to follow new output (`[follow]` indicator). Disable auto-scroll by scrolling up; re-enable with `G` (jump to bottom). Press `g` to jump to top.
 
 ### Keybindings
 
@@ -428,7 +428,7 @@ project: myapp
 
 # Config-file-only settings (no CLI flag):
 # prompt_dir: ""              # Override embedded prompts with files from this directory
-# log_dir: .aetherflow/logs   # Directory for agent JSONL log files
+# log_dir: .aetherflow/logs   # Directory for agent log files
 ```
 
 CLI flags override config file values. Config file overrides defaults.
@@ -470,8 +470,8 @@ Manual mode without a project uses the global default socket path. Starting a se
 | `af status <agent>` | Agent detail -- task info, uptime, recent tool calls |
 | `af status -w` | Watch mode -- continuous refresh |
 | `af status --json` | Machine-readable output |
-| `af logs <agent> -f` | Tail an agent's JSONL log |
-| `af logs <agent> --raw` | Raw JSONL instead of formatted output |
+| `af logs <agent> -f` | Tail an agent's event log |
+| `af logs <agent> --raw` | Raw events instead of formatted output |
 | `af tui` | Interactive terminal dashboard (k9s-style) |
 
 ### Flow Control

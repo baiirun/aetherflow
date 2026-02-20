@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestEventBufferPushAndEvents(t *testing.T) {
@@ -233,5 +234,70 @@ func TestEventBufferConcurrentPush(t *testing.T) {
 		if got := buf.Len(session); got != 100 {
 			t.Errorf("Len(%q) = %d, want 100", session, got)
 		}
+	}
+}
+
+func TestEventBufferSweepIdleRemovesStale(t *testing.T) {
+	buf := NewEventBuffer(100)
+
+	buf.Push(SessionEvent{SessionID: "ses-1", EventType: "ev", Timestamp: 1})
+	buf.Push(SessionEvent{SessionID: "ses-2", EventType: "ev", Timestamp: 2})
+
+	if buf.SessionCount() != 2 {
+		t.Fatalf("SessionCount = %d, want 2", buf.SessionCount())
+	}
+
+	// Manually set lastPush to the past to simulate idle sessions.
+	buf.mu.Lock()
+	buf.sessions["ses-1"].lastPush = time.Now().Add(-2 * sessionIdleTTL)
+	buf.mu.Unlock()
+
+	removed := buf.SweepIdle()
+	if removed != 1 {
+		t.Errorf("SweepIdle removed %d sessions, want 1", removed)
+	}
+	if buf.SessionCount() != 1 {
+		t.Errorf("SessionCount after sweep = %d, want 1", buf.SessionCount())
+	}
+	if buf.Len("ses-1") != 0 {
+		t.Errorf("ses-1 should be gone after sweep, but has %d events", buf.Len("ses-1"))
+	}
+	if buf.Len("ses-2") != 1 {
+		t.Errorf("ses-2 should still exist, but has %d events", buf.Len("ses-2"))
+	}
+}
+
+func TestEventBufferSweepIdleKeepsActive(t *testing.T) {
+	buf := NewEventBuffer(100)
+
+	buf.Push(SessionEvent{SessionID: "ses-1", EventType: "ev", Timestamp: 1})
+
+	// Recent push — should not be swept.
+	removed := buf.SweepIdle()
+	if removed != 0 {
+		t.Errorf("SweepIdle removed %d sessions, want 0 (all active)", removed)
+	}
+	if buf.SessionCount() != 1 {
+		t.Errorf("SessionCount = %d, want 1", buf.SessionCount())
+	}
+}
+
+func TestEventBufferSessionCount(t *testing.T) {
+	buf := NewEventBuffer(100)
+
+	if buf.SessionCount() != 0 {
+		t.Errorf("SessionCount for empty buffer = %d, want 0", buf.SessionCount())
+	}
+
+	buf.Push(SessionEvent{SessionID: "ses-1", EventType: "ev", Timestamp: 1})
+	buf.Push(SessionEvent{SessionID: "ses-2", EventType: "ev", Timestamp: 2})
+
+	if buf.SessionCount() != 2 {
+		t.Errorf("SessionCount = %d, want 2", buf.SessionCount())
+	}
+
+	buf.Clear("ses-1")
+	if buf.SessionCount() != 1 {
+		t.Errorf("SessionCount after Clear = %d, want 1", buf.SessionCount())
 	}
 }

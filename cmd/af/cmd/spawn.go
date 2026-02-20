@@ -49,7 +49,7 @@ func init() {
 	f.Bool("solo", false, "Solo mode: agent merges to main instead of creating a PR")
 	f.String("spawn-cmd", daemon.DefaultSpawnCmd, "Command to launch the agent session")
 	f.String("prompt-dir", "", "Override embedded prompts with files from this directory")
-	f.String("log-dir", daemon.DefaultLogDir, "Directory for agent JSONL log files")
+	f.String("log-dir", daemon.DefaultLogDir, "Directory for agent log files")
 }
 
 func runSpawn(cmd *cobra.Command, args []string) {
@@ -105,7 +105,7 @@ func runSpawn(cmd *cobra.Command, args []string) {
 		Fatal("rendering prompt: %v", err)
 	}
 
-	// Set up JSONL logging directory.
+	// Set up logging directory.
 	if err := os.MkdirAll(logDir, 0700); err != nil {
 		Fatal("creating log directory: %v", err)
 	}

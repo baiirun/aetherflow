@@ -24,7 +24,7 @@ Without arguments, shows the swarm overview:
 
 With an agent name, shows detailed agent info:
   Task details, uptime, last prog log, and recent tool call history
-  parsed from the agent's JSONL log.
+  from the agent's event stream.
 
 Use -w/--watch or -f/--follow for continuous monitoring (refreshes every 2s by default).
 

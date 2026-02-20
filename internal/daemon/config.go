@@ -105,7 +105,7 @@ type Config struct {
 	// or when you want autonomous end-to-end delivery without a review gate.
 	Solo bool `yaml:"solo"`
 
-	// LogDir is the directory for agent JSONL log files.
+	// LogDir is the directory for agent log files.
 	// Each task gets a <taskID>.jsonl file in this directory.
 	LogDir string `yaml:"log_dir"`
 

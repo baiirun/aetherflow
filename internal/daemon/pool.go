@@ -66,7 +66,7 @@ type Process interface {
 // ProcessStarter spawns a long-running agent process.
 // The prompt is the rendered role prompt passed as the message argument to the spawn command.
 // agentID is set as the AETHERFLOW_AGENT_ID environment variable on the spawned process.
-// stdout receives the process's standard output (typically a log file for JSONL capture).
+// stdout receives the process's standard output (typically a log file).
 // This is the seam for testing — swap with a fake that returns immediately.
 type ProcessStarter func(ctx context.Context, spawnCmd string, prompt string, agentID string, stdout io.Writer) (Process, error)
 
@@ -82,7 +82,7 @@ func (p *execProcess) PID() int    { return p.cmd.Process.Pid }
 // The prompt is appended as the final argument to the spawn command,
 // e.g. "opencode run --format json" becomes ["opencode", "run", "--format", "json", "<prompt>"].
 // agentID is exposed as the AETHERFLOW_AGENT_ID environment variable.
-// stdout receives the process's standard output (typically a JSONL log file).
+// stdout receives the process's standard output (typically a log file).
 func ExecProcessStarter(ctx context.Context, spawnCmd string, prompt string, agentID string, stdout io.Writer) (Process, error) {
 	parts := strings.Fields(spawnCmd)
 	if len(parts) == 0 {
@@ -105,7 +105,7 @@ func ExecProcessStarter(ctx context.Context, spawnCmd string, prompt string, age
 	return &execProcess{cmd: cmd}, nil
 }
 
-// logFilePath returns the path for a task's JSONL log file.
+// logFilePath returns the path for a task's log file.
 // taskID is sanitized with filepath.Base to prevent path traversal.
 func logFilePath(logDir, taskID string) string {
 	return filepath.Join(logDir, filepath.Base(taskID)+".jsonl")
@@ -114,7 +114,7 @@ func logFilePath(logDir, taskID string) string {
 // openLogFile creates the log directory if needed and opens the log file for appending.
 // Log files are owner-only (0600) since agent stdout may contain sensitive data.
 //
-// Note: writes are not fsynced — a daemon crash may lose buffered JSONL lines.
+// Note: writes are not fsynced — a daemon crash may lose buffered log lines.
 // This is acceptable for observability data; the agent process is unaffected.
 func openLogFile(logDir, taskID string) (*os.File, error) {
 	if err := os.MkdirAll(logDir, 0700); err != nil {
@@ -136,7 +136,7 @@ type Pool struct {
 	retries map[string]int    // crash count per task ID
 	names   *protocol.NameGenerator
 	config  Config
-	logDir  string // absolute path to JSONL log directory
+	logDir  string // absolute path to log directory
 	runner  CommandRunner
 	starter ProcessStarter
 	sstore  *sessions.Store

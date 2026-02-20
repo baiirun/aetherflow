@@ -3,11 +3,17 @@ package daemon
 import (
 	"encoding/json"
 	"sync"
+	"time"
 )
 
 // DefaultEventBufSize is the maximum number of events stored per session.
 // Oldest events are evicted when this limit is exceeded.
 const DefaultEventBufSize = 2000
+
+// sessionIdleTTL is how long an idle session's events are kept before
+// being swept. Matches exitedSpawnTTL so both spawn entries and their
+// corresponding event data expire together.
+const sessionIdleTTL = 1 * time.Hour
 
 // SessionEvent is a single event received from the opencode plugin.
 // The Data field carries the raw event properties as-is from the plugin —
@@ -32,7 +38,8 @@ type EventBuffer struct {
 }
 
 type sessionBuf struct {
-	events []SessionEvent
+	events   []SessionEvent
+	lastPush time.Time // wall clock of the most recent Push
 }
 
 // NewEventBuffer creates a new event buffer with the given per-session capacity.
@@ -52,11 +59,14 @@ func (b *EventBuffer) Push(ev SessionEvent) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	now := time.Now()
+
 	buf, ok := b.sessions[ev.SessionID]
 	if !ok {
 		buf = &sessionBuf{events: make([]SessionEvent, 0, 64)}
 		b.sessions[ev.SessionID] = buf
 	}
+	buf.lastPush = now
 
 	if len(buf.events) >= b.maxSize {
 		// Drop oldest event. This is O(n) but maxSize is bounded (2000)
@@ -122,6 +132,30 @@ func (b *EventBuffer) Clear(sessionID string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	delete(b.sessions, sessionID)
+}
+
+// SweepIdle removes sessions that have been idle (no Push) for longer
+// than sessionIdleTTL. Returns the number of sessions removed.
+// Called periodically by the daemon alongside the spawn sweep.
+func (b *EventBuffer) SweepIdle() int {
+	now := time.Now()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	removed := 0
+	for id, buf := range b.sessions {
+		if now.Sub(buf.lastPush) > sessionIdleTTL {
+			delete(b.sessions, id)
+			removed++
+		}
+	}
+	return removed
+}
+
+// SessionCount returns the number of sessions tracked by the buffer.
+func (b *EventBuffer) SessionCount() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return len(b.sessions)
 }
 
 // Len returns the number of events stored for the given session.

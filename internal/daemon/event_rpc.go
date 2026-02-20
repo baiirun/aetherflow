@@ -8,6 +8,13 @@ import (
 	"github.com/baiirun/aetherflow/internal/sessions"
 )
 
+// maxEventDataBytes is the maximum size of a single event's Data payload.
+// Events exceeding this are rejected at the RPC boundary. 256 KiB is generous:
+// typical events are 500B-2KB, but tool output events with large file contents
+// could be much bigger. Combined with per-session ring buffer capacity and
+// session sweep TTL, this bounds total memory usage.
+const maxEventDataBytes = 256 * 1024
+
 // SessionEventParams are the parameters for the session.event RPC method.
 // These arrive from the opencode plugin via the daemon's Unix socket.
 type SessionEventParams struct {
@@ -35,6 +42,9 @@ func (d *Daemon) handleSessionEvent(rawParams json.RawMessage) *Response {
 	}
 	if params.EventType == "" {
 		return &Response{Success: false, Error: "event_type is required"}
+	}
+	if len(params.Data) > maxEventDataBytes {
+		return &Response{Success: false, Error: fmt.Sprintf("event data too large: %d bytes (max %d)", len(params.Data), maxEventDataBytes)}
 	}
 
 	d.events.Push(SessionEvent{
@@ -160,7 +170,7 @@ func (d *Daemon) resolveSessionID(agentName string) string {
 
 // claimSession correlates a newly-created session ID to a pool agent or
 // spawn entry that hasn't been assigned a session yet. This replaces the
-// old JSONL-polling approach (captureSessionFromLog / captureSpawnSession).
+// old log-polling approach (captureSessionFromLog / captureSpawnSession).
 //
 // If exactly one unclaimed candidate exists across pool and spawns, the
 // session ID is assigned to it and persisted in the session registry.

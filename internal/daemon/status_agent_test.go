@@ -56,7 +56,7 @@ func TestBuildAgentDetailHappyPath(t *testing.T) {
 	// Simulate session claim — set session ID on the agent.
 	pool.SetSessionID(agentName, sessionID)
 
-	// Push tool call events into the event buffer (replacing JSONL log writes).
+	// Push tool call events into the event buffer.
 	events := NewEventBuffer(DefaultEventBufSize)
 	events.Push(SessionEvent{
 		EventType: "message.part.updated",

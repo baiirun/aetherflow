@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"sort"
 	"time"
 )
 
@@ -83,19 +84,14 @@ func ToolCallsFromEvents(events []SessionEvent, limit int) []ToolCall {
 	}
 
 	// Collect in insertion order.
-	calls := make([]ToolCall, 0, len(seen))
 	ordered := make([]*entry, 0, len(seen))
 	for _, e := range seen {
 		ordered = append(ordered, e)
 	}
-	// Sort by insertion order to preserve chronological sequence.
-	for i := 0; i < len(ordered); i++ {
-		for j := i + 1; j < len(ordered); j++ {
-			if ordered[j].order < ordered[i].order {
-				ordered[i], ordered[j] = ordered[j], ordered[i]
-			}
-		}
-	}
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].order < ordered[j].order
+	})
+	calls := make([]ToolCall, 0, len(ordered))
 	for _, e := range ordered {
 		calls = append(calls, e.call)
 	}

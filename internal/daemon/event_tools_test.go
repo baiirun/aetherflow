@@ -199,6 +199,37 @@ func TestToolCallsFromEventsPreservesOrder(t *testing.T) {
 	}
 }
 
+func TestExtractKeyInput(t *testing.T) {
+	tests := []struct {
+		name  string
+		tool  string
+		input string
+		want  string
+	}{
+		{"read filePath", "read", `{"filePath":"/foo/bar.go"}`, "/foo/bar.go"},
+		{"edit filePath", "edit", `{"filePath":"/foo/bar.go","oldString":"a","newString":"b"}`, "/foo/bar.go"},
+		{"write filePath", "write", `{"filePath":"/foo/bar.go","content":"x"}`, "/foo/bar.go"},
+		{"bash command", "bash", `{"command":"go test ./..."}`, "go test ./..."},
+		{"glob pattern", "glob", `{"pattern":"**/*.go"}`, "**/*.go"},
+		{"grep pattern", "grep", `{"pattern":"func main"}`, "func main"},
+		{"task description", "task", `{"description":"review code"}`, "review code"},
+		{"skill name", "skill", `{"name":"review-auto"}`, "review-auto"},
+		{"unknown with url", "webfetch", `{"url":"https://example.com"}`, "https://example.com"},
+		{"unknown no known fields", "custom", `{"foo":"bar"}`, ""},
+		{"empty input", "read", `{}`, ""},
+		{"null input", "read", ``, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractKeyInput(tt.tool, []byte(tt.input))
+			if got != tt.want {
+				t.Errorf("extractKeyInput(%q, %q) = %q, want %q", tt.tool, tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestToolCallsFromEventsNoDuration(t *testing.T) {
 	events := []SessionEvent{
 		{EventType: "message.part.updated", SessionID: "ses-1", Timestamp: 1000,
