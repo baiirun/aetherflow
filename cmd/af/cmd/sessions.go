@@ -1,10 +1,15 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -34,6 +39,26 @@ var sessionAttachCmd = &cobra.Command{
 	Short: "Attach interactively to a known session",
 	Args:  cobra.ExactArgs(1),
 	Run:   runSessionAttach,
+}
+
+var runCommandOutput = func(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).Output()
+}
+
+type opencodeSessionSummary struct {
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	Directory string `json:"directory"`
+}
+
+type sessionMessage struct {
+	Info struct {
+		Role string `json:"role"`
+	} `json:"info"`
+	Parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"parts"`
 }
 
 func init() {
@@ -83,7 +108,10 @@ func runSessions(cmd *cobra.Command, _ []string) {
 		return
 	}
 
-	fmt.Printf("%-34s  %-24s  %-10s  %-8s  %-14s  %s\n", "SESSION", "SERVER", "STATUS", "ORIGIN", "UPDATED", "WORK")
+	sessionIndex := loadOpencodeSessionIndex()
+	semanticIndex := loadSessionSemanticIndex(recs, sessionIndex)
+
+	fmt.Printf("%-34s  %-24s  %-10s  %-8s  %-14s  %-14s  %s\n", "SESSION", "SERVER", "STATUS", "ORIGIN", "UPDATED", "WORK", "WHAT")
 	for _, r := range recs {
 		updated := r.UpdatedAt
 		if updated.IsZero() {
@@ -93,15 +121,172 @@ func runSessions(cmd *cobra.Command, _ []string) {
 		if work == "" {
 			work = "-"
 		}
-		fmt.Printf("%-34s  %-24s  %-10s  %-8s  %-14s  %s\n",
+		fmt.Printf("%-34s  %-24s  %-10s  %-8s  %-14s  %-14s  %s\n",
 			r.SessionID,
 			truncateString(r.ServerRef, 24),
 			r.Status,
 			r.Origin,
 			humanSince(updated),
-			work,
+			truncateString(work, 14),
+			truncateString(sessionWhatForRecord(r, sessionIndex, semanticIndex), 96),
 		)
 	}
+}
+
+func recordKey(serverRef, sessionID string) string {
+	return serverRef + "\x00" + sessionID
+}
+
+func loadOpencodeSessionIndex() map[string]opencodeSessionSummary {
+	index := make(map[string]opencodeSessionSummary)
+	out, err := runCommandOutput("opencode", "session", "list", "--format", "json")
+	if err != nil {
+		return index
+	}
+	var items []opencodeSessionSummary
+	if err := json.Unmarshal(out, &items); err != nil {
+		return index
+	}
+	for _, item := range items {
+		if item.ID == "" {
+			continue
+		}
+		index[item.ID] = item
+	}
+	return index
+}
+
+func loadSessionSemanticIndex(recs []sessions.Record, index map[string]opencodeSessionSummary) map[string]string {
+	result := make(map[string]string)
+	client := &http.Client{Timeout: 2 * time.Second}
+	for _, r := range recs {
+		if r.ServerRef == "" || r.SessionID == "" {
+			continue
+		}
+		title := strings.TrimSpace(index[r.SessionID].Title)
+		if !shouldEnrichSessionTitle(title) {
+			continue
+		}
+		if what := fetchSessionObjective(client, r.ServerRef, r.SessionID); what != "" {
+			result[recordKey(r.ServerRef, r.SessionID)] = what
+		}
+	}
+	return result
+}
+
+func shouldEnrichSessionTitle(title string) bool {
+	t := strings.ToLower(strings.TrimSpace(title))
+	if t == "" {
+		return true
+	}
+	for _, prefix := range []string{
+		"autonomous spawn",
+		"autonomous agent spawn",
+		"spawn-",
+		"new session -",
+	} {
+		if strings.HasPrefix(t, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func fetchSessionObjective(client *http.Client, serverRef, sessionID string) string {
+	u := strings.TrimRight(serverRef, "/") + "/session/" + url.PathEscape(sessionID) + "/message"
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return ""
+	}
+	var messages []sessionMessage
+	if err := json.Unmarshal(body, &messages); err != nil {
+		return ""
+	}
+	for _, msg := range messages {
+		if msg.Info.Role != "user" {
+			continue
+		}
+		for _, part := range msg.Parts {
+			if part.Type != "text" || strings.TrimSpace(part.Text) == "" {
+				continue
+			}
+			return objectiveFromPromptText(part.Text)
+		}
+	}
+	return ""
+}
+
+func objectiveFromPromptText(text string) string {
+	trimmed := strings.TrimSpace(text)
+	trimmed = strings.TrimPrefix(trimmed, "\"")
+	trimmed = strings.TrimSuffix(trimmed, "\"")
+	if trimmed == "" {
+		return ""
+	}
+
+	if i := strings.Index(trimmed, "## Objective"); i >= 0 {
+		sub := trimmed[i+len("## Objective"):]
+		sub = strings.TrimSpace(sub)
+		if j := strings.Index(sub, "\n## "); j >= 0 {
+			sub = sub[:j]
+		}
+		return squashWhitespace(sub)
+	}
+
+	lines := strings.Split(trimmed, "\n")
+	for _, line := range lines {
+		l := strings.TrimSpace(line)
+		if l == "" || strings.HasPrefix(l, "#") {
+			continue
+		}
+		return squashWhitespace(l)
+	}
+	return ""
+}
+
+func squashWhitespace(s string) string {
+	return strings.TrimSpace(string(bytes.Join(bytes.Fields([]byte(s)), []byte(" "))))
+}
+
+func sessionWhatForRecord(r sessions.Record, index map[string]opencodeSessionSummary, semanticIndex map[string]string) string {
+	if what := semanticIndex[recordKey(r.ServerRef, r.SessionID)]; what != "" {
+		return what
+	}
+	if summary, ok := index[r.SessionID]; ok {
+		title := strings.TrimSpace(summary.Title)
+		if title != "" {
+			return title
+		}
+		if summary.Directory != "" {
+			return "dir: " + filepath.Base(summary.Directory)
+		}
+	}
+	if r.WorkRef != "" {
+		return r.WorkRef
+	}
+	if r.AgentID != "" {
+		return r.AgentID
+	}
+	if r.Project != "" {
+		return r.Project
+	}
+	if r.Directory != "" {
+		return filepath.Base(r.Directory)
+	}
+	return "-"
 }
 
 func runSessionAttach(cmd *cobra.Command, args []string) {
