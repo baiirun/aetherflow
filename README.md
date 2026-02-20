@@ -310,6 +310,54 @@ Observability flows through a plugin on the opencode server, not through log fil
 
 **Backfill** -- on daemon startup, existing sessions are fetched from the opencode server's REST API (`/session`) and pushed into the event buffer. This covers agents that started before the daemon (re)started.
 
+### Session Registry
+
+The global session registry tracks the mapping between aetherflow agents and opencode sessions. It persists to disk so session metadata survives daemon restarts.
+
+**Location**: `~/.config/aetherflow/sessions/sessions.json` (override with `session_dir` in config)
+
+**Schema** (v1):
+
+```json
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "server_ref": "http://127.0.0.1:4096",
+      "session_id": "abc123",
+      "directory": "/path/to/project",
+      "project": "myapp",
+      "origin_type": "spawn",
+      "work_ref": "task-id-or-prompt-hash",
+      "agent_id": "worker-ts-a1b2c3",
+      "status": "active",
+      "created_at": "2026-02-19T12:00:00Z",
+      "last_seen_at": "2026-02-19T12:05:00Z",
+      "updated_at": "2026-02-19T12:05:00Z"
+    }
+  ]
+}
+```
+
+**Fields**:
+
+| Field | Description |
+|-------|-------------|
+| `server_ref` | Opencode server URL this session belongs to |
+| `session_id` | Opencode session ID (from `session.created` event) |
+| `origin_type` | How the session was created: `pool` (auto-scheduled), `spawn` (af spawn), `manual` |
+| `agent_id` | Aetherflow agent name (e.g., `worker-ts-a1b2c3`) |
+| `work_ref` | Task ID (pool/spawn) or prompt reference |
+| `status` | `active`, `idle`, `terminated`, `stale` |
+
+**Concurrency**: The registry uses `flock(2)` file locking for safe concurrent access from multiple daemon processes. Writes use atomic rename (write to temp file, rename into place) to prevent corruption.
+
+**Troubleshooting**:
+
+- **Stale entries**: If `af sessions` shows sessions that no longer exist on the server, they'll be marked `stale` on the next status check. This is harmless -- stale entries are ignored by the daemon.
+- **Corrupt registry**: Delete `~/.config/aetherflow/sessions/sessions.json` and restart the daemon. It rebuilds from live server state on startup.
+- **Permission errors**: The sessions directory uses `0700` and files use `0600`. Check ownership if you see permission denied errors.
+
 ### Daemon Internals
 
 The daemon runs several concurrent loops. In `--spawn-policy=manual` (the default), auto task lifecycle loops are disabled (poll/reclaim/reconcile). Manual mode handles `af spawn` agents and their observability.
@@ -408,9 +456,24 @@ Full-screen event log viewer that reads from the daemon's event buffer. Auto-scr
 | Log Stream | `G` | Jump to bottom + follow |
 | Log Stream | `q`/`esc` | Back to panel |
 
-## Bundled Skills and Agents
+## Bundled Skills, Agents, and Plugins
 
-`af install` copies bundled skills and agent definitions into your opencode config directory (`~/.config/opencode/`). These are the tools agents use during their work.
+`af install` copies bundled skills, agent definitions, and plugins into your opencode config directory (`~/.config/opencode/`). These are the tools and infrastructure agents use during their work.
+
+### Plugin: aetherflow-events
+
+Installed to `~/.config/opencode/plugins/aetherflow-events.ts`. This is the event pipeline plugin that streams opencode session events to the aetherflow daemon.
+
+**How it works**: The plugin hooks into opencode's event system and forwards every event (tool calls, messages, session lifecycle) to the daemon's Unix socket via the `session.event` RPC. Events are keyed by opencode session ID; the daemon correlates sessions to agents internally.
+
+**Configuration**: The plugin is controlled entirely by environment variables set automatically by the daemon:
+
+| Variable | Set on | Purpose |
+|----------|--------|---------|
+| `AETHERFLOW_SOCKET` | opencode server process | Unix socket path for event delivery. When absent, the plugin is completely inert. |
+| `AETHERFLOW_AGENT_ID` | agent processes | Agent name for session correlation (used by daemon, not the plugin). |
+
+No manual configuration is needed. `af install` places the file, and the daemon sets the env vars when it starts the opencode server. If the daemon isn't running, the plugin does nothing.
 
 ### Skills
 
@@ -540,7 +603,7 @@ Manual mode without a project uses the global default socket path. Starting a se
 
 | Command | Description |
 |---------|-------------|
-| `af install` | Install bundled skills and agents to opencode config |
+| `af install` | Install bundled skills, agents, and plugins to opencode config |
 | `af install --dry-run` | Preview what would be installed |
 | `af install --check` | Exit 0 if up-to-date, 1 if install needed |
 | `af install --json` | Structured JSON output for automation |
