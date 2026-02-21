@@ -61,6 +61,15 @@ type sessionMessage struct {
 	} `json:"parts"`
 }
 
+type attachPendingResult struct {
+	Success           bool   `json:"success"`
+	Code              string `json:"code"`
+	State             string `json:"state"`
+	SpawnID           string `json:"spawn_id"`
+	SessionID         string `json:"session_id,omitempty"`
+	RetryAfterSeconds int    `json:"retry_after_seconds"`
+}
+
 func init() {
 	rootCmd.AddCommand(sessionsCmd)
 	rootCmd.AddCommand(sessionCmd)
@@ -71,6 +80,7 @@ func init() {
 	sessionsCmd.Flags().String("session-dir", "", "Session registry directory (overrides config/default)")
 	sessionAttachCmd.Flags().String("server", "", "Disambiguate by server_ref when session_id exists on multiple servers")
 	sessionAttachCmd.Flags().String("session-dir", "", "Session registry directory (overrides config/default)")
+	sessionAttachCmd.Flags().Bool("json", false, "Output pending/error details as JSON")
 }
 
 func runSessions(cmd *cobra.Command, _ []string) {
@@ -290,8 +300,9 @@ func sessionWhatForRecord(r sessions.Record, index map[string]opencodeSessionSum
 }
 
 func runSessionAttach(cmd *cobra.Command, args []string) {
-	sessionID := args[0]
+	requestedID := args[0]
 	serverFilter, _ := cmd.Flags().GetString("server")
+	jsonOut, _ := cmd.Flags().GetBool("json")
 
 	store, err := openSessionStore(cmd)
 	if err != nil {
@@ -304,7 +315,7 @@ func runSessionAttach(cmd *cobra.Command, args []string) {
 
 	matches := make([]sessions.Record, 0, 2)
 	for _, r := range recs {
-		if r.SessionID != sessionID {
+		if r.SessionID != requestedID {
 			continue
 		}
 		if serverFilter != "" && r.ServerRef != serverFilter {
@@ -314,10 +325,25 @@ func runSessionAttach(cmd *cobra.Command, args []string) {
 	}
 
 	if len(matches) == 0 {
-		if serverFilter != "" {
-			Fatal("session %q not found for server %q", sessionID, serverFilter)
+		remoteStore, rsErr := openRemoteSpawnStore(cmd)
+		if rsErr == nil {
+			if rs, getErr := remoteStore.GetBySpawnID(requestedID); getErr == nil && rs != nil {
+				if rs.SessionID == "" || rs.State == daemon.RemoteSpawnRequested || rs.State == daemon.RemoteSpawnSpawning || rs.State == daemon.RemoteSpawnUnknown {
+					handleAttachPending(jsonOut, rs)
+					os.Exit(3)
+				}
+				if rs.SessionID != "" {
+					matches = append(matches, sessions.Record{ServerRef: rs.ServerRef, SessionID: rs.SessionID})
+				}
+			}
 		}
-		Fatal("session %q not found", sessionID)
+	}
+
+	if len(matches) == 0 {
+		if serverFilter != "" {
+			Fatal("session or spawn %q not found for server %q", requestedID, serverFilter)
+		}
+		Fatal("session or spawn %q not found", requestedID)
 	}
 
 	if len(matches) > 1 && serverFilter == "" {
@@ -326,11 +352,11 @@ func runSessionAttach(cmd *cobra.Command, args []string) {
 			servers = append(servers, m.ServerRef)
 		}
 		sort.Strings(servers)
-		Fatal("session %q exists on multiple servers: %s (use --server)", sessionID, strings.Join(servers, ", "))
+		Fatal("session %q exists on multiple servers: %s (use --server)", requestedID, strings.Join(servers, ", "))
 	}
 
 	target := matches[0]
-	if _, err := daemon.ValidateServerURLLocal(target.ServerRef); err != nil {
+	if _, err := daemon.ValidateServerURLAttachTarget(target.ServerRef); err != nil {
 		Fatal("invalid server_ref %q in session registry: %v", target.ServerRef, err)
 	}
 	if strings.HasPrefix(target.ServerRef, "-") {
@@ -349,6 +375,21 @@ func runSessionAttach(cmd *cobra.Command, args []string) {
 	}
 }
 
+func handleAttachPending(jsonOut bool, rec *daemon.RemoteSpawnRecord) {
+	if jsonOut {
+		_ = json.NewEncoder(os.Stdout).Encode(attachPendingResult{
+			Success:           false,
+			Code:              "SESSION_NOT_READY",
+			State:             string(rec.State),
+			SpawnID:           rec.SpawnID,
+			SessionID:         rec.SessionID,
+			RetryAfterSeconds: 5,
+		})
+		return
+	}
+	fmt.Fprintf(os.Stderr, "SESSION_NOT_READY: spawn %s is %s; retry in ~5s\n", rec.SpawnID, rec.State)
+}
+
 func openSessionStore(cmd *cobra.Command) (*sessions.Store, error) {
 	sessionDir, _ := cmd.Flags().GetString("session-dir")
 	if sessionDir != "" {
@@ -362,6 +403,21 @@ func openSessionStore(cmd *cobra.Command) (*sessions.Store, error) {
 	var cfg daemon.Config
 	_ = daemon.LoadConfigFile(configPath, &cfg)
 	return sessions.Open(cfg.SessionDir)
+}
+
+func openRemoteSpawnStore(cmd *cobra.Command) (*daemon.RemoteSpawnStore, error) {
+	sessionDir, _ := cmd.Flags().GetString("session-dir")
+	if sessionDir != "" {
+		return daemon.OpenRemoteSpawnStore(sessionDir)
+	}
+
+	configPath, _ := cmd.Flags().GetString("config")
+	if configPath == "" {
+		configPath = ".aetherflow.yaml"
+	}
+	var cfg daemon.Config
+	_ = daemon.LoadConfigFile(configPath, &cfg)
+	return daemon.OpenRemoteSpawnStore(cfg.SessionDir)
 }
 
 func humanSince(t time.Time) string {

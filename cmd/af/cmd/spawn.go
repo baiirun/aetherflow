@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -47,6 +48,8 @@ func init() {
 	f.Bool("solo", false, "Solo mode: agent merges to main instead of creating a PR")
 	f.String("spawn-cmd", daemon.DefaultSpawnCmd, "Command to launch the agent session")
 	f.String("prompt-dir", "", "Override embedded prompts with files from this directory")
+	f.String("provider", "local", "Spawn provider: local or sprites")
+	f.String("request-id", "", "Optional idempotency key for provider-backed spawns")
 }
 
 func runSpawn(cmd *cobra.Command, args []string) {
@@ -55,6 +58,8 @@ func runSpawn(cmd *cobra.Command, args []string) {
 	detach, _ := cmd.Flags().GetBool("detach")
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 	solo, _ := cmd.Flags().GetBool("solo")
+	provider, _ := cmd.Flags().GetString("provider")
+	requestID, _ := cmd.Flags().GetString("request-id")
 	spawnCmd, _ := cmd.Flags().GetString("spawn-cmd")
 	promptDir, _ := cmd.Flags().GetString("prompt-dir")
 
@@ -91,6 +96,14 @@ func runSpawn(cmd *cobra.Command, args []string) {
 	// A random hex suffix expands the namespace from ~14K to ~943M
 	// combinations, making birthday-paradox collisions negligible.
 	spawnID := newSpawnID()
+	if requestID == "" {
+		requestID = newRequestID()
+	}
+
+	if strings.EqualFold(provider, "sprites") {
+		runSpritesSpawn(cmd, spawnID, requestID, userPrompt, jsonOutput, fileCfg)
+		return
+	}
 
 	// Render the spawn prompt.
 	prompt, err := daemon.RenderSpawnPrompt(promptDir, userPrompt, spawnID, solo)
@@ -119,6 +132,65 @@ func newSpawnID() string {
 		return "spawn-" + name
 	}
 	return fmt.Sprintf("spawn-%s-%x", name, suffix)
+}
+
+func newRequestID() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "req-fallback"
+	}
+	return "req-" + hex.EncodeToString(b)
+}
+
+func runSpritesSpawn(cmd *cobra.Command, spawnID, requestID, userPrompt string, jsonOutput bool, cfg daemon.Config) {
+	token := strings.TrimSpace(os.Getenv("SPRITES_TOKEN"))
+	if token == "" {
+		Fatal("sprites provider requires SPRITES_TOKEN")
+	}
+
+	store, err := daemon.OpenRemoteSpawnStore(cfg.SessionDir)
+	if err != nil {
+		Fatal("opening remote spawn store: %v", err)
+	}
+	rec := daemon.RemoteSpawnRecord{
+		SpawnID:   spawnID,
+		Provider:  "sprites",
+		RequestID: requestID,
+		State:     daemon.RemoteSpawnRequested,
+	}
+	if err := store.Upsert(rec); err != nil {
+		Fatal("persisting remote spawn request: %v", err)
+	}
+
+	client := daemon.NewSpritesClient(token)
+	created, err := client.Create(cmd.Context(), daemon.ProviderCreateRequest{
+		SpawnID:   spawnID,
+		RequestID: requestID,
+		Project:   cfg.Project,
+		Prompt:    userPrompt,
+	})
+	if err != nil {
+		rec.State = daemon.RemoteSpawnFailed
+		rec.LastError = err.Error()
+		_ = store.Upsert(rec)
+		Fatal("sprites create failed: %v", err)
+	}
+
+	rec.ProviderSandboxID = created.SandboxID
+	rec.ProviderOperation = created.OperationID
+	rec.ServerRef = created.AttachRef
+	rec.State = daemon.RemoteSpawnSpawning
+	if err := store.Upsert(rec); err != nil {
+		Fatal("persisting remote spawn state: %v", err)
+	}
+
+	if jsonOutput {
+		_ = json.NewEncoder(os.Stdout).Encode(spawnResult{SpawnID: spawnID, PID: 0})
+		return
+	}
+
+	fmt.Printf("%s Spawned remote runtime %s on sprites\n", term.Bold("af spawn:"), term.Cyan(spawnID))
+	fmt.Printf("%s session is not ready yet; use `af session attach %s` to check readiness\n", term.Dim("note:"), spawnID)
 }
 
 // buildAgentProc creates a configured exec.Cmd for the agent process.
