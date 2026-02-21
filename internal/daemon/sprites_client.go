@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -53,6 +54,9 @@ func (s *SpritesClient) Create(ctx context.Context, req ProviderCreateRequest) (
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+s.token)
 	httpReq.Header.Set("Content-Type", "application/json")
+	if req.RequestID != "" {
+		httpReq.Header.Set("Idempotency-Key", req.RequestID)
+	}
 
 	resp, err := s.http.Do(httpReq)
 	if err != nil {
@@ -61,7 +65,8 @@ func (s *SpritesClient) Create(ctx context.Context, req ProviderCreateRequest) (
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return ProviderCreateResult{}, fmt.Errorf("create sprite failed: status %d", resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		return ProviderCreateResult{}, fmt.Errorf("create sprite failed: status %d body=%q", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var out spritesObject
@@ -69,10 +74,21 @@ func (s *SpritesClient) Create(ctx context.Context, req ProviderCreateRequest) (
 		return ProviderCreateResult{}, fmt.Errorf("decode create response: %w", err)
 	}
 
+	if strings.TrimSpace(out.ID) == "" {
+		return ProviderCreateResult{}, fmt.Errorf("create sprite response missing id")
+	}
+	if strings.TrimSpace(out.Name) == "" {
+		return ProviderCreateResult{}, fmt.Errorf("create sprite response missing name")
+	}
+	if strings.TrimSpace(out.URL) == "" {
+		return ProviderCreateResult{}, fmt.Errorf("create sprite response missing url")
+	}
+
 	return ProviderCreateResult{
-		SandboxID:   name,
-		OperationID: out.ID,
-		AttachRef:   out.URL,
+		SandboxID:     out.Name,
+		CanonicalName: out.Name,
+		OperationID:   out.ID,
+		AttachRef:     out.URL,
 	}, nil
 }
 
@@ -97,7 +113,8 @@ func (s *SpritesClient) GetStatus(ctx context.Context, sandboxID string) (Provid
 		return ProviderStatusResult{Status: ProviderRuntimeTerminated}, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return ProviderStatusResult{}, fmt.Errorf("get sprite status failed: status %d", resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		return ProviderStatusResult{}, fmt.Errorf("get sprite status failed: status %d body=%q", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var out spritesObject
@@ -131,7 +148,8 @@ func (s *SpritesClient) Terminate(ctx context.Context, sandboxID string) error {
 	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound {
 		return nil
 	}
-	return fmt.Errorf("terminate sprite failed: status %d", resp.StatusCode)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	return fmt.Errorf("terminate sprite failed: status %d body=%q", resp.StatusCode, strings.TrimSpace(string(body)))
 }
 
 func mapSpritesStatus(in string) ProviderRuntimeStatus {

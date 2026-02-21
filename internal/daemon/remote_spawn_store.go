@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -15,7 +16,23 @@ import (
 const (
 	remoteSpawnSchemaVersion = 1
 	remoteSpawnFileName      = "remote_spawns.json"
+	remoteSpawnMaxRecords    = 512
 )
+
+type IdempotencyConflictError struct {
+	Provider      string
+	RequestID     string
+	ExistingSpawn string
+}
+
+func (e *IdempotencyConflictError) Error() string {
+	return fmt.Sprintf("idempotency conflict: provider=%s request_id=%s already bound to spawn_id=%s", e.Provider, e.RequestID, e.ExistingSpawn)
+}
+
+func IsIdempotencyConflict(err error) bool {
+	var target *IdempotencyConflictError
+	return errors.As(err, &target)
+}
 
 type RemoteSpawnState string
 
@@ -100,7 +117,11 @@ func (s *RemoteSpawnStore) Upsert(rec RemoteSpawnRecord) error {
 	// Idempotency uniqueness guardrail.
 	for _, e := range state.Records {
 		if e.Provider == rec.Provider && e.RequestID == rec.RequestID && e.SpawnID != rec.SpawnID {
-			return fmt.Errorf("idempotency conflict: provider=%s request_id=%s already bound to spawn_id=%s", rec.Provider, rec.RequestID, e.SpawnID)
+			return &IdempotencyConflictError{
+				Provider:      rec.Provider,
+				RequestID:     rec.RequestID,
+				ExistingSpawn: e.SpawnID,
+			}
 		}
 	}
 
@@ -121,7 +142,39 @@ func (s *RemoteSpawnStore) Upsert(rec RemoteSpawnRecord) error {
 		state.Records = append(state.Records, rec)
 	}
 
+	state.Records = pruneRemoteSpawnRecords(state.Records, now)
+
 	return s.writeLocked(state)
+}
+
+func (s *RemoteSpawnStore) GetByProviderRequest(provider, requestID string) (*RemoteSpawnRecord, error) {
+	provider = strings.TrimSpace(provider)
+	requestID = strings.TrimSpace(requestID)
+	if provider == "" || requestID == "" {
+		return nil, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	unlock, err := s.lockFile()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
+	state, err := s.readLocked()
+	if err != nil {
+		return nil, err
+	}
+	for i := range state.Records {
+		r := state.Records[i]
+		if r.Provider == provider && r.RequestID == requestID {
+			cp := r
+			return &cp, nil
+		}
+	}
+	return nil, nil
 }
 
 func (s *RemoteSpawnStore) GetBySpawnID(spawnID string) (*RemoteSpawnRecord, error) {
@@ -213,6 +266,11 @@ func (s *RemoteSpawnStore) writeLocked(state remoteSpawnDiskState) error {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("chmod temp remote spawn file: %w", err)
 	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("sync temp remote spawn file: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("closing temp remote spawn file: %w", err)
@@ -221,7 +279,49 @@ func (s *RemoteSpawnStore) writeLocked(state remoteSpawnDiskState) error {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("renaming remote spawn file: %w", err)
 	}
+	if err := syncDir(s.dir); err != nil {
+		return err
+	}
 	return nil
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open dir for sync: %w", err)
+	}
+	defer func() { _ = d.Close() }()
+	if err := d.Sync(); err != nil {
+		return fmt.Errorf("sync dir: %w", err)
+	}
+	return nil
+}
+
+func pruneRemoteSpawnRecords(records []RemoteSpawnRecord, now time.Time) []RemoteSpawnRecord {
+	if len(records) == 0 {
+		return records
+	}
+	kept := records[:0]
+	for _, r := range records {
+		if isTerminalRemoteSpawnState(r.State) && !r.UpdatedAt.IsZero() && now.Sub(r.UpdatedAt) > retentionTTL {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	if len(kept) <= remoteSpawnMaxRecords {
+		return kept
+	}
+
+	copyKept := append([]RemoteSpawnRecord(nil), kept...)
+	sort.Slice(copyKept, func(i, j int) bool {
+		return copyKept[i].UpdatedAt.After(copyKept[j].UpdatedAt)
+	})
+	trimmed := append([]RemoteSpawnRecord(nil), copyKept[:remoteSpawnMaxRecords]...)
+	return trimmed
+}
+
+func isTerminalRemoteSpawnState(state RemoteSpawnState) bool {
+	return state == RemoteSpawnFailed || state == RemoteSpawnTerminated
 }
 
 func (s *RemoteSpawnStore) lockFile() (func(), error) {

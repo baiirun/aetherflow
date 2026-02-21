@@ -81,6 +81,24 @@ func runSpawn(cmd *cobra.Command, args []string) {
 		promptDir = fileCfg.PromptDir
 	}
 
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider != "local" && provider != "sprites" {
+		Fatal("invalid provider %q (expected one of: local, sprites)", provider)
+	}
+
+	if provider == "sprites" {
+		if requestID == "" {
+			var err error
+			requestID, err = newRequestID()
+			if err != nil {
+				Fatal("generating request-id: %v", err)
+			}
+		}
+		spawnID := newSpawnID()
+		runSpritesSpawn(cmd, spawnID, requestID, userPrompt, jsonOutput, fileCfg)
+		return
+	}
+
 	// Phase A server-first launch path: ensure attach-based spawn command.
 	serverURL := fileCfg.ServerURL
 	if serverURL == "" {
@@ -96,14 +114,6 @@ func runSpawn(cmd *cobra.Command, args []string) {
 	// A random hex suffix expands the namespace from ~14K to ~943M
 	// combinations, making birthday-paradox collisions negligible.
 	spawnID := newSpawnID()
-	if requestID == "" {
-		requestID = newRequestID()
-	}
-
-	if strings.EqualFold(provider, "sprites") {
-		runSpritesSpawn(cmd, spawnID, requestID, userPrompt, jsonOutput, fileCfg)
-		return
-	}
 
 	// Render the spawn prompt.
 	prompt, err := daemon.RenderSpawnPrompt(promptDir, userPrompt, spawnID, solo)
@@ -134,12 +144,12 @@ func newSpawnID() string {
 	return fmt.Sprintf("spawn-%s-%x", name, suffix)
 }
 
-func newRequestID() string {
+func newRequestID() (string, error) {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
-		return "req-fallback"
+		return "", fmt.Errorf("crypto random read failed: %w", err)
 	}
-	return "req-" + hex.EncodeToString(b)
+	return "req-" + hex.EncodeToString(b), nil
 }
 
 func runSpritesSpawn(cmd *cobra.Command, spawnID, requestID, userPrompt string, jsonOutput bool, cfg daemon.Config) {
@@ -159,6 +169,21 @@ func runSpritesSpawn(cmd *cobra.Command, spawnID, requestID, userPrompt string, 
 		State:     daemon.RemoteSpawnRequested,
 	}
 	if err := store.Upsert(rec); err != nil {
+		if daemon.IsIdempotencyConflict(err) {
+			existing, lookupErr := store.GetByProviderRequest("sprites", requestID)
+			if lookupErr != nil {
+				Fatal("resolving idempotency conflict: %v", lookupErr)
+			}
+			if existing == nil {
+				Fatal("resolving idempotency conflict: existing spawn not found for request-id %q", requestID)
+			}
+			if jsonOutput {
+				_ = json.NewEncoder(os.Stdout).Encode(spawnResult{SpawnID: existing.SpawnID, PID: 0})
+				return
+			}
+			fmt.Printf("%s Reusing existing remote runtime %s for request-id %s\n", term.Bold("af spawn:"), term.Cyan(existing.SpawnID), term.Cyan(requestID))
+			return
+		}
 		Fatal("persisting remote spawn request: %v", err)
 	}
 
@@ -171,6 +196,9 @@ func runSpritesSpawn(cmd *cobra.Command, spawnID, requestID, userPrompt string, 
 	})
 	if err != nil {
 		rec.State = daemon.RemoteSpawnFailed
+		if isAmbiguousProviderCreateError(err) {
+			rec.State = daemon.RemoteSpawnUnknown
+		}
 		rec.LastError = err.Error()
 		_ = store.Upsert(rec)
 		Fatal("sprites create failed: %v", err)
@@ -179,6 +207,12 @@ func runSpritesSpawn(cmd *cobra.Command, spawnID, requestID, userPrompt string, 
 	rec.ProviderSandboxID = created.SandboxID
 	rec.ProviderOperation = created.OperationID
 	rec.ServerRef = created.AttachRef
+	if _, err := daemon.ValidateServerURLAttachTarget(rec.ServerRef); err != nil {
+		rec.State = daemon.RemoteSpawnFailed
+		rec.LastError = err.Error()
+		_ = store.Upsert(rec)
+		Fatal("sprites returned untrusted attach target: %v", err)
+	}
 	rec.State = daemon.RemoteSpawnSpawning
 	if err := store.Upsert(rec); err != nil {
 		Fatal("persisting remote spawn state: %v", err)
@@ -191,6 +225,14 @@ func runSpritesSpawn(cmd *cobra.Command, spawnID, requestID, userPrompt string, 
 
 	fmt.Printf("%s Spawned remote runtime %s on sprites\n", term.Bold("af spawn:"), term.Cyan(spawnID))
 	fmt.Printf("%s session is not ready yet; use `af session attach %s` to check readiness\n", term.Dim("note:"), spawnID)
+}
+
+func isAmbiguousProviderCreateError(err error) bool {
+	if err == nil {
+		return false
+	}
+	v := strings.ToLower(err.Error())
+	return strings.Contains(v, "timeout") || strings.Contains(v, "deadline") || strings.Contains(v, "temporary") || strings.Contains(v, "connection reset") || strings.Contains(v, "eof")
 }
 
 // buildAgentProc creates a configured exec.Cmd for the agent process.

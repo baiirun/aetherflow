@@ -23,9 +23,10 @@ type ProviderCreateRequest struct {
 
 // ProviderCreateResult is the normalized create response used by daemon flows.
 type ProviderCreateResult struct {
-	SandboxID   string
-	OperationID string
-	AttachRef   string
+	SandboxID     string
+	CanonicalName string
+	OperationID   string
+	AttachRef     string
 }
 
 // ProviderStatusResult returns normalized status and optional endpoint hints.

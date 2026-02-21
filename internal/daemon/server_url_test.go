@@ -3,8 +3,6 @@ package daemon
 import "testing"
 
 func TestValidateServerURLAttachTarget(t *testing.T) {
-	t.Parallel()
-
 	tests := []struct {
 		name  string
 		in    string
@@ -12,10 +10,13 @@ func TestValidateServerURLAttachTarget(t *testing.T) {
 	}{
 		{name: "local http localhost", in: "http://localhost:4096", valid: true},
 		{name: "local http loopback", in: "http://127.0.0.1:4096", valid: true},
-		{name: "remote https", in: "https://agent.example.com", valid: true},
+		{name: "remote https trusted default", in: "https://agent-a.sprites.app", valid: true},
+		{name: "remote https untrusted host", in: "https://agent.example.com", valid: false},
 		{name: "remote http rejected", in: "http://agent.example.com", valid: false},
 		{name: "invalid scheme", in: "ftp://example.com", valid: false},
 	}
+
+	t.Setenv(trustedAttachHostsEnv, "")
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -27,5 +28,23 @@ func TestValidateServerURLAttachTarget(t *testing.T) {
 				t.Fatalf("ValidateServerURLAttachTarget(%q) error = nil, want error", tc.in)
 			}
 		})
+	}
+}
+
+func TestValidateServerURLAttachTargetWithConfiguredTrustedHost(t *testing.T) {
+	t.Setenv(trustedAttachHostsEnv, "example.com,*.internal.example")
+
+	if _, err := ValidateServerURLAttachTarget("https://example.com"); err != nil {
+		t.Fatalf("expected configured host to be trusted, got error: %v", err)
+	}
+	if _, err := ValidateServerURLAttachTarget("https://svc.internal.example"); err != nil {
+		t.Fatalf("expected configured wildcard host to be trusted, got error: %v", err)
+	}
+}
+
+func TestIsTrustedRemoteAttachHostRejectsIP(t *testing.T) {
+	t.Setenv(trustedAttachHostsEnv, "127.0.0.1")
+	if isTrustedRemoteAttachHost("127.0.0.1") {
+		t.Fatal("expected IP literal to be rejected")
 	}
 }
