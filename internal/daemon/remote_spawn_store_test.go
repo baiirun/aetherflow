@@ -96,7 +96,7 @@ func TestPruneRemoteSpawnRecordsDropsOldTerminal(t *testing.T) {
 	}
 }
 
-func TestPruneRemoteSpawnRecordsCapsSize(t *testing.T) {
+func TestPruneRemoteSpawnRecordsNeverDropsNonTerminal(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	recs := make([]RemoteSpawnRecord, 0, remoteSpawnMaxRecords+10)
@@ -108,7 +108,45 @@ func TestPruneRemoteSpawnRecordsCapsSize(t *testing.T) {
 		})
 	}
 	got := pruneRemoteSpawnRecords(recs, now)
+	// Non-terminal records must never be pruned, even over the cap.
+	if len(got) != remoteSpawnMaxRecords+10 {
+		t.Fatalf("len(pruned) = %d, want %d (non-terminal records must not be dropped)", len(got), remoteSpawnMaxRecords+10)
+	}
+}
+
+func TestPruneRemoteSpawnRecordsCapsTerminalRecords(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	recs := make([]RemoteSpawnRecord, 0, remoteSpawnMaxRecords+20)
+	// 10 non-terminal (running) records.
+	for i := 0; i < 10; i++ {
+		recs = append(recs, RemoteSpawnRecord{
+			SpawnID:   fmt.Sprintf("running_%03d", i),
+			State:     RemoteSpawnRunning,
+			UpdatedAt: now.Add(-time.Duration(i) * time.Second),
+		})
+	}
+	// remoteSpawnMaxRecords + 10 terminal (failed) records — more than enough to exceed the cap.
+	for i := 0; i < remoteSpawnMaxRecords+10; i++ {
+		recs = append(recs, RemoteSpawnRecord{
+			SpawnID:   fmt.Sprintf("failed_%03d", i),
+			State:     RemoteSpawnFailed,
+			UpdatedAt: now.Add(-time.Duration(i) * time.Second),
+		})
+	}
+	got := pruneRemoteSpawnRecords(recs, now)
+	// Expect: all 10 running + (512 - 10) = 502 terminal = 512 total
 	if len(got) != remoteSpawnMaxRecords {
 		t.Fatalf("len(pruned) = %d, want %d", len(got), remoteSpawnMaxRecords)
+	}
+	// Verify all running records survived.
+	runningCount := 0
+	for _, r := range got {
+		if r.State == RemoteSpawnRunning {
+			runningCount++
+		}
+	}
+	if runningCount != 10 {
+		t.Fatalf("running records = %d, want 10", runningCount)
 	}
 }

@@ -301,28 +301,52 @@ func pruneRemoteSpawnRecords(records []RemoteSpawnRecord, now time.Time) []Remot
 	if len(records) == 0 {
 		return records
 	}
-	kept := records[:0]
+
+	// Partition into non-terminal (never pruned) and terminal (eligible for eviction).
+	var nonTerminal, terminal []RemoteSpawnRecord
 	for _, r := range records {
-		if isTerminalRemoteSpawnState(r.State) && !r.UpdatedAt.IsZero() && now.Sub(r.UpdatedAt) > retentionTTL {
-			continue
+		if isTerminalRemoteSpawnState(r.State) {
+			terminal = append(terminal, r)
+		} else {
+			nonTerminal = append(nonTerminal, r)
 		}
-		kept = append(kept, r)
-	}
-	if len(kept) <= remoteSpawnMaxRecords {
-		return kept
 	}
 
-	copyKept := append([]RemoteSpawnRecord(nil), kept...)
-	sort.Slice(copyKept, func(i, j int) bool {
-		return copyKept[i].UpdatedAt.After(copyKept[j].UpdatedAt)
-	})
-	trimmed := append([]RemoteSpawnRecord(nil), copyKept[:remoteSpawnMaxRecords]...)
-	return trimmed
+	// TTL-based eviction: drop terminal records older than retention window.
+	keptTerminal := terminal[:0]
+	for _, r := range terminal {
+		if !r.UpdatedAt.IsZero() && now.Sub(r.UpdatedAt) > retentionTTL {
+			continue
+		}
+		keptTerminal = append(keptTerminal, r)
+	}
+
+	// Cap-based eviction: if we're still over the limit, drop oldest terminal records.
+	total := len(nonTerminal) + len(keptTerminal)
+	if total > remoteSpawnMaxRecords && len(keptTerminal) > 0 {
+		sort.Slice(keptTerminal, func(i, j int) bool {
+			return keptTerminal[i].UpdatedAt.After(keptTerminal[j].UpdatedAt)
+		})
+		budget := remoteSpawnMaxRecords - len(nonTerminal)
+		if budget < 0 {
+			budget = 0
+		}
+		if len(keptTerminal) > budget {
+			keptTerminal = keptTerminal[:budget]
+		}
+	}
+
+	result := make([]RemoteSpawnRecord, 0, len(nonTerminal)+len(keptTerminal))
+	result = append(result, nonTerminal...)
+	result = append(result, keptTerminal...)
+	return result
 }
 
 func isTerminalRemoteSpawnState(state RemoteSpawnState) bool {
 	return state == RemoteSpawnFailed || state == RemoteSpawnTerminated
 }
+
+const fileLockTimeout = 5 * time.Second
 
 func (s *RemoteSpawnStore) lockFile() (func(), error) {
 	path := s.path + ".lock"
@@ -330,10 +354,26 @@ func (s *RemoteSpawnStore) lockFile() (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening remote spawn lock file: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("locking remote spawn store: %w", err)
+
+	deadline := time.Now().Add(fileLockTimeout)
+	backoff := 5 * time.Millisecond
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			_ = f.Close()
+			return nil, fmt.Errorf("locking remote spawn store: %w", err)
+		}
+		if time.Now().After(deadline) {
+			_ = f.Close()
+			return nil, fmt.Errorf("timed out acquiring remote spawn store lock after %s (another process may be stuck)", fileLockTimeout)
+		}
+		time.Sleep(backoff)
+		backoff = min(backoff*2, 200*time.Millisecond)
 	}
+
 	return func() {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()

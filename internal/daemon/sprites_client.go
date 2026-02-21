@@ -46,7 +46,10 @@ func (s *SpritesClient) Create(ctx context.Context, req ProviderCreateRequest) (
 	if s.token == "" {
 		return ProviderCreateResult{}, fmt.Errorf("sprites token is required")
 	}
-	name := sanitizeSpriteName(req.SpawnID)
+	name, err := sanitizeSpriteName(req.SpawnID)
+	if err != nil {
+		return ProviderCreateResult{}, fmt.Errorf("invalid spawn ID for sprite name: %w", err)
+	}
 	body, _ := json.Marshal(spritesCreateRequest{Name: name})
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/v1/sprites", bytes.NewReader(body))
 	if err != nil {
@@ -96,7 +99,10 @@ func (s *SpritesClient) GetStatus(ctx context.Context, sandboxID string) (Provid
 	if s.token == "" {
 		return ProviderStatusResult{}, fmt.Errorf("sprites token is required")
 	}
-	name := sanitizeSpriteName(sandboxID)
+	name, err := sanitizeSpriteName(sandboxID)
+	if err != nil {
+		return ProviderStatusResult{}, fmt.Errorf("invalid sandbox ID for sprite name: %w", err)
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL+"/v1/sprites/"+name, nil)
 	if err != nil {
 		return ProviderStatusResult{}, fmt.Errorf("status request: %w", err)
@@ -132,7 +138,10 @@ func (s *SpritesClient) Terminate(ctx context.Context, sandboxID string) error {
 	if s.token == "" {
 		return fmt.Errorf("sprites token is required")
 	}
-	name := sanitizeSpriteName(sandboxID)
+	name, err := sanitizeSpriteName(sandboxID)
+	if err != nil {
+		return fmt.Errorf("invalid sandbox ID for sprite name: %w", err)
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, s.baseURL+"/v1/sprites/"+name, nil)
 	if err != nil {
 		return fmt.Errorf("terminate request: %w", err)
@@ -165,12 +174,12 @@ func mapSpritesStatus(in string) ProviderRuntimeStatus {
 	}
 }
 
-func sanitizeSpriteName(v string) string {
+func sanitizeSpriteName(v string) (string, error) {
 	v = strings.ToLower(strings.TrimSpace(v))
 	v = strings.ReplaceAll(v, "_", "-")
 	v = strings.ReplaceAll(v, " ", "-")
 	if v == "" {
-		return "sprite"
+		return "", fmt.Errorf("sprite name is required but was empty")
 	}
-	return v
+	return v, nil
 }
