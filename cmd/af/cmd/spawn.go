@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -190,7 +192,7 @@ func runSpritesSpawn(cmd *cobra.Command, spawnID, requestID, userPrompt string, 
 				Fatal("resolving idempotency conflict: existing spawn not found for request-id %q", requestID)
 			}
 			if jsonOutput {
-				_ = json.NewEncoder(os.Stdout).Encode(spawnResult{SpawnID: existing.SpawnID, PID: 0})
+				_ = json.NewEncoder(os.Stdout).Encode(spawnResult{Success: true, SpawnID: existing.SpawnID, PID: 0})
 				return
 			}
 			fmt.Printf("%s Reusing existing remote runtime %s for request-id %s\n", term.Bold("af spawn:"), term.Cyan(existing.SpawnID), term.Cyan(requestID))
@@ -243,7 +245,7 @@ func runSpritesSpawn(cmd *cobra.Command, spawnID, requestID, userPrompt string, 
 	}
 
 	if jsonOutput {
-		_ = json.NewEncoder(os.Stdout).Encode(spawnResult{SpawnID: spawnID, PID: 0})
+		_ = json.NewEncoder(os.Stdout).Encode(spawnResult{Success: true, SpawnID: spawnID, PID: 0})
 		return
 	}
 
@@ -251,12 +253,29 @@ func runSpritesSpawn(cmd *cobra.Command, spawnID, requestID, userPrompt string, 
 	fmt.Printf("%s session is not ready yet; use `af session attach %s` to check readiness\n", term.Dim("note:"), spawnID)
 }
 
+// isAmbiguousProviderCreateError returns true when the HTTP call outcome
+// is indeterminate — the request may or may not have been processed.
+// Uses Go's typed error interfaces (net.Error.Timeout, net.Error.Temporary)
+// rather than string matching, so new transports or error messages don't
+// silently change classification.
 func isAmbiguousProviderCreateError(err error) bool {
 	if err == nil {
 		return false
 	}
-	v := strings.ToLower(err.Error())
-	return strings.Contains(v, "timeout") || strings.Contains(v, "deadline") || strings.Contains(v, "temporary") || strings.Contains(v, "connection reset") || strings.Contains(v, "eof")
+	// Context deadline / cancellation — request may have reached the server.
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	// Net-level timeout or temporary error (includes TCP resets, DNS transient).
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout()
+	}
+	// Unexpected EOF during response read — server may have acted.
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	return false
 }
 
 // buildAgentProc creates a configured exec.Cmd for the agent process.
@@ -312,6 +331,7 @@ func isConnectionRefused(err error) bool {
 
 // spawnResult is the JSON output for --json mode.
 type spawnResult struct {
+	Success bool   `json:"success"`
 	SpawnID string `json:"spawn_id"`
 	PID     int    `json:"pid"`
 }
@@ -358,6 +378,7 @@ func runForeground(spawnID, userPrompt, spawnCmd, prompt, socketPath string, jso
 
 	if jsonOutput {
 		_ = json.NewEncoder(os.Stdout).Encode(spawnResult{
+			Success: true,
 			SpawnID: spawnID,
 			PID:     proc.Process.Pid,
 		})
@@ -414,6 +435,7 @@ func runDetached(spawnID, userPrompt, spawnCmd, prompt, socketPath string, jsonO
 
 	if jsonOutput {
 		_ = json.NewEncoder(os.Stdout).Encode(spawnResult{
+			Success: true,
 			SpawnID: spawnID,
 			PID:     proc.Process.Pid,
 		})

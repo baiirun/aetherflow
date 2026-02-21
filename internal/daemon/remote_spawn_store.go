@@ -297,6 +297,9 @@ func syncDir(dir string) error {
 	return nil
 }
 
+// pruneRemoteSpawnRecords evicts terminal records to keep store size bounded.
+// Uses the shared retentionTTL (48h, defined in pool.go) so all daemon data
+// expires on the same cadence. Non-terminal records are never pruned.
 func pruneRemoteSpawnRecords(records []RemoteSpawnRecord, now time.Time) []RemoteSpawnRecord {
 	if len(records) == 0 {
 		return records
