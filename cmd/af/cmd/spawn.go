@@ -3,8 +3,11 @@ package cmd
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -47,6 +50,8 @@ func init() {
 	f.Bool("solo", false, "Solo mode: agent merges to main instead of creating a PR")
 	f.String("spawn-cmd", daemon.DefaultSpawnCmd, "Command to launch the agent session")
 	f.String("prompt-dir", "", "Override embedded prompts with files from this directory")
+	f.String("provider", "local", "Spawn provider: local or sprites")
+	f.String("request-id", "", "Optional idempotency key for provider-backed spawns")
 }
 
 func runSpawn(cmd *cobra.Command, args []string) {
@@ -55,6 +60,8 @@ func runSpawn(cmd *cobra.Command, args []string) {
 	detach, _ := cmd.Flags().GetBool("detach")
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 	solo, _ := cmd.Flags().GetBool("solo")
+	provider, _ := cmd.Flags().GetString("provider")
+	requestID, _ := cmd.Flags().GetString("request-id")
 	spawnCmd, _ := cmd.Flags().GetString("spawn-cmd")
 	promptDir, _ := cmd.Flags().GetString("prompt-dir")
 
@@ -74,6 +81,24 @@ func runSpawn(cmd *cobra.Command, args []string) {
 	}
 	if !cmd.Flags().Changed("prompt-dir") && fileCfg.PromptDir != "" {
 		promptDir = fileCfg.PromptDir
+	}
+
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider != "local" && provider != "sprites" {
+		Fatal("invalid provider %q (expected one of: local, sprites)", provider)
+	}
+
+	if provider == "sprites" {
+		if requestID == "" {
+			var err error
+			requestID, err = newRequestID()
+			if err != nil {
+				Fatal("generating request-id: %v", err)
+			}
+		}
+		spawnID := newSpawnID()
+		runSpritesSpawn(cmd, spawnID, requestID, userPrompt, jsonOutput, fileCfg)
+		return
 	}
 
 	// Phase A server-first launch path: ensure attach-based spawn command.
@@ -119,6 +144,138 @@ func newSpawnID() string {
 		return "spawn-" + name
 	}
 	return fmt.Sprintf("spawn-%s-%x", name, suffix)
+}
+
+func newRequestID() (string, error) {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("crypto random read failed: %w", err)
+	}
+	return "req-" + hex.EncodeToString(b), nil
+}
+
+func runSpritesSpawn(cmd *cobra.Command, spawnID, requestID, userPrompt string, jsonOutput bool, cfg daemon.Config) {
+	token := strings.TrimSpace(os.Getenv("SPRITES_TOKEN"))
+	if token == "" {
+		if jsonOutput {
+			fatalSpawnJSON("MISSING_TOKEN", spawnID, fmt.Errorf("sprites provider requires SPRITES_TOKEN"))
+		}
+		Fatal("sprites provider requires SPRITES_TOKEN")
+	}
+
+	store, err := daemon.OpenRemoteSpawnStore(cfg.SessionDir)
+	if err != nil {
+		if jsonOutput {
+			fatalSpawnJSON("STORE_ERROR", spawnID, fmt.Errorf("opening remote spawn store: %w", err))
+		}
+		Fatal("opening remote spawn store: %v", err)
+	}
+	rec := daemon.RemoteSpawnRecord{
+		SpawnID:   spawnID,
+		Provider:  "sprites",
+		RequestID: requestID,
+		State:     daemon.RemoteSpawnRequested,
+	}
+	if err := store.Upsert(rec); err != nil {
+		if daemon.IsIdempotencyConflict(err) {
+			existing, lookupErr := store.GetByProviderRequest("sprites", requestID)
+			if lookupErr != nil {
+				if jsonOutput {
+					fatalSpawnJSON("IDEMPOTENCY_LOOKUP_ERROR", spawnID, fmt.Errorf("resolving idempotency conflict: %w", lookupErr))
+				}
+				Fatal("resolving idempotency conflict: %v", lookupErr)
+			}
+			if existing == nil {
+				if jsonOutput {
+					fatalSpawnJSON("IDEMPOTENCY_LOOKUP_ERROR", spawnID, fmt.Errorf("existing spawn not found for request-id %q", requestID))
+				}
+				Fatal("resolving idempotency conflict: existing spawn not found for request-id %q", requestID)
+			}
+			if jsonOutput {
+				_ = json.NewEncoder(os.Stdout).Encode(spawnResult{Success: true, SpawnID: existing.SpawnID, PID: 0})
+				return
+			}
+			fmt.Printf("%s Reusing existing remote runtime %s for request-id %s\n", term.Bold("af spawn:"), term.Cyan(existing.SpawnID), term.Cyan(requestID))
+			return
+		}
+		if jsonOutput {
+			fatalSpawnJSON("STORE_ERROR", spawnID, fmt.Errorf("persisting remote spawn request: %w", err))
+		}
+		Fatal("persisting remote spawn request: %v", err)
+	}
+
+	client := daemon.NewSpritesClient(token)
+	created, err := client.Create(cmd.Context(), daemon.ProviderCreateRequest{
+		SpawnID:   spawnID,
+		RequestID: requestID,
+		Project:   cfg.Project,
+		Prompt:    userPrompt,
+	})
+	if err != nil {
+		rec.State = daemon.RemoteSpawnFailed
+		if isAmbiguousProviderCreateError(err) {
+			rec.State = daemon.RemoteSpawnUnknown
+		}
+		rec.LastError = err.Error()
+		_ = store.Upsert(rec)
+		if jsonOutput {
+			fatalSpawnJSON("PROVIDER_CREATE_ERROR", spawnID, fmt.Errorf("sprites create failed: %w", err))
+		}
+		Fatal("sprites create failed: %v", err)
+	}
+
+	rec.ProviderSandboxID = created.SandboxID
+	rec.ProviderOperation = created.OperationID
+	rec.ServerRef = created.AttachRef
+	if _, err := daemon.ValidateServerURLAttachTarget(rec.ServerRef); err != nil {
+		rec.State = daemon.RemoteSpawnFailed
+		rec.LastError = err.Error()
+		_ = store.Upsert(rec)
+		if jsonOutput {
+			fatalSpawnJSON("UNTRUSTED_ATTACH_TARGET", spawnID, fmt.Errorf("sprites returned untrusted attach target: %w", err))
+		}
+		Fatal("sprites returned untrusted attach target: %v", err)
+	}
+	rec.State = daemon.RemoteSpawnSpawning
+	if err := store.Upsert(rec); err != nil {
+		if jsonOutput {
+			fatalSpawnJSON("STORE_ERROR", spawnID, fmt.Errorf("persisting remote spawn state: %w", err))
+		}
+		Fatal("persisting remote spawn state: %v", err)
+	}
+
+	if jsonOutput {
+		_ = json.NewEncoder(os.Stdout).Encode(spawnResult{Success: true, SpawnID: spawnID, PID: 0})
+		return
+	}
+
+	fmt.Printf("%s Spawned remote runtime %s on sprites\n", term.Bold("af spawn:"), term.Cyan(spawnID))
+	fmt.Printf("%s session is not ready yet; use `af session attach %s` to check readiness\n", term.Dim("note:"), spawnID)
+}
+
+// isAmbiguousProviderCreateError returns true when the HTTP call outcome
+// is indeterminate — the request may or may not have been processed.
+// Uses Go's typed error interfaces (net.Error.Timeout, net.Error.Temporary)
+// rather than string matching, so new transports or error messages don't
+// silently change classification.
+func isAmbiguousProviderCreateError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Context deadline / cancellation — request may have reached the server.
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	// Net-level timeout or temporary error (includes TCP resets, DNS transient).
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout()
+	}
+	// Unexpected EOF during response read — server may have acted.
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	return false
 }
 
 // buildAgentProc creates a configured exec.Cmd for the agent process.
@@ -174,8 +331,29 @@ func isConnectionRefused(err error) bool {
 
 // spawnResult is the JSON output for --json mode.
 type spawnResult struct {
+	Success bool   `json:"success"`
 	SpawnID string `json:"spawn_id"`
 	PID     int    `json:"pid"`
+}
+
+// spawnErrorResult is the JSON error output for --json mode.
+type spawnErrorResult struct {
+	Success bool   `json:"success"`
+	Code    string `json:"code"`
+	SpawnID string `json:"spawn_id,omitempty"`
+	Error   string `json:"error"`
+}
+
+// fatalSpawnJSON emits a structured JSON error to stdout and exits.
+// Use instead of Fatal() when jsonOutput is true.
+func fatalSpawnJSON(code, spawnID string, err error) {
+	_ = json.NewEncoder(os.Stdout).Encode(spawnErrorResult{
+		Success: false,
+		Code:    code,
+		SpawnID: spawnID,
+		Error:   err.Error(),
+	})
+	os.Exit(1)
 }
 
 // runForeground launches the agent in the current terminal.
@@ -200,6 +378,7 @@ func runForeground(spawnID, userPrompt, spawnCmd, prompt, socketPath string, jso
 
 	if jsonOutput {
 		_ = json.NewEncoder(os.Stdout).Encode(spawnResult{
+			Success: true,
 			SpawnID: spawnID,
 			PID:     proc.Process.Pid,
 		})
@@ -256,6 +435,7 @@ func runDetached(spawnID, userPrompt, spawnCmd, prompt, socketPath string, jsonO
 
 	if jsonOutput {
 		_ = json.NewEncoder(os.Stdout).Encode(spawnResult{
+			Success: true,
 			SpawnID: spawnID,
 			PID:     proc.Process.Pid,
 		})

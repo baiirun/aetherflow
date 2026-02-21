@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/baiirun/aetherflow/internal/daemon"
 	"github.com/baiirun/aetherflow/internal/sessions"
 )
 
@@ -127,6 +128,47 @@ func TestShouldEnrichSessionTitle(t *testing.T) {
 	for _, tt := range tests {
 		if got := shouldEnrichSessionTitle(tt.title); got != tt.want {
 			t.Fatalf("shouldEnrichSessionTitle(%q) = %v, want %v", tt.title, got, tt.want)
+		}
+	}
+}
+
+func TestIsRemoteSpawnPending(t *testing.T) {
+	tests := []struct {
+		state daemon.RemoteSpawnState
+		want  bool
+	}{
+		{state: daemon.RemoteSpawnRequested, want: true},
+		{state: daemon.RemoteSpawnSpawning, want: true},
+		{state: daemon.RemoteSpawnUnknown, want: true},
+		{state: daemon.RemoteSpawnFailed, want: false},
+		{state: daemon.RemoteSpawnTerminated, want: false},
+		{state: daemon.RemoteSpawnRunning, want: false},
+	}
+
+	for _, tc := range tests {
+		rec := &daemon.RemoteSpawnRecord{State: tc.state}
+		if got := isRemoteSpawnPending(rec); got != tc.want {
+			t.Fatalf("isRemoteSpawnPending(%q) = %v, want %v", tc.state, got, tc.want)
+		}
+	}
+}
+
+func TestIsRemoteSpawnTerminal(t *testing.T) {
+	tests := []struct {
+		state daemon.RemoteSpawnState
+		want  bool
+	}{
+		{state: daemon.RemoteSpawnFailed, want: true},
+		{state: daemon.RemoteSpawnTerminated, want: true},
+		{state: daemon.RemoteSpawnRequested, want: false},
+		{state: daemon.RemoteSpawnSpawning, want: false},
+		{state: daemon.RemoteSpawnUnknown, want: false},
+	}
+
+	for _, tc := range tests {
+		rec := &daemon.RemoteSpawnRecord{State: tc.state}
+		if got := isRemoteSpawnTerminal(rec); got != tc.want {
+			t.Fatalf("isRemoteSpawnTerminal(%q) = %v, want %v", tc.state, got, tc.want)
 		}
 	}
 }
