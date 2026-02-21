@@ -2,6 +2,7 @@
 title: "feat: sprites-first remote agent spawn with session attach"
 type: feat
 date: 2026-02-20
+updated: 2026-02-21
 brainstorm: docs/brainstorms/2026-02-20-remote-sandbox-spawn-brainstorm.md
 ---
 
@@ -37,7 +38,7 @@ Without a minimal remote spawn path, users cannot:
 Add a Sprites-specific MVP flow with strict boundaries:
 
 1. `af spawn --provider sprites ...` (or equivalent config-driven mode) requests a remote Sprite and starts agent execution there.
-2. Aetherflow persists spawn/session routing metadata in local registry/state.
+2. Aetherflow persists spawn/session routing metadata in the daemon's registry.
 3. `af sessions` and `af session attach <session-id>` continue to work, now including Sprites-backed sessions.
 4. All non-core follow-up interactions (advanced networking, deep logs, custom control) remain provider-native via Sprites CLI/API.
 
@@ -70,12 +71,65 @@ Add a Sprites-specific MVP flow with strict boundaries:
   - Sprites credentials should be sourced securely (env/OS keychain path), never logged, and redacted in status/errors.
 - **Correctness**
   - Spawn must be idempotent to avoid duplicate remote environments on retries.
-  - Local/remote state divergence must converge via reconcile loop.
+  - Session discovery relies on the plugin event pipeline reaching the daemon over HTTP.
 - **Observability**
   - Attach lifecycle should emit consistent start/end events with `request_id`, `provider`, `sandbox_id`, `session_id`, status, and duration.
 - **Compatibility**
   - Existing non-remote spawn path must remain intact.
   - Existing `af session attach` UX should remain unchanged for end users.
+
+## Daemon Transport (updated 2026-02-21)
+
+### Design decision: HTTP replaces Unix socket
+
+The daemon's RPC transport is migrating from Unix socket to HTTP. This is a prerequisite for remote spawn support — the `aetherflow-events` plugin running inside a remote sprite needs to POST events back to the daemon, which is impossible over a Unix socket.
+
+Key decisions:
+
+- **HTTP is the primary and only transport.** The Unix socket is removed, not kept alongside.
+- **No auth for MVP.** Bearer token auth will be added later. For now, rely on network isolation (localhost binding).
+- **Daemon is a server that can eventually run anywhere** — locally, on a VPS, in the cloud. This is the foundation for a centralized coordination service, not just a local process.
+- **Streaming via polling for now.** `af logs -f` currently polls `events.list` every 500ms. This pattern works over HTTP unchanged. SSE (server-sent events) can be added later as an optimization for push-based streaming.
+
+### What changes
+
+| Component | Before (Unix socket) | After (HTTP) |
+|---|---|---|
+| Daemon listener | `net.Listen("unix", path)` | `net/http` server on `localhost:port` |
+| Plugin transport | `net.createConnection(socketPath)` + raw JSON | `fetch(daemonURL + "/session/event", { method: "POST" })` |
+| Plugin discovery | `AETHERFLOW_SOCKET` env var | `AETHERFLOW_URL` env var (e.g. `http://localhost:7070`) |
+| CLI client | `net.Dial("unix", path)` + raw JSON | `http.Client` to daemon URL |
+| CLI discovery | Socket path from project/config | Daemon URL from config or `AETHERFLOW_URL` |
+| Auth | Filesystem permissions (0700) | None for MVP; bearer token later |
+| Protocol | Newline-delimited JSON over stream | Standard HTTP request/response with JSON bodies |
+
+### RPC method → HTTP endpoint mapping
+
+| Current RPC method | HTTP endpoint | Method |
+|---|---|---|
+| `session.event` | `POST /api/v1/events` | POST |
+| `events.list` | `GET /api/v1/events?session_id=X&after=T` | GET |
+| `status.full` | `GET /api/v1/status` | GET |
+| `status.agent` | `GET /api/v1/status/agents/:id` | GET |
+| `pool.drain` | `POST /api/v1/pool/drain` | POST |
+| `pool.pause` | `POST /api/v1/pool/pause` | POST |
+| `pool.resume` | `POST /api/v1/pool/resume` | POST |
+| `spawn.register` | `POST /api/v1/spawns` | POST |
+| `spawn.deregister` | `DELETE /api/v1/spawns/:id` | DELETE |
+| `shutdown` | `POST /api/v1/shutdown` | POST |
+
+### Session discovery via plugin events over HTTP
+
+Session discovery does not require a reconcile loop or polling. The existing `claimSession` mechanism works unchanged — the only difference is transport:
+
+1. Daemon starts agent on a sprite (via Sprites API).
+2. Agent starts an opencode session on the sprite.
+3. The `aetherflow-events` plugin inside that opencode session fires a `session.created` event.
+4. Plugin POSTs the event to the daemon at `AETHERFLOW_URL` (instead of writing to `AETHERFLOW_SOCKET`).
+5. Daemon's `claimSession` correlates the `session_id` to the unclaimed spawn, same as local.
+6. Spawn record transitions from `spawning` → `running` with `session_id` bound.
+
+This means the plugin needs two changes: support `AETHERFLOW_URL` as an alternative to `AETHERFLOW_SOCKET`, and use HTTP POST instead of raw socket write when `AETHERFLOW_URL` is set.
 
 ## Operational Contracts (MVP)
 
@@ -101,8 +155,13 @@ af spawn --provider sprites "prompt"
 af session attach spn_123
 -> pending: session not attachable yet (exit 3)
 
+[plugin event arrives via HTTP: session_id=ses_abc bound to spn_123]
+
+af session attach spn_123
+-> attaches normally (exit 0)
+
 af session attach ses_abc
--> attaches normally once running (exit 0)
+-> attaches normally (exit 0)
 ```
 
 ### Spawn/attach state machine
@@ -156,7 +215,7 @@ JSON contract for non-ready attach:
 
 - Every provider create request must include both `spawn_id` and `request_id` as runtime tags/metadata.
 - Event/session correlation must require one of: exact `spawn_id` tag match, exact `request_id` match.
-- If neither correlation key is present, session remains unbound and reconcile continues; never bind by heuristic timestamp/title matching.
+- If neither correlation key is present, session remains unbound; never bind by heuristic timestamp/title matching.
 
 ### Retry/backoff policy
 
@@ -175,10 +234,11 @@ JSON contract for non-ready attach:
 
 ### Session discovery contract
 
-- Session discovery starts immediately after provider runtime create success.
-- Discovery sources in order: plugin event mapping, then provider/endpoint attach probe.
-- Discovery poll interval: 5 seconds, max discovery window: 120 seconds.
-- If `session_id` is not discovered within window, transition to `unknown` and hand off to reconcile.
+- Session discovery relies on the plugin event pipeline over HTTP.
+- When the opencode session starts on the sprite, the plugin POSTs `session.created` to the daemon.
+- The daemon's `claimSession` binds the `session_id` to the unclaimed spawn record.
+- No polling or reconcile loop is needed for session discovery — it is event-driven.
+- If `session_id` is not discovered (plugin unreachable, event lost), the spawn stays in `spawning` and the user sees `SESSION_NOT_READY` on attach.
 
 ### Error code taxonomy (MVP)
 
@@ -189,25 +249,6 @@ JSON contract for non-ready attach:
 - `ATTACH_AUTH_EXPIRED`
 - `PROVIDER_RATE_LIMITED`
 - `PROVIDER_UNAVAILABLE`
-- `RECONCILE_TIMEOUT`
-
-### Reconcile conflict policy
-
-Provider state is authoritative for runtime existence/status. Local state is authoritative for Aetherflow routing metadata and history.
-
-Field-level precedence in reconcile:
-
-- Provider-authoritative: `provider_sandbox_id`, remote runtime status.
-- Local-authoritative: `request_id`, local timestamps, audit/event history.
-- Session mapping: if provider reports runtime alive and local has no `session_id`, keep `unknown` and continue session discovery; do not create duplicate spawn.
-- Reconcile cadence: every 10 seconds for non-terminal records, with max reconcile window of 120 seconds (`T_RECONCILE_TIMEOUT`) before deterministic `unknown -> failed(RECONCILE_TIMEOUT)` transition.
-
-### Orphan runtime policy
-
-- Orphan detection condition: provider runtime exists, local record missing or terminal.
-- Rebind policy (default): if runtime has matching `request_id` tag/metadata, recreate local record in `unknown` and continue reconcile.
-- Fallback policy: if no trustworthy linkage metadata exists after one reconcile cycle, mark as `orphan_unlinked` and print explicit cleanup command for operator.
-- Never auto-create a second runtime while orphan state is unresolved.
 
 ### Trust policy defaults
 
@@ -232,12 +273,12 @@ Examples of default rejections:
 
 ```mermaid
 flowchart LR
-  U[af CLI] --> D[daemon RPC]
+  U[af CLI] -->|HTTP| D[daemon HTTP API]
   D --> P[Sprites API]
   P --> S[Sprite Runtime]
   S --> O[OpenCode Session]
   O --> E[aetherflow-events plugin]
-  E --> D
+  E -->|HTTP POST| D
   D --> R[session registry + spawn metadata store]
   U --> A[af session attach]
   A --> O
@@ -255,7 +296,7 @@ Persist minimal remote spawn metadata (new or extended store), keyed by spawn/re
 - `session_id` (once known)
 - `request_id` (idempotency key)
 - `state` (`requested|spawning|running|failed|terminated|unknown`)
-- `created_at`, `updated_at`, `last_reconciled_at`
+- `created_at`, `updated_at`
 - `last_error` (redacted)
 
 Store schema/versioning:
@@ -270,7 +311,7 @@ Store schema/versioning:
 - `sessions/store` remains source of truth for session discovery/listing metadata consumed by `af sessions`.
 - Writer ownership:
   - spawn path writes `remote_spawn_store`.
-  - session discovery/reconcile writes `session_id` mapping in both stores.
+  - session discovery (via plugin event → `claimSession`) writes `session_id` mapping in both stores.
   - `af sessions` is read-only over both stores and must not mutate lifecycle state.
 
 Session status mapping for CLI:
@@ -281,58 +322,72 @@ Session status mapping for CLI:
 
 Provider boundary:
 
-- Define a narrow internal provider interface for daemon orchestration:
-  - `Create(ctx, req) -> provider_sandbox_id, provider_operation_id`
-  - `GetStatus(ctx, provider_sandbox_id) -> runtime_status`
-  - `Terminate(ctx, provider_sandbox_id) -> result`
-- Normalize provider errors at boundary into internal codes from the MVP taxonomy.
+- `SpritesClient` is a concrete Sprites API client used by the spawn command.
+- No provider interface — there is only one provider (Sprites) and we don't abstract what doesn't vary.
+- If a second provider is added later, extract an interface then.
 
 ## Implementation Plan
 
-### Phase 1: Sprites spawn contract and config
+### Phase 1: Sprites spawn contract and config ✅ DONE
 
 - Add Sprites MVP config surface and credential loading with secure defaults.
 - Add explicit provider selection for spawn (`sprites` only in MVP).
 - Add strict validation for provider config and remote endpoints.
 - Add spawn metadata store schema v1 and migration checks.
 
-Suggested implementation files:
+Implemented in:
 
-- `internal/daemon/config.go`
 - `cmd/af/cmd/spawn.go`
 - `internal/daemon/server_url.go`
-- `internal/daemon/provider.go` (new, narrow provider interface)
-- `internal/daemon/sprites_client.go` (new)
+- `internal/daemon/provider.go` (data types only — no interface needed)
+- `internal/daemon/sprites_client.go`
 
-### Phase 2: Spawn state machine + persistence
+### Phase 2: Spawn state machine + persistence ✅ DONE
 
 - Implement idempotent spawn request with `request_id`.
 - Persist remote spawn metadata and transition states deterministically.
-- Wire session capture/registry updates when session becomes available.
 - Enforce idempotency conflict behavior for same key + different payload.
+
+Implemented in:
+
+- `cmd/af/cmd/spawn.go`
+- `internal/daemon/remote_spawn_store.go`
+
+### Phase 3: Daemon HTTP transport
+
+Migrate the daemon from Unix socket RPC to an HTTP API. This is the prerequisite for remote session discovery — the plugin on a sprite needs to reach the daemon over the network.
+
+- Replace `net.Listen("unix")` with `net/http` server.
+- Map existing RPC methods to REST endpoints (see endpoint table above).
+- Migrate CLI client from raw socket to `http.Client`.
+- Migrate plugin from `net.createConnection(socket)` to `fetch(url)`.
+- Update daemon config: replace `SocketPath` with `ListenAddr` (e.g. `:7070`).
+- Update `AETHERFLOW_SOCKET` env var to `AETHERFLOW_URL`.
+- Keep the same request/response JSON shapes where possible to minimize churn.
 
 Suggested implementation files:
 
-- `internal/daemon/spawn_rpc.go`
-- `internal/daemon/pool.go`
-- `internal/sessions/store.go`
-- `internal/daemon/remote_spawn_store.go` (new)
+- `internal/daemon/daemon.go` (listener, connection handling → http.Server)
+- `internal/daemon/http.go` (new — HTTP handler/router)
+- `internal/daemon/config.go` (SocketPath → ListenAddr)
+- `internal/client/client.go` (Unix dial → http.Client)
+- `internal/install/plugins/aetherflow-events.ts` (socket → fetch)
+- `cmd/af/cmd/root.go` (socket path resolution → URL resolution)
 
-### Phase 3: Attach/reconcile/failure handling
+### Phase 4: Attach + session discovery over HTTP
+
+Wire `af session attach` for Sprites-backed sessions and enable session discovery through the HTTP event pipeline.
 
 - Ensure `af sessions` and `af session attach` include Sprites-backed sessions.
-- Add reconcile pass for uncertain/partial states after restart.
-- Add retry policy for retryable provider failures with bounded backoff+jitter.
+- `claimSession` works unchanged — plugin events now arrive over HTTP instead of Unix socket.
 - Define deterministic attach output for `requested|spawning|unknown` states (human + JSON modes).
-- Enforce attach auth/transport contract and stable error taxonomy.
 
 Suggested implementation files:
 
 - `cmd/af/cmd/sessions.go`
-- `internal/daemon/reconcile.go`
-- `internal/daemon/daemon.go`
+- `internal/daemon/event_rpc.go` (adapt to HTTP handler)
 
-### Phase 4: Observability + docs
+### Phase 5: Observability + docs
 
 - Add structured lifecycle logs/metrics and clear CLI error messages.
 - Update README/docs for Sprites-first remote spawn usage and escape hatches.
@@ -341,7 +396,6 @@ Suggested implementation files:
 
 - `cmd/af/cmd/logs.go`
 - `README.md`
-- `docs/research/2026-02-20-tech-deep-dive-agent-sandbox-platforms.md` (cross-link only)
 
 ## Acceptance Criteria
 
@@ -354,38 +408,38 @@ Suggested implementation files:
 - [ ] Users can still use Sprites-native CLI/API directly without Aetherflow interference.
 - [x] `af session attach` returns deterministic pending/unknown response for non-attachable states and never silently succeeds/fails.
 
+### Transport
+
+- [ ] Daemon listens on HTTP instead of Unix socket.
+- [ ] CLI communicates with daemon over HTTP.
+- [ ] Plugin sends events to daemon over HTTP (supports `AETHERFLOW_URL`).
+- [ ] Session discovery works for remote spawns via plugin HTTP events.
+
 ### Security / Trust
 
 - [ ] Only trusted remote endpoint patterns are accepted by default; insecure endpoints are rejected with actionable errors.
 - [ ] Sprites token values are never printed in logs, status output, or error chains.
 - [ ] TLS hostname and certificate validation failures are surfaced with stable error categories.
 - [ ] Private/link-local endpoint targets are rejected by default unless explicitly allowlisted.
-- [ ] Attach auth failures for missing/expired credentials surface deterministic codes and exit behavior.
 
 ### Resilience / Correctness
 
 - [x] Duplicate spawn submissions with same idempotency key do not create duplicate remote runtimes.
 - [ ] Same idempotency key with different payload fails fast with conflict and creates no runtime.
-- [ ] If daemon restarts mid-spawn, reconcile restores a consistent local state within 120 seconds.
 - [ ] Partial failure paths (remote success/local persist failure and inverse) converge to one terminal state.
 - [ ] Concurrent spawn attempts for the same logical request converge to one runtime + one canonical record.
-- [ ] Orphaned remote runtime recovery path is deterministic (rebind when linked, else explicit operator cleanup path; never duplicate).
-- [ ] Session discovery either maps `session_id` within 120 seconds or transitions through `unknown` to deterministic timeout handling.
 
 ### Quality Gates
 
-- [ ] Add integration tests for happy path, auth failure, timeout/retry, and restart recovery.
+- [ ] Add integration tests for happy path, auth failure, and timeout/retry.
 - [ ] Add regression tests for existing local spawn/session flows.
-- [ ] Add explicit integration tests for duplicate-race, drift reconcile after provider-side mutation, and restart-mid-spawn.
 - [ ] Add JSON contract tests for `af sessions` and `af session attach` pending/unknown/error states.
-- [ ] Add migration compatibility tests for spawn metadata store schema v1.
 
 ## Success Metrics
 
 - Spawn success rate (Sprites) >= 95% in staging verification runs.
 - Attach success rate for Sprites-backed sessions.
 - Duplicate spawn rate (should approach zero with idempotency).
-- Mean time to reconcile uncertain states after restart <= 120 seconds.
 - No security regression in endpoint/token handling.
 
 ## Dependencies & Risks
@@ -401,25 +455,15 @@ Suggested implementation files:
 - **Cost/resource leaks:** failed local persistence after remote spawn can leak remote sandboxes.
 - **State divergence:** users using provider-native escape hatches can drift local metadata.
 - **API drift:** provider API changes can break spawn assumptions.
-- **Ambiguous retry semantics:** inconsistent retry classification can create duplicates or hidden failures.
+- **Plugin unreachability:** if the plugin on a sprite can't reach the daemon over HTTP, session discovery fails silently and the spawn stays in `spawning`.
 
 ## Risk Mitigation
 
 - Strict trust policy defaults with explicit opt-ins for any non-standard behavior.
-- Reconcile loop as source-of-truth healer for uncertain states.
 - Idempotency key and deterministic state transitions.
 - Redaction checks in tests for credentials/errors.
 - Explicit retry matrix and `Retry-After` handling tests.
-
-## SpecFlow Gaps Resolved in This Plan
-
-This plan explicitly addresses the main gaps identified by spec analysis:
-
-- Spawn/attach state model defined.
-- Idempotency and reconciliation called out as MVP requirements.
-- Security acceptance criteria added for remote trust policy.
-- Failure-path criteria included (auth, timeout, partial failure, restart).
-- Added concrete contracts for idempotency, retries, reconcile precedence, and pending attach behavior.
+- Plugin retry with backoff for HTTP event delivery failures.
 
 ## References
 

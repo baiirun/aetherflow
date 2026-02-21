@@ -29,13 +29,25 @@ This keeps Aetherflow focused on orchestration entrypoint, while preserving user
 - **End-state direction remains BYO infra:** Long-term goal is allowing users to bring their own provider without AF forcing one platform.
 - **MVP provider choice:** Start with Sprites as the first remote sandbox provider.
 
+## Daemon Transport Decisions (2026-02-21)
+
+During implementation, we discovered the daemon transport is a prerequisite for remote spawn support. The plugin on a remote sprite can't reach a Unix socket on the user's machine.
+
+Key decisions:
+
+- **HTTP replaces Unix socket entirely.** One transport, not two. Local and remote use the same protocol.
+- **No auth for MVP.** Bearer token comes later. Rely on localhost binding for now.
+- **Daemon is eventually a hosted service.** Not just a local process — it's a centralized coordination point that sprites, CLIs, and agents all talk to.
+- **No reconcile loop needed.** Session discovery works through plugin events over HTTP. The existing `claimSession` mechanism works unchanged — only the transport changes.
+- **Polling for log streaming for now.** `af logs -f` polls every 500ms. SSE can be added later as an optimization.
+- **No provider interface.** `SpritesClient` is concrete. Extract an interface only when a second provider is added.
+
 ## Open Questions
 
-- What minimum spawn metadata should AF persist (provider id, sandbox id, session id, preview URL, ports)?
-- Should AF include a generic passthrough command for provider CLI/API calls, or remain fully hands-off after spawn?
-- What baseline security model is required for credentials and remote endpoints in config?
 - What objective criteria should trigger adding a second provider after Sprites (cost, reliability, feature gaps)?
+- When should bearer token auth be added to the daemon HTTP API?
+- Should the daemon URL be user-configurable or auto-discovered?
 
 ## Next Steps
 
--> `/workflows:plan` to define the implementation path for spawn-only remote orchestration.
+-> Plan updated: `docs/plans/2026-02-20-feat-sprites-first-remote-agent-spawn-plan.md`
