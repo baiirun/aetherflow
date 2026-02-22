@@ -2,63 +2,104 @@
 package client
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"net"
+	"io"
+	"net/http"
 	"time"
 
 	"github.com/baiirun/aetherflow/internal/protocol"
 )
 
-// Client communicates with the aetherd daemon.
+// Client communicates with the aetherd daemon over HTTP.
 type Client struct {
-	socketPath string
+	baseURL    string
+	httpClient *http.Client
 }
 
-// New creates a new client.
-func New(socketPath string) *Client {
-	if socketPath == "" {
-		socketPath = protocol.DefaultSocketPath
+// New creates a new client targeting the given daemon URL.
+// If daemonURL is empty, the default daemon URL is used.
+func New(daemonURL string) *Client {
+	if daemonURL == "" {
+		daemonURL = protocol.DefaultDaemonURL
 	}
-	return &Client{socketPath: socketPath}
+	return &Client{
+		baseURL: daemonURL,
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+	}
 }
 
-// Request is the JSON-RPC style request envelope.
-type Request struct {
-	Method string `json:"method"`
-	Params any    `json:"params,omitempty"`
-}
-
-// Response is the JSON-RPC style response envelope.
+// Response is the JSON response envelope from the daemon API.
 type Response struct {
 	Success bool            `json:"success"`
 	Result  json.RawMessage `json:"result,omitempty"`
 	Error   string          `json:"error,omitempty"`
 }
 
-func (c *Client) call(method string, params any, result any) error {
-	conn, err := net.Dial("unix", c.socketPath)
+// doGet makes a GET request and decodes the result.
+func (c *Client) doGet(path string, result any) error {
+	url := c.baseURL + path
+	resp, err := c.httpClient.Get(url)
 	if err != nil {
 		return fmt.Errorf("failed to connect to aetherd: %w (is aetherd running?)", err)
 	}
-	defer func() { _ = conn.Close() }()
+	defer func() { _ = resp.Body.Close() }()
 
-	req := Request{Method: method, Params: params}
-	if err := json.NewEncoder(conn).Encode(req); err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
+	return c.decodeResponse(resp, result)
+}
+
+// doPost makes a POST request with a JSON body and decodes the result.
+func (c *Client) doPost(path string, body any, result any) error {
+	url := c.baseURL + path
+	var bodyReader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("failed to marshal request: %w", err)
+		}
+		bodyReader = bytes.NewReader(data)
 	}
+	resp, err := c.httpClient.Post(url, "application/json", bodyReader)
+	if err != nil {
+		return fmt.Errorf("failed to connect to aetherd: %w (is aetherd running?)", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
 
-	var resp Response
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+	return c.decodeResponse(resp, result)
+}
+
+// doDelete makes a DELETE request and decodes the result.
+func (c *Client) doDelete(path string, result any) error {
+	url := c.baseURL + path
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to aetherd: %w (is aetherd running?)", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	return c.decodeResponse(resp, result)
+}
+
+// decodeResponse reads and decodes the JSON response envelope.
+func (c *Client) decodeResponse(resp *http.Response, result any) error {
+	var apiResp Response
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return fmt.Errorf("failed to read response: %w", err)
 	}
 
-	if !resp.Success {
-		return fmt.Errorf("%s", resp.Error)
+	if !apiResp.Success {
+		return fmt.Errorf("%s", apiResp.Error)
 	}
 
-	if result != nil && len(resp.Result) > 0 {
-		if err := json.Unmarshal(resp.Result, result); err != nil {
+	if result != nil && len(apiResp.Result) > 0 {
+		if err := json.Unmarshal(apiResp.Result, result); err != nil {
 			return fmt.Errorf("failed to parse result: %w", err)
 		}
 	}
@@ -157,9 +198,12 @@ type StatusAgentParams struct {
 
 // StatusAgent returns detailed status for a single agent including tool call history.
 func (c *Client) StatusAgent(agentName string, limit int) (*AgentDetail, error) {
-	params := StatusAgentParams{AgentName: agentName, Limit: limit}
+	path := fmt.Sprintf("/api/v1/status/agents/%s", agentName)
+	if limit > 0 {
+		path = fmt.Sprintf("%s?limit=%d", path, limit)
+	}
 	var result AgentDetail
-	if err := c.call("status.agent", params, &result); err != nil {
+	if err := c.doGet(path, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -168,7 +212,7 @@ func (c *Client) StatusAgent(agentName string, limit int) (*AgentDetail, error) 
 // StatusFull returns the enriched swarm status with task metadata from prog.
 func (c *Client) StatusFull() (*FullStatus, error) {
 	var result FullStatus
-	if err := c.call("status.full", nil, &result); err != nil {
+	if err := c.doGet("/api/v1/status", &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -191,9 +235,12 @@ type EventsListResult struct {
 // EventsList returns events for an agent from the daemon's event buffer.
 // When afterTimestamp is set, only events after that timestamp are returned.
 func (c *Client) EventsList(agentName string, afterTimestamp int64) (*EventsListResult, error) {
-	params := EventsListParams{AgentName: agentName, AfterTimestamp: afterTimestamp}
+	path := fmt.Sprintf("/api/v1/events?agent_name=%s", agentName)
+	if afterTimestamp > 0 {
+		path = fmt.Sprintf("%s&after_timestamp=%d", path, afterTimestamp)
+	}
 	var result EventsListResult
-	if err := c.call("events.list", params, &result); err != nil {
+	if err := c.doGet(path, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -208,7 +255,7 @@ type PoolModeResult struct {
 // PoolDrain transitions the pool to draining mode.
 func (c *Client) PoolDrain() (*PoolModeResult, error) {
 	var result PoolModeResult
-	if err := c.call("pool.drain", nil, &result); err != nil {
+	if err := c.doPost("/api/v1/pool/drain", nil, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -217,7 +264,7 @@ func (c *Client) PoolDrain() (*PoolModeResult, error) {
 // PoolPause transitions the pool to paused mode.
 func (c *Client) PoolPause() (*PoolModeResult, error) {
 	var result PoolModeResult
-	if err := c.call("pool.pause", nil, &result); err != nil {
+	if err := c.doPost("/api/v1/pool/pause", nil, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -226,7 +273,7 @@ func (c *Client) PoolPause() (*PoolModeResult, error) {
 // PoolResume transitions the pool back to active mode.
 func (c *Client) PoolResume() (*PoolModeResult, error) {
 	var result PoolModeResult
-	if err := c.call("pool.resume", nil, &result); err != nil {
+	if err := c.doPost("/api/v1/pool/resume", nil, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -243,17 +290,16 @@ type SpawnRegisterParams struct {
 // This is best-effort — if the daemon isn't running, the error is returned
 // and the caller can proceed without registration.
 func (c *Client) SpawnRegister(params SpawnRegisterParams) error {
-	return c.call("spawn.register", params, nil)
+	return c.doPost("/api/v1/spawns", params, nil)
 }
 
 // SpawnDeregister marks a spawned agent as exited in the daemon's registry.
 func (c *Client) SpawnDeregister(spawnID string) error {
-	return c.call("spawn.deregister", struct {
-		SpawnID string `json:"spawn_id"`
-	}{SpawnID: spawnID}, nil)
+	path := fmt.Sprintf("/api/v1/spawns/%s", spawnID)
+	return c.doDelete(path, nil)
 }
 
 // Shutdown stops the daemon.
 func (c *Client) Shutdown() error {
-	return c.call("shutdown", nil, nil)
+	return c.doPost("/api/v1/shutdown", nil, nil)
 }

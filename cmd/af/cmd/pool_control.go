@@ -20,7 +20,7 @@ allowed since those tasks are already claimed.
 
 Use 'af resume' to return to normal scheduling.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		c := client.New(resolveSocketPath(cmd))
+		c := client.New(resolveDaemonURL(cmd))
 		result, err := c.PoolDrain()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -41,7 +41,7 @@ or crash.
 
 Use 'af resume' to return to normal scheduling.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		c := client.New(resolveSocketPath(cmd))
+		c := client.New(resolveDaemonURL(cmd))
 		result, err := c.PoolPause()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -59,7 +59,7 @@ var resumeCmd = &cobra.Command{
 Normal scheduling resumes: tasks from the queue will be assigned to
 free slots and crashed agents will be respawned.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		c := client.New(resolveSocketPath(cmd))
+		c := client.New(resolveDaemonURL(cmd))
 		result, err := c.PoolResume()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)

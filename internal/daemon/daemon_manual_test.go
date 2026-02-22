@@ -3,7 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"os"
+	"net"
 	"os/exec"
 	"strings"
 	"sync/atomic"
@@ -20,8 +20,18 @@ func noopServerStarter(_ context.Context, _ string, _ []string, _ func(string, .
 	return nil, nil
 }
 
-func testSocketPath(prefix string) string {
-	return fmt.Sprintf("/tmp/%s-%d-%d.sock", prefix, os.Getpid(), time.Now().UnixNano())
+// testListenAddr picks an ephemeral TCP port for a test daemon by binding
+// to :0, capturing the assigned port, then closing the listener so the
+// daemon can bind to it.
+func testListenAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to pick test port: %v", err)
+	}
+	addr := l.Addr().String()
+	_ = l.Close()
+	return addr
 }
 
 func waitForDaemonStatus(t *testing.T, c *client.Client, timeout time.Duration) *client.FullStatus {
@@ -53,7 +63,7 @@ func waitForDaemonExit(t *testing.T, done <-chan error, timeout time.Duration) {
 }
 
 func TestDaemonManualPolicySkipsProgRunnerCalls(t *testing.T) {
-	socketPath := testSocketPath("aetherd-manual")
+	listenAddr := testListenAddr(t)
 	var calls atomic.Int64
 	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		calls.Add(1)
@@ -61,7 +71,7 @@ func TestDaemonManualPolicySkipsProgRunnerCalls(t *testing.T) {
 	}
 
 	cfg := Config{
-		SocketPath:        socketPath,
+		ListenAddr:        listenAddr,
 		Project:           "manual-test",
 		PollInterval:      10 * time.Millisecond,
 		PoolSize:          1,
@@ -76,7 +86,8 @@ func TestDaemonManualPolicySkipsProgRunnerCalls(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- d.Run() }()
 
-	c := client.New(socketPath)
+	daemonURL := fmt.Sprintf("http://%s", listenAddr)
+	c := client.New(daemonURL)
 	status := waitForDaemonStatus(t, c, 2*time.Second)
 	if status.SpawnPolicy != string(SpawnPolicyManual) {
 		t.Fatalf("SpawnPolicy = %q, want %q", status.SpawnPolicy, SpawnPolicyManual)
@@ -94,7 +105,7 @@ func TestDaemonManualPolicySkipsProgRunnerCalls(t *testing.T) {
 }
 
 func TestDaemonAutoPolicyUsesRunnerCalls(t *testing.T) {
-	socketPath := testSocketPath("aetherd-auto")
+	listenAddr := testListenAddr(t)
 	var calls atomic.Int64
 	var readyCalls atomic.Int64
 	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -106,7 +117,7 @@ func TestDaemonAutoPolicyUsesRunnerCalls(t *testing.T) {
 	}
 
 	cfg := Config{
-		SocketPath:        socketPath,
+		ListenAddr:        listenAddr,
 		Project:           "auto-test",
 		PollInterval:      10 * time.Millisecond,
 		PoolSize:          1,
@@ -121,7 +132,8 @@ func TestDaemonAutoPolicyUsesRunnerCalls(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- d.Run() }()
 
-	c := client.New(socketPath)
+	daemonURL := fmt.Sprintf("http://%s", listenAddr)
+	c := client.New(daemonURL)
 	waitForDaemonStatus(t, c, 2*time.Second)
 	baselineReady := readyCalls.Load()
 
@@ -142,10 +154,10 @@ func TestDaemonAutoPolicyUsesRunnerCalls(t *testing.T) {
 	waitForDaemonExit(t, done, 2*time.Second)
 }
 
-func TestDaemonSecondInstanceSameSocketFailsFast(t *testing.T) {
-	socketPath := testSocketPath("aetherd-manual-singleton")
+func TestDaemonSecondInstanceSameAddrFailsFast(t *testing.T) {
+	listenAddr := testListenAddr(t)
 	cfg := Config{
-		SocketPath:        socketPath,
+		ListenAddr:        listenAddr,
 		PollInterval:      10 * time.Millisecond,
 		PoolSize:          1,
 		SpawnCmd:          "echo test",
@@ -158,7 +170,8 @@ func TestDaemonSecondInstanceSameSocketFailsFast(t *testing.T) {
 	done1 := make(chan error, 1)
 	go func() { done1 <- d1.Run() }()
 
-	c := client.New(socketPath)
+	daemonURL := fmt.Sprintf("http://%s", listenAddr)
+	c := client.New(daemonURL)
 	waitForDaemonStatus(t, c, 2*time.Second)
 
 	d2 := New(cfg)
@@ -218,33 +231,5 @@ func TestDaemonRunRejectsUnknownSpawnPolicy(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unknown spawn-policy") {
 		t.Fatalf("expected unknown-spawn-policy error, got: %v", err)
-	}
-}
-
-func TestDaemonRunRejectsNonSocketPathCollision(t *testing.T) {
-	path := fmt.Sprintf("/tmp/aetherd-collision-%d-%d", os.Getpid(), time.Now().UnixNano())
-	if err := os.WriteFile(path, []byte("not a socket"), 0644); err != nil {
-		t.Fatalf("failed to create collision file: %v", err)
-	}
-	defer func() {
-		_ = os.Remove(path)
-	}()
-
-	cfg := Config{
-		SocketPath:        path,
-		PollInterval:      10 * time.Millisecond,
-		PoolSize:          1,
-		SpawnCmd:          "echo test",
-		SpawnPolicy:       SpawnPolicyManual,
-		ReconcileInterval: DefaultReconcileInterval,
-	}
-
-	d := New(cfg)
-	err := d.Run()
-	if err == nil {
-		t.Fatal("expected error for non-socket path collision, got nil")
-	}
-	if !strings.Contains(err.Error(), "is not a unix socket") {
-		t.Fatalf("expected non-socket collision error, got: %v", err)
 	}
 }

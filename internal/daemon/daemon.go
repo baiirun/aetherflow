@@ -4,7 +4,7 @@
 //   - Reads task queue from prog
 //   - Spawns opencode sessions as worker/planner agents
 //   - Manages the agent pool (concurrency limit, stuck detection)
-//   - Exposes a Unix socket for status queries and intervention
+//   - Exposes an HTTP API for status queries and intervention
 package daemon
 
 import (
@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -29,26 +30,28 @@ const (
 
 // Daemon holds the daemon state.
 type Daemon struct {
-	config   Config
-	listener net.Listener
-	poller   *Poller
-	pool     *Pool
-	spawns   *SpawnRegistry
-	sstore   *sessions.Store
-	events   *EventBuffer
-	server   *exec.Cmd
-	serverMu sync.Mutex
-	shutdown chan struct{}
-	log      *slog.Logger
+	config     Config
+	httpServer *http.Server
+	poller     *Poller
+	pool       *Pool
+	spawns     *SpawnRegistry
+	sstore     *sessions.Store
+	events     *EventBuffer
+	server     *exec.Cmd
+	serverMu   sync.Mutex
+	shutdown   chan struct{}
+	log        *slog.Logger
 }
 
 // Request is the JSON-RPC style request envelope.
+// Retained for compatibility with internal handler methods.
 type Request struct {
 	Method string          `json:"method"`
 	Params json.RawMessage `json:"params,omitempty"`
 }
 
 // Response is the JSON-RPC style response envelope.
+// Used by both HTTP handlers and internal handler methods.
 type Response struct {
 	Success bool            `json:"success"`
 	Result  json.RawMessage `json:"result,omitempty"`
@@ -119,44 +122,35 @@ func (d *Daemon) Run() error {
 		return fmt.Errorf("invariant violated: poller and pool must be both nil or both non-nil")
 	}
 
-	conn, err := net.DialTimeout("unix", d.config.SocketPath, 200*time.Millisecond)
+	// Check if another daemon is already listening on the same address.
+	conn, err := net.DialTimeout("tcp", d.config.ListenAddr, 200*time.Millisecond)
 	if err == nil {
 		_ = conn.Close()
-		return fmt.Errorf("daemon already running on %s", d.config.SocketPath)
+		return fmt.Errorf("daemon already running on %s", d.config.ListenAddr)
 	}
 
-	// Remove stale socket if no daemon is accepting connections.
-	if info, statErr := os.Lstat(d.config.SocketPath); statErr == nil {
-		if info.Mode()&os.ModeSocket == 0 {
-			return fmt.Errorf("socket path exists and is not a unix socket: %s", d.config.SocketPath)
-		}
-		if rmErr := os.Remove(d.config.SocketPath); rmErr != nil {
-			return fmt.Errorf("failed to remove stale socket %s: %w", d.config.SocketPath, rmErr)
-		}
-	} else if !os.IsNotExist(statErr) {
-		return fmt.Errorf("failed to stat socket path %s: %w", d.config.SocketPath, statErr)
+	// Create HTTP server with the API handler.
+	d.httpServer = &http.Server{
+		Addr:    d.config.ListenAddr,
+		Handler: d.newHTTPHandler(),
 	}
 
-	listener, err := net.Listen("unix", d.config.SocketPath)
+	// Start listener early so we can detect port conflicts before launching
+	// background goroutines.
+	listener, err := net.Listen("tcp", d.config.ListenAddr)
 	if err != nil {
-		return fmt.Errorf("failed to listen on %s: %w", d.config.SocketPath, err)
+		return fmt.Errorf("failed to listen on %s: %w", d.config.ListenAddr, err)
 	}
-	// Restrict socket to owner only — prevents other local users from
-	// issuing RPC commands (especially shutdown) to this daemon.
-	if err := os.Chmod(d.config.SocketPath, 0700); err != nil {
-		_ = listener.Close()
-		return fmt.Errorf("failed to set socket permissions on %s: %w", d.config.SocketPath, err)
-	}
-	d.listener = listener
 
-	d.log.Info("daemon started", "socket", d.config.SocketPath)
+	daemonURL := fmt.Sprintf("http://%s", d.config.ListenAddr)
+	d.log.Info("daemon started", "listen_addr", d.config.ListenAddr, "url", daemonURL)
 
 	// Handle shutdown gracefully
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	serverEnv := []string{
-		"AETHERFLOW_SOCKET=" + d.config.SocketPath,
+		"AETHERFLOW_URL=" + daemonURL,
 	}
 	startServer := d.config.ServerStarter
 	if startServer == nil {
@@ -184,7 +178,10 @@ func (d *Daemon) Run() error {
 		}
 		d.log.Info("shutting down")
 		cancel()
-		_ = listener.Close()
+		// Graceful HTTP shutdown with a short deadline.
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutCancel()
+		_ = d.httpServer.Shutdown(shutCtx)
 	}()
 
 	// Start poll loop and pool if a project is configured and auto-spawn is enabled.
@@ -238,23 +235,16 @@ func (d *Daemon) Run() error {
 		backfillEvents(bctx, api, d.sstore, d.events, d.log)
 	}()
 
-	// Accept connections
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return nil
-			default:
-				d.log.Error("accept error", "error", err)
-				continue
-			}
-		}
-		go d.handleConnection(ctx, conn)
+	// Serve HTTP. This blocks until the server is shut down.
+	if err := d.httpServer.Serve(listener); err != http.ErrServerClosed {
+		return fmt.Errorf("http server error: %w", err)
 	}
+	return nil
 }
 
 func (d *Daemon) superviseServer(ctx context.Context) {
+	daemonURL := fmt.Sprintf("http://%s", d.config.ListenAddr)
+
 	for {
 		d.serverMu.Lock()
 		cmd := d.server
@@ -273,7 +263,7 @@ func (d *Daemon) superviseServer(ctx context.Context) {
 		d.log.Warn("managed opencode server exited, restarting", "error", err)
 		time.Sleep(500 * time.Millisecond)
 		restartEnv := []string{
-			"AETHERFLOW_SOCKET=" + d.config.SocketPath,
+			"AETHERFLOW_URL=" + daemonURL,
 		}
 		restarted, startErr := StartManagedServer(ctx, d.config.ServerURL, restartEnv, func(msg string, args ...any) {
 			d.log.Info(msg, args...)
@@ -324,55 +314,8 @@ func (d *Daemon) sweepStale(ctx context.Context) {
 	}
 }
 
-func (d *Daemon) handleConnection(ctx context.Context, conn net.Conn) {
-	defer func() { _ = conn.Close() }()
-
-	decoder := json.NewDecoder(conn)
-	encoder := json.NewEncoder(conn)
-
-	for {
-		var req Request
-		if err := decoder.Decode(&req); err != nil {
-			return // Connection closed or read error
-		}
-
-		d.log.Debug("rpc request", "method", req.Method)
-		resp := d.handleRequest(ctx, &req)
-		if err := encoder.Encode(resp); err != nil {
-			return
-		}
-	}
-}
-
-func (d *Daemon) handleRequest(ctx context.Context, req *Request) *Response {
-	switch req.Method {
-	case "status.full":
-		return d.handleStatusFull(ctx)
-	case "status.agent":
-		return d.handleStatusAgent(ctx, req.Params)
-	case "pool.drain":
-		return d.handlePoolDrain()
-	case "pool.pause":
-		return d.handlePoolPause()
-	case "pool.resume":
-		return d.handlePoolResume()
-	case "spawn.register":
-		return d.handleSpawnRegister(req.Params)
-	case "spawn.deregister":
-		return d.handleSpawnDeregister(req.Params)
-	case "session.event":
-		return d.handleSessionEvent(req.Params)
-	case "events.list":
-		return d.handleEventsList(req.Params)
-	case "shutdown":
-		return d.handleShutdown()
-	default:
-		return &Response{Success: false, Error: fmt.Sprintf("unknown method: %s", req.Method)}
-	}
-}
-
 func (d *Daemon) handleShutdown() *Response {
-	d.log.Info("shutdown requested via RPC")
+	d.log.Info("shutdown requested via API")
 	// Signal shutdown in background so we can send response first
 	go func() {
 		time.Sleep(50 * time.Millisecond)

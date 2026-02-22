@@ -31,7 +31,7 @@ Use -w/--watch or -f/--follow for continuous monitoring (refreshes every 2s by d
 Requires a running daemon.`,
 	Args: cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		socketPath := resolveSocketPath(cmd)
+		daemonURL := resolveDaemonURL(cmd)
 		asJSON, _ := cmd.Flags().GetBool("json")
 		watch, _ := cmd.Flags().GetBool("watch")
 		follow, _ := cmd.Flags().GetBool("follow")
@@ -40,7 +40,7 @@ Requires a running daemon.`,
 		// Both --watch and --follow enable streaming; treat them as aliases.
 		streaming := watch || follow
 
-		c := client.New(socketPath)
+		c := client.New(daemonURL)
 
 		if !streaming {
 			runStatusOnce(c, args, asJSON, cmd)
@@ -68,7 +68,7 @@ func runStatusOnce(c *client.Client, args []string, asJSON bool, cmd *cobra.Comm
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		fmt.Fprintf(os.Stderr, "\nIs the daemon running? Start it with: af daemon start --project <name>\n")
-		fmt.Fprintf(os.Stderr, "Hint: socket path is derived from project in .aetherflow.yaml\n")
+		fmt.Fprintf(os.Stderr, "Hint: daemon URL is derived from project in .aetherflow.yaml\n")
 		os.Exit(1)
 	}
 

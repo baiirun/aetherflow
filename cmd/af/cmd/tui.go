@@ -30,10 +30,10 @@ Navigation:
 
 Requires a running daemon.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		socketPath := resolveSocketPath(cmd)
+		daemonURL := resolveDaemonURL(cmd)
 
 		cfg := tui.Config{
-			SocketPath: socketPath,
+			DaemonURL: daemonURL,
 		}
 
 		if err := tui.Run(cfg); err != nil {

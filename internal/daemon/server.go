@@ -12,7 +12,7 @@ import (
 
 // StartManagedServer ensures a local opencode server is available at serverURL.
 // If one is already listening, it is reused.
-// Extra env vars (e.g. AETHERFLOW_SOCKET) are added to the server process
+// Extra env vars (e.g. AETHERFLOW_URL) are added to the server process
 // environment alongside the inherited parent env.
 func StartManagedServer(ctx context.Context, serverURL string, env []string, logf func(msg string, args ...any)) (*exec.Cmd, error) {
 	u, err := ValidateServerURLLocal(serverURL)

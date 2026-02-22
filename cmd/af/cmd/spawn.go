@@ -123,15 +123,15 @@ func runSpawn(cmd *cobra.Command, args []string) {
 		Fatal("rendering prompt: %v", err)
 	}
 
-	// Resolve the daemon socket for best-effort registration.
-	socketPath := resolveSocketPath(cmd)
+	// Resolve the daemon URL for best-effort registration.
+	daemonURL := resolveDaemonURL(cmd)
 
 	if detach {
-		runDetached(spawnID, userPrompt, spawnCmd, prompt, socketPath, jsonOutput)
+		runDetached(spawnID, userPrompt, spawnCmd, prompt, daemonURL, jsonOutput)
 		return
 	}
 
-	runForeground(spawnID, userPrompt, spawnCmd, prompt, socketPath, jsonOutput)
+	runForeground(spawnID, userPrompt, spawnCmd, prompt, daemonURL, jsonOutput)
 }
 
 // newSpawnID generates a unique spawn identifier.
@@ -296,8 +296,8 @@ func buildAgentProc(ctx context.Context, spawnCmd, prompt, agentID string) *exec
 // registerSpawn attempts to register the spawned agent with the daemon.
 // Best-effort — if the daemon isn't running, we log a warning for non-
 // connection errors and continue.
-func registerSpawn(socketPath, spawnID string, pid int, prompt string) {
-	c := client.New(socketPath)
+func registerSpawn(daemonURL, spawnID string, pid int, prompt string) {
+	c := client.New(daemonURL)
 	if err := c.SpawnRegister(client.SpawnRegisterParams{
 		SpawnID: spawnID,
 		PID:     pid,
@@ -313,13 +313,13 @@ func registerSpawn(socketPath, spawnID string, pid int, prompt string) {
 
 // deregisterSpawn attempts to remove the spawned agent from the daemon registry.
 // Best-effort — if the daemon isn't running, we silently continue.
-func deregisterSpawn(socketPath, spawnID string) {
-	c := client.New(socketPath)
+func deregisterSpawn(daemonURL, spawnID string) {
+	c := client.New(daemonURL)
 	_ = c.SpawnDeregister(spawnID)
 }
 
 // isConnectionRefused returns true if the error is a "connection refused"
-// from dialing a Unix socket — i.e., no daemon is running.
+// from dialing the daemon — i.e., no daemon is running.
 func isConnectionRefused(err error) bool {
 	if opErr, ok := err.(*net.OpError); ok {
 		if sysErr, ok := opErr.Err.(*os.SyscallError); ok {
@@ -357,7 +357,7 @@ func fatalSpawnJSON(code, spawnID string, err error) {
 }
 
 // runForeground launches the agent in the current terminal.
-func runForeground(spawnID, userPrompt, spawnCmd, prompt, socketPath string, jsonOutput bool) {
+func runForeground(spawnID, userPrompt, spawnCmd, prompt, daemonURL string, jsonOutput bool) {
 	if !jsonOutput {
 		fmt.Printf("%s Spawning agent %s\n", term.Bold("af spawn:"), term.Cyan(spawnID))
 		fmt.Println()
@@ -385,13 +385,13 @@ func runForeground(spawnID, userPrompt, spawnCmd, prompt, socketPath string, jso
 	}
 
 	// Register with daemon for observability (best-effort).
-	registerSpawn(socketPath, spawnID, proc.Process.Pid, userPrompt)
+	registerSpawn(daemonURL, spawnID, proc.Process.Pid, userPrompt)
 
 	// Wait for the process to exit.
 	waitErr := proc.Wait()
 
 	// Deregister from daemon (best-effort).
-	deregisterSpawn(socketPath, spawnID)
+	deregisterSpawn(daemonURL, spawnID)
 
 	if waitErr != nil {
 		if exitErr, ok := waitErr.(*exec.ExitError); ok {
@@ -409,7 +409,7 @@ func runForeground(spawnID, userPrompt, spawnCmd, prompt, socketPath string, jso
 // The rendered prompt is passed directly to the spawn command, bypassing
 // af spawn entirely so there's no double-rendering or flag-forwarding.
 // Stdout/stderr are discarded — observability comes from the plugin event pipeline.
-func runDetached(spawnID, userPrompt, spawnCmd, prompt, socketPath string, jsonOutput bool) {
+func runDetached(spawnID, userPrompt, spawnCmd, prompt, daemonURL string, jsonOutput bool) {
 	proc := buildAgentProc(context.Background(), spawnCmd, prompt, spawnID)
 
 	// Redirect stdout/stderr to /dev/null. Observability is provided by the
@@ -431,7 +431,7 @@ func runDetached(spawnID, userPrompt, spawnCmd, prompt, socketPath string, jsonO
 
 	// Register with daemon for observability (best-effort).
 	// The daemon's sweep will clean up the entry when the PID dies.
-	registerSpawn(socketPath, spawnID, proc.Process.Pid, userPrompt)
+	registerSpawn(daemonURL, spawnID, proc.Process.Pid, userPrompt)
 
 	if jsonOutput {
 		_ = json.NewEncoder(os.Stdout).Encode(spawnResult{

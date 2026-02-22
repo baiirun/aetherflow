@@ -17,7 +17,7 @@ var daemonCmd = &cobra.Command{
 	Long:  `Start the daemon or check its status.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Default: show status
-		c := client.New(resolveSocketPath(cmd))
+		c := client.New(resolveDaemonURL(cmd))
 		status, err := c.StatusFull()
 		if err != nil {
 			fmt.Println("not running")
@@ -144,7 +144,7 @@ var daemonStopCmd = &cobra.Command{
 	Use:   "stop",
 	Short: "Stop the daemon",
 	Run: func(cmd *cobra.Command, args []string) {
-		c := client.New(resolveSocketPath(cmd))
+		c := client.New(resolveDaemonURL(cmd))
 		if err := c.Shutdown(); err != nil {
 			Fatal("%v", err)
 		}
