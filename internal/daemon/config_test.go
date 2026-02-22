@@ -25,8 +25,9 @@ func TestConfigApplyDefaults(t *testing.T) {
 	var cfg Config
 	cfg.ApplyDefaults()
 
-	if cfg.SocketPath != protocol.DefaultSocketPath {
-		t.Errorf("SocketPath = %q, want %q", cfg.SocketPath, protocol.DefaultSocketPath)
+	wantListenAddr := listenAddrFromURL(protocol.DefaultDaemonURL)
+	if cfg.ListenAddr != wantListenAddr {
+		t.Errorf("ListenAddr = %q, want %q", cfg.ListenAddr, wantListenAddr)
 	}
 	if cfg.PollInterval != DefaultPollInterval {
 		t.Errorf("PollInterval = %v, want %v", cfg.PollInterval, DefaultPollInterval)
@@ -59,15 +60,15 @@ func TestConfigApplyDefaultsWithProject(t *testing.T) {
 	cfg := Config{Project: "myproject"}
 	cfg.ApplyDefaults()
 
-	want := protocol.SocketPathFor("myproject")
-	if cfg.SocketPath != want {
-		t.Errorf("SocketPath = %q, want %q (should derive from project)", cfg.SocketPath, want)
+	want := listenAddrFromURL(protocol.DaemonURLFor("myproject"))
+	if cfg.ListenAddr != want {
+		t.Errorf("ListenAddr = %q, want %q (should derive from project)", cfg.ListenAddr, want)
 	}
 }
 
 func TestConfigApplyDefaultsPreservesExisting(t *testing.T) {
 	cfg := Config{
-		SocketPath:   "/custom/sock",
+		ListenAddr:   "127.0.0.1:9999",
 		PollInterval: 30 * time.Second,
 		PoolSize:     5,
 		SpawnCmd:     "custom-cmd",
@@ -78,8 +79,8 @@ func TestConfigApplyDefaultsPreservesExisting(t *testing.T) {
 	}
 	cfg.ApplyDefaults()
 
-	if cfg.SocketPath != "/custom/sock" {
-		t.Errorf("SocketPath = %q, want %q", cfg.SocketPath, "/custom/sock")
+	if cfg.ListenAddr != "127.0.0.1:9999" {
+		t.Errorf("ListenAddr = %q, want %q", cfg.ListenAddr, "127.0.0.1:9999")
 	}
 	if cfg.PollInterval != 30*time.Second {
 		t.Errorf("PollInterval = %v, want %v", cfg.PollInterval, 30*time.Second)
@@ -129,9 +130,9 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: "",
 		},
 		{
-			name: "missing project in manual mode with explicit socket",
+			name: "missing project in manual mode with explicit listen addr",
 			cfg: Config{
-				SocketPath:        "/tmp/aetherd-manual-test.sock",
+				ListenAddr:        "127.0.0.1:9999",
 				PollInterval:      time.Second,
 				PoolSize:          1,
 				SpawnCmd:          "cmd",
@@ -284,17 +285,18 @@ func TestConfigValidateAfterDefaults(t *testing.T) {
 	}
 }
 
-func TestConfigValidateManualWithoutProjectUsesDefaultSocket(t *testing.T) {
+func TestConfigValidateManualWithoutProjectUsesDefaultListenAddr(t *testing.T) {
 	cfg := Config{
 		SpawnPolicy: SpawnPolicyManual,
 	}
 	cfg.ApplyDefaults()
 
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("expected manual mode without project/socket to be valid, got: %v", err)
+		t.Fatalf("expected manual mode without project to be valid, got: %v", err)
 	}
-	if cfg.SocketPath != protocol.DefaultSocketPath {
-		t.Fatalf("SocketPath = %q, want %q", cfg.SocketPath, protocol.DefaultSocketPath)
+	wantAddr := listenAddrFromURL(protocol.DefaultDaemonURL)
+	if cfg.ListenAddr != wantAddr {
+		t.Fatalf("ListenAddr = %q, want %q", cfg.ListenAddr, wantAddr)
 	}
 }
 
@@ -322,8 +324,8 @@ prompt_dir: /custom/prompts
 	if cfg.Project != "from-file" {
 		t.Errorf("Project = %q, want %q", cfg.Project, "from-file")
 	}
-	if cfg.SocketPath != "" {
-		t.Errorf("SocketPath = %q, want empty (not loaded from config file)", cfg.SocketPath)
+	if cfg.ListenAddr != "" {
+		t.Errorf("ListenAddr = %q, want empty (not loaded from config file)", cfg.ListenAddr)
 	}
 	if cfg.PollInterval != 30*time.Second {
 		t.Errorf("PollInterval = %v, want %v", cfg.PollInterval, 30*time.Second)

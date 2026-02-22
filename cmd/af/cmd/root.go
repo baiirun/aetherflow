@@ -35,7 +35,7 @@ func Execute() error {
 
 func init() {
 	rootCmd.PersistentFlags().StringP("config", "c", "", "config file (default is $HOME/.aetherflow.yaml)")
-	rootCmd.PersistentFlags().StringP("project", "p", "", "Project name (derives socket path, overrides config file)")
+	rootCmd.PersistentFlags().StringP("project", "p", "", "Project name (derives daemon URL, overrides config file)")
 	rootCmd.PersistentFlags().Bool("no-color", false, "Disable colored output")
 
 	// Wire --no-color to the term package. OnInitialize runs before any
@@ -48,18 +48,18 @@ func init() {
 	})
 }
 
-// resolveSocketPath determines the daemon socket path from the CLI flag,
+// resolveDaemonURL determines the daemon URL from the CLI flag,
 // config file, or default convention. Priority:
-//  1. Explicit --project flag -> project-scoped socket path
-//  2. Project from config file -> project-scoped socket path
-//  3. DefaultSocketPath fallback
-func resolveSocketPath(cmd *cobra.Command) string {
+//  1. Explicit --project flag -> project-scoped daemon URL
+//  2. Project from config file -> project-scoped daemon URL
+//  3. DefaultDaemonURL fallback
+func resolveDaemonURL(cmd *cobra.Command) string {
 	if cmd.Flags().Changed("project") {
 		p, _ := cmd.Flags().GetString("project")
-		return protocol.SocketPathFor(p)
+		return protocol.DaemonURLFor(p)
 	}
 
-	// Discover the project from the config file to derive the socket path.
+	// Discover the project from the config file to derive the daemon URL.
 	// Only the project field is needed — we parse a minimal struct to avoid
 	// importing the daemon package into the CLI layer.
 	configPath, _ := cmd.Flags().GetString("config")
@@ -72,14 +72,14 @@ func resolveSocketPath(cmd *cobra.Command) string {
 			Project string `yaml:"project"`
 		}
 		if err := yaml.Unmarshal(data, &partial); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to parse %s: %v (using default socket)\n", configPath, err)
+			fmt.Fprintf(os.Stderr, "warning: failed to parse %s: %v (using default daemon URL)\n", configPath, err)
 		} else if partial.Project != "" {
-			return protocol.SocketPathFor(partial.Project)
+			return protocol.DaemonURLFor(partial.Project)
 		}
 	}
 	// File doesn't exist or has no project — use the global default.
 
-	return protocol.DefaultSocketPath
+	return protocol.DefaultDaemonURL
 }
 
 // Fatal prints an error and exits.

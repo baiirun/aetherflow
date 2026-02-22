@@ -2,10 +2,8 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
-	"os"
 	"os/exec"
 	"strings"
 	"sync/atomic"
@@ -13,7 +11,6 @@ import (
 	"time"
 
 	"github.com/baiirun/aetherflow/internal/client"
-	"github.com/baiirun/aetherflow/internal/protocol"
 )
 
 // noopServerStarter skips the real opencode server startup in tests.
@@ -23,8 +20,18 @@ func noopServerStarter(_ context.Context, _ string, _ []string, _ func(string, .
 	return nil, nil
 }
 
-func testSocketPath(prefix string) string {
-	return fmt.Sprintf("/tmp/%s-%d-%d.sock", prefix, os.Getpid(), time.Now().UnixNano())
+// testListenAddr picks an ephemeral TCP port for a test daemon by binding
+// to :0, capturing the assigned port, then closing the listener so the
+// daemon can bind to it.
+func testListenAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to pick test port: %v", err)
+	}
+	addr := l.Addr().String()
+	_ = l.Close()
+	return addr
 }
 
 func waitForDaemonStatus(t *testing.T, c *client.Client, timeout time.Duration) *client.FullStatus {
@@ -55,105 +62,6 @@ func waitForDaemonExit(t *testing.T, done <-chan error, timeout time.Duration) {
 	}
 }
 
-func TestDaemonLifecycleReportsRunning(t *testing.T) {
-	socketPath := testSocketPath("aetherd-lifecycle")
-	cfg := Config{
-		SocketPath:        socketPath,
-		Project:           "manual-test",
-		PollInterval:      10 * time.Millisecond,
-		PoolSize:          1,
-		SpawnCmd:          "echo test",
-		SpawnPolicy:       SpawnPolicyManual,
-		ReconcileInterval: DefaultReconcileInterval,
-		ServerStarter:     noopServerStarter,
-		SessionDir:        t.TempDir(),
-	}
-
-	d := New(cfg)
-	done := make(chan error, 1)
-	go func() { done <- d.Run() }()
-
-	c := client.New(socketPath)
-	waitForDaemonStatus(t, c, 2*time.Second)
-
-	lifecycle, err := c.DaemonLifecycle()
-	if err != nil {
-		t.Fatalf("DaemonLifecycle() error = %v", err)
-	}
-	if lifecycle.State != protocol.LifecycleStateRunning {
-		t.Fatalf("DaemonLifecycle().State = %q, want %q", lifecycle.State, protocol.LifecycleStateRunning)
-	}
-
-	stopResult, err := c.StopDaemon(true)
-	if err != nil {
-		t.Fatalf("StopDaemon(force) error = %v", err)
-	}
-	if stopResult.Outcome != protocol.StopOutcomeStopping {
-		t.Fatalf("StopDaemon(force).Outcome = %q, want %q", stopResult.Outcome, protocol.StopOutcomeStopping)
-	}
-	waitForDaemonExit(t, done, 2*time.Second)
-}
-
-func TestDaemonStopRefusesActiveSessionsWithoutForce(t *testing.T) {
-	socketPath := testSocketPath("aetherd-stop-refuse")
-	cfg := Config{
-		SocketPath:        socketPath,
-		Project:           "manual-test",
-		PollInterval:      10 * time.Millisecond,
-		PoolSize:          1,
-		SpawnCmd:          "echo test",
-		SpawnPolicy:       SpawnPolicyManual,
-		ReconcileInterval: DefaultReconcileInterval,
-		ServerStarter:     noopServerStarter,
-		SessionDir:        t.TempDir(),
-	}
-
-	d := New(cfg)
-	done := make(chan error, 1)
-	go func() { done <- d.Run() }()
-
-	c := client.New(socketPath)
-	waitForDaemonStatus(t, c, 2*time.Second)
-
-	if err := d.spawns.Register(SpawnEntry{
-		SpawnID:   "spawn-test",
-		PID:       os.Getpid(),
-		SessionID: "ses_active",
-		State:     SpawnRunning,
-		SpawnTime: time.Now(),
-	}); err != nil {
-		t.Fatalf("spawns.Register() error = %v", err)
-	}
-
-	result, err := c.StopDaemon(false)
-	if err != nil {
-		t.Fatalf("StopDaemon() error = %v", err)
-	}
-	if result.Outcome != protocol.StopOutcomeRefused {
-		t.Fatalf("StopDaemon().Outcome = %q, want %q", result.Outcome, protocol.StopOutcomeRefused)
-	}
-	if result.Status.ActiveSessionCount != 1 {
-		t.Fatalf("StopDaemon().ActiveSessionCount = %d, want 1", result.Status.ActiveSessionCount)
-	}
-
-	lifecycle, err := c.DaemonLifecycle()
-	if err != nil {
-		t.Fatalf("DaemonLifecycle() error = %v", err)
-	}
-	if lifecycle.State != protocol.LifecycleStateRunning {
-		t.Fatalf("DaemonLifecycle().State after refusal = %q, want %q", lifecycle.State, protocol.LifecycleStateRunning)
-	}
-
-	forced, err := c.StopDaemon(true)
-	if err != nil {
-		t.Fatalf("StopDaemon(force) error = %v", err)
-	}
-	if forced.Outcome != protocol.StopOutcomeStopping {
-		t.Fatalf("StopDaemon(force).Outcome = %q, want %q", forced.Outcome, protocol.StopOutcomeStopping)
-	}
-	waitForDaemonExit(t, done, 2*time.Second)
-}
-
 func TestDaemonRunValidationFailureDoesNotLeaveStartingState(t *testing.T) {
 	cfg := Config{
 		PollInterval:      10 * time.Millisecond,
@@ -179,120 +87,8 @@ func TestDaemonRunValidationFailureDoesNotLeaveStartingState(t *testing.T) {
 
 }
 
-func TestDaemonStopRefusesActiveWorkWithoutSessionID(t *testing.T) {
-	socketPath := testSocketPath("aetherd-stop-work")
-	cfg := Config{
-		SocketPath:        socketPath,
-		Project:           "manual-test",
-		PollInterval:      10 * time.Millisecond,
-		PoolSize:          1,
-		SpawnCmd:          "echo test",
-		SpawnPolicy:       SpawnPolicyManual,
-		ReconcileInterval: DefaultReconcileInterval,
-		ServerStarter:     noopServerStarter,
-		SessionDir:        t.TempDir(),
-	}
-
-	d := New(cfg)
-	done := make(chan error, 1)
-	go func() { done <- d.Run() }()
-
-	c := client.New(socketPath)
-	waitForDaemonStatus(t, c, 2*time.Second)
-
-	if err := d.spawns.Register(SpawnEntry{
-		SpawnID:   "spawn-pre-session",
-		PID:       os.Getpid(),
-		State:     SpawnRunning,
-		SpawnTime: time.Now(),
-	}); err != nil {
-		t.Fatalf("spawns.Register() error = %v", err)
-	}
-
-	result, err := c.StopDaemon(false)
-	if err != nil {
-		t.Fatalf("StopDaemon() error = %v", err)
-	}
-	if result.Outcome != protocol.StopOutcomeRefused {
-		t.Fatalf("StopDaemon().Outcome = %q, want %q", result.Outcome, protocol.StopOutcomeRefused)
-	}
-	if result.Status.ActiveSessionCount != 0 {
-		t.Fatalf("StopDaemon().ActiveSessionCount = %d, want 0", result.Status.ActiveSessionCount)
-	}
-
-	forced, err := c.StopDaemon(true)
-	if err != nil {
-		t.Fatalf("StopDaemon(force) error = %v", err)
-	}
-	if forced.Outcome != protocol.StopOutcomeStopping {
-		t.Fatalf("StopDaemon(force).Outcome = %q, want %q", forced.Outcome, protocol.StopOutcomeStopping)
-	}
-	waitForDaemonExit(t, done, 2*time.Second)
-}
-
-func TestLegacyShutdownIgnoresActiveSessionGuard(t *testing.T) {
-	socketPath := testSocketPath("aetherd-legacy-shutdown")
-	cfg := Config{
-		SocketPath:        socketPath,
-		Project:           "manual-test",
-		PollInterval:      10 * time.Millisecond,
-		PoolSize:          1,
-		SpawnCmd:          "echo test",
-		SpawnPolicy:       SpawnPolicyManual,
-		ReconcileInterval: DefaultReconcileInterval,
-		ServerStarter:     noopServerStarter,
-		SessionDir:        t.TempDir(),
-	}
-
-	d := New(cfg)
-	done := make(chan error, 1)
-	go func() { done <- d.Run() }()
-
-	c := client.New(socketPath)
-	waitForDaemonStatus(t, c, 2*time.Second)
-
-	if err := d.spawns.Register(SpawnEntry{
-		SpawnID:   "spawn-legacy",
-		PID:       os.Getpid(),
-		SessionID: "ses-legacy",
-		State:     SpawnRunning,
-		SpawnTime: time.Now(),
-	}); err != nil {
-		t.Fatalf("spawns.Register() error = %v", err)
-	}
-
-	if err := legacyShutdown(socketPath); err != nil {
-		t.Fatalf("legacy shutdown failed: %v", err)
-	}
-	waitForDaemonExit(t, done, 2*time.Second)
-}
-
-func legacyShutdown(socketPath string) error {
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = conn.Close() }()
-
-	if err := json.NewEncoder(conn).Encode(map[string]any{"method": "shutdown"}); err != nil {
-		return err
-	}
-
-	var resp struct {
-		Success bool   `json:"success"`
-		Error   string `json:"error,omitempty"`
-	}
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("%s", resp.Error)
-	}
-	return nil
-}
-
 func TestDaemonManualPolicySkipsProgRunnerCalls(t *testing.T) {
-	socketPath := testSocketPath("aetherd-manual")
+	listenAddr := testListenAddr(t)
 	var calls atomic.Int64
 	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		calls.Add(1)
@@ -300,7 +96,7 @@ func TestDaemonManualPolicySkipsProgRunnerCalls(t *testing.T) {
 	}
 
 	cfg := Config{
-		SocketPath:        socketPath,
+		ListenAddr:        listenAddr,
 		Project:           "manual-test",
 		PollInterval:      10 * time.Millisecond,
 		PoolSize:          1,
@@ -316,7 +112,8 @@ func TestDaemonManualPolicySkipsProgRunnerCalls(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- d.Run() }()
 
-	c := client.New(socketPath)
+	daemonURL := fmt.Sprintf("http://%s", listenAddr)
+	c := client.New(daemonURL)
 	status := waitForDaemonStatus(t, c, 2*time.Second)
 	if status.SpawnPolicy != string(SpawnPolicyManual) {
 		t.Fatalf("SpawnPolicy = %q, want %q", status.SpawnPolicy, SpawnPolicyManual)
@@ -334,7 +131,7 @@ func TestDaemonManualPolicySkipsProgRunnerCalls(t *testing.T) {
 }
 
 func TestDaemonAutoPolicyUsesRunnerCalls(t *testing.T) {
-	socketPath := testSocketPath("aetherd-auto")
+	listenAddr := testListenAddr(t)
 	var calls atomic.Int64
 	var readyCalls atomic.Int64
 	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -346,7 +143,7 @@ func TestDaemonAutoPolicyUsesRunnerCalls(t *testing.T) {
 	}
 
 	cfg := Config{
-		SocketPath:        socketPath,
+		ListenAddr:        listenAddr,
 		Project:           "auto-test",
 		PollInterval:      10 * time.Millisecond,
 		PoolSize:          1,
@@ -362,7 +159,8 @@ func TestDaemonAutoPolicyUsesRunnerCalls(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- d.Run() }()
 
-	c := client.New(socketPath)
+	daemonURL := fmt.Sprintf("http://%s", listenAddr)
+	c := client.New(daemonURL)
 	waitForDaemonStatus(t, c, 2*time.Second)
 	baselineReady := readyCalls.Load()
 
@@ -383,10 +181,10 @@ func TestDaemonAutoPolicyUsesRunnerCalls(t *testing.T) {
 	waitForDaemonExit(t, done, 2*time.Second)
 }
 
-func TestDaemonSecondInstanceSameSocketFailsFast(t *testing.T) {
-	socketPath := testSocketPath("aetherd-manual-singleton")
+func TestDaemonSecondInstanceSameAddrFailsFast(t *testing.T) {
+	listenAddr := testListenAddr(t)
 	cfg := Config{
-		SocketPath:        socketPath,
+		ListenAddr:        listenAddr,
 		PollInterval:      10 * time.Millisecond,
 		PoolSize:          1,
 		SpawnCmd:          "echo test",
@@ -400,7 +198,8 @@ func TestDaemonSecondInstanceSameSocketFailsFast(t *testing.T) {
 	done1 := make(chan error, 1)
 	go func() { done1 <- d1.Run() }()
 
-	c := client.New(socketPath)
+	daemonURL := fmt.Sprintf("http://%s", listenAddr)
+	c := client.New(daemonURL)
 	waitForDaemonStatus(t, c, 2*time.Second)
 
 	d2 := New(cfg)
@@ -462,34 +261,5 @@ func TestDaemonRunRejectsUnknownSpawnPolicy(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unknown spawn-policy") {
 		t.Fatalf("expected unknown-spawn-policy error, got: %v", err)
-	}
-}
-
-func TestDaemonRunRejectsNonSocketPathCollision(t *testing.T) {
-	path := fmt.Sprintf("/tmp/aetherd-collision-%d-%d", os.Getpid(), time.Now().UnixNano())
-	if err := os.WriteFile(path, []byte("not a socket"), 0644); err != nil {
-		t.Fatalf("failed to create collision file: %v", err)
-	}
-	defer func() {
-		_ = os.Remove(path)
-	}()
-
-	cfg := Config{
-		SocketPath:        path,
-		PollInterval:      10 * time.Millisecond,
-		PoolSize:          1,
-		SpawnCmd:          "echo test",
-		SpawnPolicy:       SpawnPolicyManual,
-		ReconcileInterval: DefaultReconcileInterval,
-		SessionDir:        t.TempDir(),
-	}
-
-	d := New(cfg)
-	err := d.Run()
-	if err == nil {
-		t.Fatal("expected error for non-socket path collision, got nil")
-	}
-	if !strings.Contains(err.Error(), "is not a unix socket") {
-		t.Fatalf("expected non-socket collision error, got: %v", err)
 	}
 }

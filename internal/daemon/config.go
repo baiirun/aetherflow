@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,16 @@ import (
 	"github.com/baiirun/aetherflow/internal/protocol"
 	"gopkg.in/yaml.v3"
 )
+
+// listenAddrFromURL extracts the host:port from a daemon URL string.
+// For example, "http://127.0.0.1:7070" returns "127.0.0.1:7070".
+func listenAddrFromURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "127.0.0.1:7070"
+	}
+	return u.Host
+}
 
 const (
 	DefaultPoolSize          = 3
@@ -68,9 +79,10 @@ var validTaskID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 //  2. Config file (.aetherflow.yaml)
 //  3. Defaults (lowest priority)
 type Config struct {
-	// SocketPath is the Unix socket path for the RPC server.
-	// It is derived from project/default and not user-configurable.
-	SocketPath string `yaml:"-"`
+	// ListenAddr is the HTTP listen address for the daemon API.
+	// Format: ":port" or "host:port". Derived from project/default
+	// when not explicitly set.
+	ListenAddr string `yaml:"listen_addr"`
 
 	// Project is the prog project to watch for tasks.
 	// Required in auto mode; optional in manual mode.
@@ -133,8 +145,8 @@ type Config struct {
 
 // ApplyDefaults fills in zero-valued fields with sensible defaults.
 func (c *Config) ApplyDefaults() {
-	if c.SocketPath == "" {
-		c.SocketPath = protocol.SocketPathFor(c.Project)
+	if c.ListenAddr == "" {
+		c.ListenAddr = listenAddrFromURL(protocol.DaemonURLFor(c.Project))
 	}
 	if c.PollInterval == 0 {
 		c.PollInterval = DefaultPollInterval

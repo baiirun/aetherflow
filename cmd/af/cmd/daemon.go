@@ -9,7 +9,6 @@ import (
 
 	"github.com/baiirun/aetherflow/internal/client"
 	"github.com/baiirun/aetherflow/internal/daemon"
-	"github.com/baiirun/aetherflow/internal/protocol"
 	"github.com/spf13/cobra"
 )
 
@@ -19,25 +18,11 @@ var daemonCmd = &cobra.Command{
 	Long:  `Start the daemon or check its status.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Default: show status
-		c := client.New(resolveSocketPath(cmd))
-		lifecycle, err := c.DaemonLifecycle()
+		c := client.New(resolveDaemonURL(cmd))
+		status, err := c.StatusFull()
 		if err != nil {
 			printDaemonNotRunning(os.Stdout)
 			return
-		}
-
-		if lifecycle.State != protocol.LifecycleStateRunning {
-			_, _ = fmt.Fprintf(os.Stdout, "%s\n", lifecycle.State)
-			if lifecycle.LastError != "" {
-				_, _ = fmt.Fprintf(os.Stdout, "detail: %s\n", lifecycle.LastError)
-			}
-			printDaemonStartHint(os.Stdout)
-			return
-		}
-
-		status, err := c.StatusFull()
-		if err != nil {
-			Fatal("%v", err)
 		}
 		fmt.Printf("running (pool: %d, project: %s, spawn-policy: %s)\n", status.PoolSize, status.Project, status.SpawnPolicy)
 	},
@@ -156,28 +141,11 @@ var daemonStopCmd = &cobra.Command{
 	Use:   "stop",
 	Short: "Stop the daemon",
 	Run: func(cmd *cobra.Command, args []string) {
-		c := client.New(resolveSocketPath(cmd))
-		force, _ := cmd.Flags().GetBool("force")
-		result, err := c.StopDaemon(force)
-		if err != nil {
+		c := client.New(resolveDaemonURL(cmd))
+		if err := c.Shutdown(); err != nil {
 			Fatal("%v", err)
 		}
-		switch result.Outcome {
-		case protocol.StopOutcomeStopping, protocol.StopOutcomeStopped:
-			if result.Message != "" {
-				fmt.Println(result.Message)
-			} else {
-				fmt.Println("daemon stopping")
-			}
-		case protocol.StopOutcomeRefused:
-			fmt.Printf("daemon stop refused: %s\n", result.Message)
-			if result.Status.ActiveSessionCount > 0 {
-				fmt.Printf("active sessions: %d\n", result.Status.ActiveSessionCount)
-			}
-			os.Exit(2)
-		default:
-			Fatal("%s", result.Message)
-		}
+		fmt.Println("daemon stopping")
 	},
 }
 

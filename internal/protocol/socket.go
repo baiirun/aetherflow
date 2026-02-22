@@ -1,27 +1,36 @@
 package protocol
 
-import (
-	"fmt"
-	"path/filepath"
+import "fmt"
+
+const (
+	// DefaultDaemonPort is the default HTTP port for the daemon API.
+	DefaultDaemonPort = 7070
+
+	// DefaultDaemonURL is the fallback daemon URL when no project is known.
+	DefaultDaemonURL = "http://127.0.0.1:7070"
 )
 
-// DefaultSocketPath is the fallback socket path when no project is known.
-// Prefer SocketPathFor(project) to scope sockets per project.
-const DefaultSocketPath = "/tmp/aetherd.sock"
-
-// SocketPathFor returns a project-scoped socket path.
-// Each project gets its own socket so daemons for different projects
-// can't accidentally interfere with each other.
+// DaemonURLFor returns a project-scoped daemon URL.
+// Each project gets a unique port offset from the default so daemons
+// for different projects don't collide.
 //
-// The project name is sanitized with filepath.Base to prevent path
-// traversal — a project name like "../../etc/evil" is reduced to "evil".
-func SocketPathFor(project string) string {
+// Port allocation: hash the project name to a port in the range
+// [7071, 7170] (100 slots). Collisions are possible but unlikely
+// for typical usage (1-5 projects).
+func DaemonURLFor(project string) string {
 	if project == "" {
-		return DefaultSocketPath
+		return DefaultDaemonURL
 	}
-	safe := filepath.Base(project)
-	if safe == "." || safe == "/" {
-		return DefaultSocketPath
+	port := DefaultDaemonPort + 1 + int(simpleHash(project)%100)
+	return fmt.Sprintf("http://127.0.0.1:%d", port)
+}
+
+// simpleHash is a basic FNV-1a-style hash for port allocation.
+func simpleHash(s string) uint32 {
+	var h uint32 = 2166136261
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= 16777619
 	}
-	return fmt.Sprintf("/tmp/aetherd-%s.sock", safe)
+	return h
 }

@@ -33,7 +33,7 @@ Requires a running daemon and an active agent.`,
 		streaming := follow || watch
 		_ = raw // reserved for future --raw flag (events.list raw=true)
 
-		c := client.New(resolveSocketPath(cmd))
+		c := client.New(resolveDaemonURL(cmd))
 		result, err := c.EventsList(args[0], 0)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
