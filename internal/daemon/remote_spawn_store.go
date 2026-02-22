@@ -57,7 +57,6 @@ type RemoteSpawnRecord struct {
 	LastError         string           `json:"last_error,omitempty"`
 	CreatedAt         time.Time        `json:"created_at"`
 	UpdatedAt         time.Time        `json:"updated_at"`
-	LastReconciledAt  time.Time        `json:"last_reconciled_at,omitempty"`
 }
 
 type remoteSpawnDiskState struct {
@@ -129,6 +128,9 @@ func (s *RemoteSpawnStore) Upsert(rec RemoteSpawnRecord) error {
 	for i := range state.Records {
 		if state.Records[i].SpawnID != rec.SpawnID {
 			continue
+		}
+		if err := validateRemoteSpawnTransition(state.Records[i].State, rec.State); err != nil {
+			return err
 		}
 		rec.CreatedAt = state.Records[i].CreatedAt
 		rec.UpdatedAt = now
@@ -297,18 +299,23 @@ func syncDir(dir string) error {
 	return nil
 }
 
-// pruneRemoteSpawnRecords evicts terminal records to keep store size bounded.
-// Uses the shared retentionTTL (48h, defined in pool.go) so all daemon data
-// expires on the same cadence. Non-terminal records are never pruned.
+// pruneRemoteSpawnRecords evicts terminal and stale unknown records to keep
+// store size bounded. Uses the shared retentionTTL (48h, defined in pool.go)
+// so all daemon data expires on the same cadence.
+// Records in the "unknown" state are also pruned after retentionTTL since they
+// represent indeterminate outcomes that will never resolve without operator action.
 func pruneRemoteSpawnRecords(records []RemoteSpawnRecord, now time.Time) []RemoteSpawnRecord {
 	if len(records) == 0 {
 		return records
 	}
 
-	// Partition into non-terminal (never pruned) and terminal (eligible for eviction).
+	// Partition into non-terminal (never pruned) and pruneable (terminal + stale unknown).
 	var nonTerminal, terminal []RemoteSpawnRecord
 	for _, r := range records {
 		if isTerminalRemoteSpawnState(r.State) {
+			terminal = append(terminal, r)
+		} else if r.State == RemoteSpawnUnknown && !r.UpdatedAt.IsZero() && now.Sub(r.UpdatedAt) > retentionTTL {
+			// Unknown records that have exceeded the retention window are pruneable.
 			terminal = append(terminal, r)
 		} else {
 			nonTerminal = append(nonTerminal, r)
@@ -347,6 +354,50 @@ func pruneRemoteSpawnRecords(records []RemoteSpawnRecord, now time.Time) []Remot
 
 func isTerminalRemoteSpawnState(state RemoteSpawnState) bool {
 	return state == RemoteSpawnFailed || state == RemoteSpawnTerminated
+}
+
+// IsRemoteSpawnPending reports whether the spawn is still in progress and
+// the session is not yet ready. Used by af session attach to return
+// SESSION_NOT_READY with a retry hint.
+func IsRemoteSpawnPending(rec *RemoteSpawnRecord) bool {
+	return rec.State == RemoteSpawnRequested || rec.State == RemoteSpawnSpawning || rec.State == RemoteSpawnUnknown
+}
+
+// IsRemoteSpawnTerminal reports whether the spawn has reached a final state
+// (failed or terminated) and will not produce a session.
+func IsRemoteSpawnTerminal(rec *RemoteSpawnRecord) bool {
+	return isTerminalRemoteSpawnState(rec.State)
+}
+
+// validRemoteSpawnTransitions defines the allowed state machine transitions.
+// Terminal states (failed, terminated) have no outgoing transitions.
+var validRemoteSpawnTransitions = map[RemoteSpawnState][]RemoteSpawnState{
+	RemoteSpawnRequested: {RemoteSpawnSpawning, RemoteSpawnFailed},
+	RemoteSpawnSpawning:  {RemoteSpawnRunning, RemoteSpawnFailed, RemoteSpawnUnknown},
+	RemoteSpawnRunning:   {RemoteSpawnFailed, RemoteSpawnTerminated},
+	RemoteSpawnUnknown:   {RemoteSpawnRunning, RemoteSpawnFailed, RemoteSpawnTerminated},
+	// Terminal states: no outgoing transitions.
+	RemoteSpawnFailed:     {},
+	RemoteSpawnTerminated: {},
+}
+
+// validateRemoteSpawnTransition returns an error if moving from → to is
+// not a valid state machine transition. Self-transitions (from == to) are
+// allowed to support idempotent upserts.
+func validateRemoteSpawnTransition(from, to RemoteSpawnState) error {
+	if from == to {
+		return nil // idempotent upsert
+	}
+	allowed, ok := validRemoteSpawnTransitions[from]
+	if !ok {
+		return fmt.Errorf("unknown remote spawn state %q", from)
+	}
+	for _, a := range allowed {
+		if a == to {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid remote spawn state transition: %s → %s", from, to)
 }
 
 const fileLockTimeout = 5 * time.Second

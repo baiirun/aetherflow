@@ -114,13 +114,39 @@ func TestConfigValidate(t *testing.T) {
 		wantErr string
 	}{
 		{
+			name:    "listen addr binds to all interfaces rejected",
+			cfg:     Config{ListenAddr: "0.0.0.0:7070", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
+			wantErr: "listen_addr host must be localhost",
+		},
+		{
+			name:    "listen addr non-loopback IP rejected",
+			cfg:     Config{ListenAddr: "192.168.1.1:7070", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
+			wantErr: "listen_addr host must be localhost",
+		},
+		{
+			name:    "listen addr localhost allowed",
+			cfg:     Config{ListenAddr: "localhost:7070", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", ReconcileInterval: DefaultReconcileInterval},
+			wantErr: "",
+		},
+		{
+			name:    "listen addr 127.0.0.1 allowed",
+			cfg:     Config{ListenAddr: "127.0.0.1:7070", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", ReconcileInterval: DefaultReconcileInterval},
+			wantErr: "",
+		},
+		{
+			name:    "listen addr port-only allowed",
+			cfg:     Config{ListenAddr: ":7070", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", ReconcileInterval: DefaultReconcileInterval},
+			wantErr: "",
+		},
+		{
 			name:    "missing project in auto mode",
-			cfg:     Config{PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", SpawnPolicy: SpawnPolicyAuto},
+			cfg:     Config{ListenAddr: "127.0.0.1:7070", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", SpawnPolicy: SpawnPolicyAuto},
 			wantErr: "project is required when spawn-policy is",
 		},
 		{
 			name: "missing project in manual mode without socket",
 			cfg: Config{
+				ListenAddr:        "127.0.0.1:7070",
 				PollInterval:      time.Second,
 				PoolSize:          1,
 				SpawnCmd:          "cmd",
@@ -143,77 +169,78 @@ func TestConfigValidate(t *testing.T) {
 		},
 		{
 			name:    "project with slashes",
-			cfg:     Config{Project: "../etc/evil", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
+			cfg:     Config{ListenAddr: "127.0.0.1:7070", Project: "../etc/evil", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
 			wantErr: "invalid characters",
 		},
 		{
 			name:    "project with spaces",
-			cfg:     Config{Project: "my project", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
+			cfg:     Config{ListenAddr: "127.0.0.1:7070", Project: "my project", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
 			wantErr: "invalid characters",
 		},
 		{
 			name:    "project starting with dot",
-			cfg:     Config{Project: ".hidden", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
+			cfg:     Config{ListenAddr: "127.0.0.1:7070", Project: ".hidden", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
 			wantErr: "invalid characters",
 		},
 		{
 			name:    "project starting with hyphen",
-			cfg:     Config{Project: "-bad", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
+			cfg:     Config{ListenAddr: "127.0.0.1:7070", Project: "-bad", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
 			wantErr: "invalid characters",
 		},
 		{
 			name:    "negative poll interval",
-			cfg:     Config{Project: "test", PollInterval: -1, PoolSize: 1, SpawnCmd: "cmd"},
+			cfg:     Config{ListenAddr: "127.0.0.1:7070", Project: "test", PollInterval: -1, PoolSize: 1, SpawnCmd: "cmd"},
 			wantErr: "poll-interval must be positive",
 		},
 		{
 			name:    "zero pool size",
-			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 0, SpawnCmd: "cmd"},
+			cfg:     Config{ListenAddr: "127.0.0.1:7070", Project: "test", PollInterval: time.Second, PoolSize: 0, SpawnCmd: "cmd"},
 			wantErr: "pool-size must be positive",
 		},
 		{
 			name:    "negative pool size",
-			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: -1, SpawnCmd: "cmd"},
+			cfg:     Config{ListenAddr: "127.0.0.1:7070", Project: "test", PollInterval: time.Second, PoolSize: -1, SpawnCmd: "cmd"},
 			wantErr: "pool-size must be positive",
 		},
 		{
 			name:    "empty spawn cmd",
-			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: ""},
+			cfg:     Config{ListenAddr: "127.0.0.1:7070", Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: ""},
 			wantErr: "spawn-cmd must not be empty",
 		},
 		{
 			name:    "invalid server url",
-			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "opencode run", ServerURL: "://bad"},
+			cfg:     Config{ListenAddr: "127.0.0.1:7070", Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "opencode run", ServerURL: "://bad"},
 			wantErr: "invalid server-url",
 		},
 		{
 			name:    "non-local server url rejected",
-			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "opencode run", ServerURL: "http://example.com:4096"},
+			cfg:     Config{ListenAddr: "127.0.0.1:7070", Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "opencode run", ServerURL: "http://example.com:4096"},
 			wantErr: "host must be localhost",
 		},
 		{
 			name:    "invalid spawn policy",
-			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", SpawnPolicy: "sometimes"},
+			cfg:     Config{ListenAddr: "127.0.0.1:7070", Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", SpawnPolicy: "sometimes"},
 			wantErr: "spawn-policy must be one of",
 		},
 		{
 			name:    "negative max retries",
-			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", MaxRetries: -1, ReconcileInterval: DefaultReconcileInterval},
+			cfg:     Config{ListenAddr: "127.0.0.1:7070", Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", MaxRetries: -1, ReconcileInterval: DefaultReconcileInterval},
 			wantErr: "max-retries must be non-negative",
 		},
 		{
 			name:    "reconcile interval too small",
-			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", ReconcileInterval: time.Second},
+			cfg:     Config{ListenAddr: "127.0.0.1:7070", Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", ReconcileInterval: time.Second},
 			wantErr: "reconcile-interval must be at least 5s",
 		},
 		{
 			name:    "invalid prompt dir",
-			cfg:     Config{Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", ReconcileInterval: DefaultReconcileInterval, PromptDir: "/nonexistent/prompts"},
+			cfg:     Config{ListenAddr: "127.0.0.1:7070", Project: "test", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd", ReconcileInterval: DefaultReconcileInterval, PromptDir: "/nonexistent/prompts"},
 			wantErr: "prompt-dir",
 		},
 		{
 			name: "valid config with embedded prompts",
 			cfg: Config{
+				ListenAddr:        "127.0.0.1:7070",
 				Project:           "test",
 				PollInterval:      10 * time.Second,
 				PoolSize:          3,
@@ -228,6 +255,7 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name: "valid config with filesystem prompts",
 			cfg: Config{
+				ListenAddr:        "127.0.0.1:7070",
 				Project:           "test",
 				PollInterval:      10 * time.Second,
 				PoolSize:          3,
@@ -242,6 +270,7 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name: "zero max retries is valid",
 			cfg: Config{
+				ListenAddr:        "127.0.0.1:7070",
 				Project:           "test",
 				PollInterval:      time.Second,
 				PoolSize:          1,

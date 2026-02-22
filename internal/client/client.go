@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/baiirun/aetherflow/internal/protocol"
@@ -198,7 +199,7 @@ type StatusAgentParams struct {
 
 // StatusAgent returns detailed status for a single agent including tool call history.
 func (c *Client) StatusAgent(agentName string, limit int) (*AgentDetail, error) {
-	path := fmt.Sprintf("/api/v1/status/agents/%s", agentName)
+	path := fmt.Sprintf("/api/v1/status/agents/%s", url.PathEscape(agentName))
 	if limit > 0 {
 		path = fmt.Sprintf("%s?limit=%d", path, limit)
 	}
@@ -235,7 +236,7 @@ type EventsListResult struct {
 // EventsList returns events for an agent from the daemon's event buffer.
 // When afterTimestamp is set, only events after that timestamp are returned.
 func (c *Client) EventsList(agentName string, afterTimestamp int64) (*EventsListResult, error) {
-	path := fmt.Sprintf("/api/v1/events?agent_name=%s", agentName)
+	path := fmt.Sprintf("/api/v1/events?agent_name=%s", url.QueryEscape(agentName))
 	if afterTimestamp > 0 {
 		path = fmt.Sprintf("%s&after_timestamp=%d", path, afterTimestamp)
 	}
@@ -295,7 +296,7 @@ func (c *Client) SpawnRegister(params SpawnRegisterParams) error {
 
 // SpawnDeregister marks a spawned agent as exited in the daemon's registry.
 func (c *Client) SpawnDeregister(spawnID string) error {
-	path := fmt.Sprintf("/api/v1/spawns/%s", spawnID)
+	path := fmt.Sprintf("/api/v1/spawns/%s", url.PathEscape(spawnID))
 	return c.doDelete(path, nil)
 }
 

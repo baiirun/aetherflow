@@ -157,18 +157,12 @@ func newRequestID() (string, error) {
 func runSpritesSpawn(cmd *cobra.Command, spawnID, requestID, userPrompt string, jsonOutput bool, cfg daemon.Config) {
 	token := strings.TrimSpace(os.Getenv("SPRITES_TOKEN"))
 	if token == "" {
-		if jsonOutput {
-			fatalSpawnJSON("MISSING_TOKEN", spawnID, fmt.Errorf("sprites provider requires SPRITES_TOKEN"))
-		}
-		Fatal("sprites provider requires SPRITES_TOKEN")
+		fatalSpawn(jsonOutput, "MISSING_TOKEN", spawnID, "sprites provider requires SPRITES_TOKEN")
 	}
 
 	store, err := daemon.OpenRemoteSpawnStore(cfg.SessionDir)
 	if err != nil {
-		if jsonOutput {
-			fatalSpawnJSON("STORE_ERROR", spawnID, fmt.Errorf("opening remote spawn store: %w", err))
-		}
-		Fatal("opening remote spawn store: %v", err)
+		fatalSpawn(jsonOutput, "STORE_ERROR", spawnID, "opening remote spawn store: %v", err)
 	}
 	rec := daemon.RemoteSpawnRecord{
 		SpawnID:   spawnID,
@@ -180,16 +174,10 @@ func runSpritesSpawn(cmd *cobra.Command, spawnID, requestID, userPrompt string, 
 		if daemon.IsIdempotencyConflict(err) {
 			existing, lookupErr := store.GetByProviderRequest("sprites", requestID)
 			if lookupErr != nil {
-				if jsonOutput {
-					fatalSpawnJSON("IDEMPOTENCY_LOOKUP_ERROR", spawnID, fmt.Errorf("resolving idempotency conflict: %w", lookupErr))
-				}
-				Fatal("resolving idempotency conflict: %v", lookupErr)
+				fatalSpawn(jsonOutput, "IDEMPOTENCY_LOOKUP_ERROR", spawnID, "resolving idempotency conflict: %v", lookupErr)
 			}
 			if existing == nil {
-				if jsonOutput {
-					fatalSpawnJSON("IDEMPOTENCY_LOOKUP_ERROR", spawnID, fmt.Errorf("existing spawn not found for request-id %q", requestID))
-				}
-				Fatal("resolving idempotency conflict: existing spawn not found for request-id %q", requestID)
+				fatalSpawn(jsonOutput, "IDEMPOTENCY_LOOKUP_ERROR", spawnID, "existing spawn not found for request-id %q", requestID)
 			}
 			if jsonOutput {
 				_ = json.NewEncoder(os.Stdout).Encode(spawnResult{Success: true, SpawnID: existing.SpawnID, PID: 0})
@@ -198,10 +186,7 @@ func runSpritesSpawn(cmd *cobra.Command, spawnID, requestID, userPrompt string, 
 			fmt.Printf("%s Reusing existing remote runtime %s for request-id %s\n", term.Bold("af spawn:"), term.Cyan(existing.SpawnID), term.Cyan(requestID))
 			return
 		}
-		if jsonOutput {
-			fatalSpawnJSON("STORE_ERROR", spawnID, fmt.Errorf("persisting remote spawn request: %w", err))
-		}
-		Fatal("persisting remote spawn request: %v", err)
+		fatalSpawn(jsonOutput, "STORE_ERROR", spawnID, "persisting remote spawn request: %v", err)
 	}
 
 	client := daemon.NewSpritesClient(token)
@@ -218,10 +203,7 @@ func runSpritesSpawn(cmd *cobra.Command, spawnID, requestID, userPrompt string, 
 		}
 		rec.LastError = err.Error()
 		_ = store.Upsert(rec)
-		if jsonOutput {
-			fatalSpawnJSON("PROVIDER_CREATE_ERROR", spawnID, fmt.Errorf("sprites create failed: %w", err))
-		}
-		Fatal("sprites create failed: %v", err)
+		fatalSpawn(jsonOutput, "PROVIDER_CREATE_ERROR", spawnID, "sprites create failed: %v", err)
 	}
 
 	rec.ProviderSandboxID = created.SandboxID
@@ -231,17 +213,11 @@ func runSpritesSpawn(cmd *cobra.Command, spawnID, requestID, userPrompt string, 
 		rec.State = daemon.RemoteSpawnFailed
 		rec.LastError = err.Error()
 		_ = store.Upsert(rec)
-		if jsonOutput {
-			fatalSpawnJSON("UNTRUSTED_ATTACH_TARGET", spawnID, fmt.Errorf("sprites returned untrusted attach target: %w", err))
-		}
-		Fatal("sprites returned untrusted attach target: %v", err)
+		fatalSpawn(jsonOutput, "UNTRUSTED_ATTACH_TARGET", spawnID, "sprites returned untrusted attach target: %v", err)
 	}
 	rec.State = daemon.RemoteSpawnSpawning
 	if err := store.Upsert(rec); err != nil {
-		if jsonOutput {
-			fatalSpawnJSON("STORE_ERROR", spawnID, fmt.Errorf("persisting remote spawn state: %w", err))
-		}
-		Fatal("persisting remote spawn state: %v", err)
+		fatalSpawn(jsonOutput, "STORE_ERROR", spawnID, "persisting remote spawn state: %v", err)
 	}
 
 	if jsonOutput {
@@ -344,16 +320,20 @@ type spawnErrorResult struct {
 	Error   string `json:"error"`
 }
 
-// fatalSpawnJSON emits a structured JSON error to stdout and exits.
-// Use instead of Fatal() when jsonOutput is true.
-func fatalSpawnJSON(code, spawnID string, err error) {
-	_ = json.NewEncoder(os.Stdout).Encode(spawnErrorResult{
-		Success: false,
-		Code:    code,
-		SpawnID: spawnID,
-		Error:   err.Error(),
-	})
-	os.Exit(1)
+// fatalSpawn exits with a structured JSON error (if jsonOutput) or a plain
+// text message. Consolidates the repeated if-jsonOutput-fatalSpawnJSON-Fatal
+// pattern into a single call site.
+func fatalSpawn(jsonOutput bool, code, spawnID string, format string, args ...any) {
+	if jsonOutput {
+		_ = json.NewEncoder(os.Stdout).Encode(spawnErrorResult{
+			Success: false,
+			Code:    code,
+			SpawnID: spawnID,
+			Error:   fmt.Sprintf(format, args...),
+		})
+		os.Exit(1)
+	}
+	Fatal(format, args...)
 }
 
 // runForeground launches the agent in the current terminal.

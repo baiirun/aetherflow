@@ -35,19 +35,13 @@ type Daemon struct {
 	poller     *Poller
 	pool       *Pool
 	spawns     *SpawnRegistry
+	rspawns    *RemoteSpawnStore // persistent store for remote (provider-backed) spawns
 	sstore     *sessions.Store
 	events     *EventBuffer
 	server     *exec.Cmd
 	serverMu   sync.Mutex
 	shutdown   chan struct{}
 	log        *slog.Logger
-}
-
-// Request is the JSON-RPC style request envelope.
-// Retained for compatibility with internal handler methods.
-type Request struct {
-	Method string          `json:"method"`
-	Params json.RawMessage `json:"params,omitempty"`
 }
 
 // Response is the JSON-RPC style response envelope.
@@ -80,6 +74,12 @@ func New(cfg Config) *Daemon {
 	if storeErr != nil && log != nil {
 		log.Warn("session registry unavailable", "error", storeErr)
 	}
+
+	rspawns, rspawnErr := OpenRemoteSpawnStore(cfg.SessionDir)
+	if rspawnErr != nil && log != nil {
+		log.Warn("remote spawn store unavailable", "error", rspawnErr)
+	}
+
 	if cfg.Project != "" {
 		poller = NewPoller(cfg.Project, cfg.PollInterval, cfg.Runner, log)
 		pool = NewPool(cfg, cfg.Runner, cfg.Starter, log)
@@ -93,6 +93,7 @@ func New(cfg Config) *Daemon {
 		poller:   poller,
 		pool:     pool,
 		spawns:   NewSpawnRegistry(),
+		rspawns:  rspawns,
 		sstore:   store,
 		events:   NewEventBuffer(DefaultEventBufSize),
 		shutdown: make(chan struct{}),
@@ -130,9 +131,14 @@ func (d *Daemon) Run() error {
 	}
 
 	// Create HTTP server with the API handler.
+	// Timeouts prevent slowloris and hung-connection DoS attacks.
 	d.httpServer = &http.Server{
-		Addr:    d.config.ListenAddr,
-		Handler: d.newHTTPHandler(),
+		Addr:              d.config.ListenAddr,
+		Handler:           d.newHTTPHandler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// Start listener early so we can detect port conflicts before launching
@@ -324,13 +330,7 @@ func (d *Daemon) handleShutdown() *Response {
 	return &Response{Success: true}
 }
 
-func (d *Daemon) handleStatusAgent(ctx context.Context, rawParams json.RawMessage) *Response {
-	var params StatusAgentParams
-	if len(rawParams) > 0 {
-		if err := json.Unmarshal(rawParams, &params); err != nil {
-			return &Response{Success: false, Error: fmt.Sprintf("invalid params: %v", err)}
-		}
-	}
+func (d *Daemon) handleStatusAgent(ctx context.Context, params StatusAgentParams) *Response {
 	if params.AgentName == "" {
 		return &Response{Success: false, Error: "agent_name is required"}
 	}

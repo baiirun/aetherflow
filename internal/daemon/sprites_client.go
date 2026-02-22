@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -36,10 +37,9 @@ type spritesCreateRequest struct {
 }
 
 type spritesObject struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Status string `json:"status"`
-	URL    string `json:"url"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	URL  string `json:"url"`
 }
 
 func (s *SpritesClient) Create(ctx context.Context, req ProviderCreateRequest) (ProviderCreateResult, error) {
@@ -73,7 +73,7 @@ func (s *SpritesClient) Create(ctx context.Context, req ProviderCreateRequest) (
 	}
 
 	var out spritesObject
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
 		return ProviderCreateResult{}, fmt.Errorf("decode create response: %w", err)
 	}
 
@@ -88,91 +88,15 @@ func (s *SpritesClient) Create(ctx context.Context, req ProviderCreateRequest) (
 	}
 
 	return ProviderCreateResult{
-		SandboxID:     out.Name,
-		CanonicalName: out.Name,
-		OperationID:   out.ID,
-		AttachRef:     out.URL,
+		SandboxID:   out.Name,
+		OperationID: out.ID,
+		AttachRef:   out.URL,
 	}, nil
 }
 
-func (s *SpritesClient) GetStatus(ctx context.Context, sandboxID string) (ProviderStatusResult, error) {
-	if s.token == "" {
-		return ProviderStatusResult{}, fmt.Errorf("sprites token is required")
-	}
-	name, err := sanitizeSpriteName(sandboxID)
-	if err != nil {
-		return ProviderStatusResult{}, fmt.Errorf("invalid sandbox ID for sprite name: %w", err)
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL+"/v1/sprites/"+name, nil)
-	if err != nil {
-		return ProviderStatusResult{}, fmt.Errorf("status request: %w", err)
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+s.token)
-
-	resp, err := s.http.Do(httpReq)
-	if err != nil {
-		return ProviderStatusResult{}, fmt.Errorf("get sprite status: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return ProviderStatusResult{Status: ProviderRuntimeTerminated}, nil
-	}
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		return ProviderStatusResult{}, fmt.Errorf("get sprite status failed: status %d body=%q", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-
-	var out spritesObject
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return ProviderStatusResult{}, fmt.Errorf("decode status response: %w", err)
-	}
-
-	return ProviderStatusResult{
-		Status:    mapSpritesStatus(out.Status),
-		AttachRef: out.URL,
-	}, nil
-}
-
-func (s *SpritesClient) Terminate(ctx context.Context, sandboxID string) error {
-	if s.token == "" {
-		return fmt.Errorf("sprites token is required")
-	}
-	name, err := sanitizeSpriteName(sandboxID)
-	if err != nil {
-		return fmt.Errorf("invalid sandbox ID for sprite name: %w", err)
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, s.baseURL+"/v1/sprites/"+name, nil)
-	if err != nil {
-		return fmt.Errorf("terminate request: %w", err)
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+s.token)
-
-	resp, err := s.http.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("terminate sprite: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound {
-		return nil
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-	return fmt.Errorf("terminate sprite failed: status %d body=%q", resp.StatusCode, strings.TrimSpace(string(body)))
-}
-
-func mapSpritesStatus(in string) ProviderRuntimeStatus {
-	switch strings.ToLower(strings.TrimSpace(in)) {
-	case "running":
-		return ProviderRuntimeRunning
-	case "warm":
-		return ProviderRuntimeWarm
-	case "cold":
-		return ProviderRuntimeCold
-	default:
-		return ProviderRuntimeUnknown
-	}
-}
+// validSpriteName matches lowercase alphanumeric names with hyphens, 1-63 chars.
+// This mirrors typical cloud resource naming constraints (DNS label-compatible).
+var validSpriteName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 func sanitizeSpriteName(v string) (string, error) {
 	v = strings.ToLower(strings.TrimSpace(v))
@@ -180,6 +104,9 @@ func sanitizeSpriteName(v string) (string, error) {
 	v = strings.ReplaceAll(v, " ", "-")
 	if v == "" {
 		return "", fmt.Errorf("sprite name is required but was empty")
+	}
+	if !validSpriteName.MatchString(v) {
+		return "", fmt.Errorf("sprite name %q contains invalid characters (allowed: lowercase alphanumeric, hyphens, 1-63 chars)", v)
 	}
 	return v, nil
 }

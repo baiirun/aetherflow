@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -14,6 +15,30 @@ import (
 	"github.com/baiirun/aetherflow/internal/protocol"
 	"gopkg.in/yaml.v3"
 )
+
+// validateListenAddrLocal rejects ListenAddr values that would bind the
+// daemon's unauthenticated API to a non-loopback interface. Since the API
+// has no authentication, exposing it on 0.0.0.0 or a real NIC is a security
+// risk. Bind forms like ":7070" (empty host) or "127.0.0.1:7070" are allowed.
+func validateListenAddrLocal(addr string) error {
+	if addr == "" {
+		return fmt.Errorf("listen_addr must not be empty (call ApplyDefaults first)")
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid listen_addr %q: %w", addr, err)
+	}
+	// Empty host (":7070") binds to all interfaces on most OSes, but on
+	// macOS it resolves to localhost — accept it for ergonomics.
+	if host == "" || host == "127.0.0.1" || host == "localhost" || host == "::1" {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("listen_addr host must be localhost/127.0.0.1 (got %q); the daemon API has no authentication", host)
+}
 
 // listenAddrFromURL extracts the host:port from a daemon URL string.
 // For example, "http://127.0.0.1:7070" returns "127.0.0.1:7070".
@@ -178,6 +203,9 @@ func (c *Config) ApplyDefaults() {
 // Validate checks that configuration values are valid.
 // Call after ApplyDefaults.
 func (c *Config) Validate() error {
+	if err := validateListenAddrLocal(c.ListenAddr); err != nil {
+		return err
+	}
 	if c.PollInterval <= 0 {
 		return fmt.Errorf("poll-interval must be positive, got %v", c.PollInterval)
 	}

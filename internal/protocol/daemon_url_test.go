@@ -12,7 +12,7 @@ func TestDaemonURLFor(t *testing.T) {
 		t.Errorf("DaemonURLFor(%q) = %q, want %q", "", got, DefaultDaemonURL)
 	}
 
-	// Non-empty project returns a URL with a port in the hashed range [7071, 7170].
+	// Non-empty project returns a URL with a port in the hashed range [7071, 8070].
 	got = DaemonURLFor("myproject")
 	if !strings.HasPrefix(got, "http://127.0.0.1:") {
 		t.Errorf("DaemonURLFor(%q) = %q, expected http://127.0.0.1:PORT prefix", "myproject", got)

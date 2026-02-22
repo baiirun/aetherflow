@@ -351,11 +351,11 @@ func runSessionAttach(cmd *cobra.Command, args []string) {
 				}
 				Fatal("spawn %q not found for server %q", requestedID, serverFilter)
 			}
-			if isRemoteSpawnPending(rs) {
+			if daemon.IsRemoteSpawnPending(rs) {
 				handleAttachPending(jsonOut, rs)
 				os.Exit(3)
 			}
-			if isRemoteSpawnTerminal(rs) && rs.SessionID == "" {
+			if daemon.IsRemoteSpawnTerminal(rs) && rs.SessionID == "" {
 				handleAttachErrorWithSpawn(jsonOut, "SESSION_NOT_AVAILABLE", rs, fmt.Errorf("spawn %s is %s: %s", rs.SpawnID, rs.State, strings.TrimSpace(rs.LastError)))
 				os.Exit(1)
 			}
@@ -436,14 +436,6 @@ func handleAttachErrorWithSpawn(jsonOut bool, code string, rec *daemon.RemoteSpa
 		return
 	}
 	fmt.Fprintf(os.Stderr, "%s: %v\n", code, err)
-}
-
-func isRemoteSpawnPending(rec *daemon.RemoteSpawnRecord) bool {
-	return rec.State == daemon.RemoteSpawnRequested || rec.State == daemon.RemoteSpawnSpawning || rec.State == daemon.RemoteSpawnUnknown
-}
-
-func isRemoteSpawnTerminal(rec *daemon.RemoteSpawnRecord) bool {
-	return rec.State == daemon.RemoteSpawnFailed || rec.State == daemon.RemoteSpawnTerminated
 }
 
 func openSessionStore(cmd *cobra.Command) (*sessions.Store, error) {

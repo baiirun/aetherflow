@@ -77,6 +77,64 @@ func TestRemoteSpawnStoreGetByProviderRequest(t *testing.T) {
 	}
 }
 
+func TestRemoteSpawnStoreTransitionValidation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		from    RemoteSpawnState
+		to      RemoteSpawnState
+		wantErr bool
+	}{
+		{"requested → spawning", RemoteSpawnRequested, RemoteSpawnSpawning, false},
+		{"requested → failed", RemoteSpawnRequested, RemoteSpawnFailed, false},
+		{"requested → running (invalid)", RemoteSpawnRequested, RemoteSpawnRunning, true},
+		{"spawning → running", RemoteSpawnSpawning, RemoteSpawnRunning, false},
+		{"spawning → failed", RemoteSpawnSpawning, RemoteSpawnFailed, false},
+		{"spawning → unknown", RemoteSpawnSpawning, RemoteSpawnUnknown, false},
+		{"spawning → requested (invalid)", RemoteSpawnSpawning, RemoteSpawnRequested, true},
+		{"running → terminated", RemoteSpawnRunning, RemoteSpawnTerminated, false},
+		{"running → failed", RemoteSpawnRunning, RemoteSpawnFailed, false},
+		{"running → spawning (invalid)", RemoteSpawnRunning, RemoteSpawnSpawning, true},
+		{"unknown → running", RemoteSpawnUnknown, RemoteSpawnRunning, false},
+		{"unknown → failed", RemoteSpawnUnknown, RemoteSpawnFailed, false},
+		{"failed → running (invalid)", RemoteSpawnFailed, RemoteSpawnRunning, true},
+		{"terminated → running (invalid)", RemoteSpawnTerminated, RemoteSpawnRunning, true},
+		{"self-transition (idempotent)", RemoteSpawnRunning, RemoteSpawnRunning, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, err := OpenRemoteSpawnStore(t.TempDir())
+			if err != nil {
+				t.Fatalf("OpenRemoteSpawnStore() error = %v", err)
+			}
+			// Insert initial record.
+			if err := store.Upsert(RemoteSpawnRecord{
+				SpawnID:   "spn_1",
+				Provider:  "sprites",
+				RequestID: "req_1",
+				State:     tt.from,
+			}); err != nil {
+				t.Fatalf("initial Upsert() error = %v", err)
+			}
+			// Attempt transition.
+			err = store.Upsert(RemoteSpawnRecord{
+				SpawnID:   "spn_1",
+				Provider:  "sprites",
+				RequestID: "req_1",
+				State:     tt.to,
+			})
+			if tt.wantErr && err == nil {
+				t.Fatal("expected error for invalid transition, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func TestPruneRemoteSpawnRecordsDropsOldTerminal(t *testing.T) {
 	t.Parallel()
 	now := time.Now()

@@ -4,7 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
+)
+
+const (
+	// maxRequestBodyBytes limits POST request bodies to prevent memory
+	// exhaustion from oversized payloads. Generous for the expected
+	// envelope sizes; the event data limit (256KB) is checked separately.
+	maxRequestBodyBytes = 1 << 20 // 1 MiB
 )
 
 // newHTTPHandler builds the HTTP handler (mux) for the daemon API.
@@ -53,16 +59,20 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // writeResponse converts a legacy *Response to an HTTP response.
-// Success → 200, failure → 400 (or caller overrides).
+// Success → 200, failure → 422 (Unprocessable Entity).
+// 422 is used over 400 because the request was syntactically valid but the
+// server couldn't process it (e.g., unknown agent, invalid state). This
+// distinguishes business logic errors from malformed request errors (400).
 func writeResponse(w http.ResponseWriter, resp *Response) {
 	if resp.Success {
 		writeJSON(w, http.StatusOK, resp)
 	} else {
-		writeJSON(w, http.StatusBadRequest, resp)
+		writeJSON(w, http.StatusUnprocessableEntity, resp)
 	}
 }
 
 func (d *Daemon) httpSessionEvent(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	var params SessionEventParams
 	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
 		writeJSON(w, http.StatusBadRequest, &Response{
@@ -71,8 +81,7 @@ func (d *Daemon) httpSessionEvent(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	raw, _ := json.Marshal(params)
-	writeResponse(w, d.handleSessionEvent(raw))
+	writeResponse(w, d.handleSessionEvent(params))
 }
 
 func (d *Daemon) httpEventsList(w http.ResponseWriter, r *http.Request) {
@@ -89,8 +98,7 @@ func (d *Daemon) httpEventsList(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("raw") == "true" {
 		params.Raw = true
 	}
-	raw, _ := json.Marshal(params)
-	writeResponse(w, d.handleEventsList(raw))
+	writeResponse(w, d.handleEventsList(params))
 }
 
 func (d *Daemon) httpStatusFull(w http.ResponseWriter, r *http.Request) {
@@ -113,8 +121,7 @@ func (d *Daemon) httpStatusAgent(w http.ResponseWriter, r *http.Request) {
 			params.Limit = l
 		}
 	}
-	raw, _ := json.Marshal(params)
-	writeResponse(w, d.handleStatusAgent(r.Context(), raw))
+	writeResponse(w, d.handleStatusAgent(r.Context(), params))
 }
 
 func (d *Daemon) httpPoolDrain(w http.ResponseWriter, r *http.Request) {
@@ -130,6 +137,7 @@ func (d *Daemon) httpPoolResume(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) httpSpawnRegister(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	var params SpawnRegisterParams
 	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
 		writeJSON(w, http.StatusBadRequest, &Response{
@@ -138,8 +146,7 @@ func (d *Daemon) httpSpawnRegister(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	raw, _ := json.Marshal(params)
-	writeResponse(w, d.handleSpawnRegister(raw))
+	writeResponse(w, d.handleSpawnRegister(params))
 }
 
 func (d *Daemon) httpSpawnDeregister(w http.ResponseWriter, r *http.Request) {
@@ -151,26 +158,9 @@ func (d *Daemon) httpSpawnDeregister(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	params := SpawnDeregisterParams{SpawnID: spawnID}
-	raw, _ := json.Marshal(params)
-	writeResponse(w, d.handleSpawnDeregister(raw))
+	writeResponse(w, d.handleSpawnDeregister(SpawnDeregisterParams{SpawnID: spawnID}))
 }
 
 func (d *Daemon) httpShutdown(w http.ResponseWriter, r *http.Request) {
 	writeResponse(w, d.handleShutdown())
-}
-
-// daemonURLToListenAddr extracts the host:port from a daemon URL string.
-// For example, "http://127.0.0.1:7070" returns "127.0.0.1:7070".
-// This is exported for use by tests that need to construct listener addresses.
-func daemonURLToListenAddr(daemonURL string) string {
-	// Strip scheme prefix for simpler parsing.
-	addr := daemonURL
-	addr = strings.TrimPrefix(addr, "http://")
-	addr = strings.TrimPrefix(addr, "https://")
-	// Remove any trailing path.
-	if i := strings.Index(addr, "/"); i != -1 {
-		addr = addr[:i]
-	}
-	return addr
 }

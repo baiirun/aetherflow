@@ -16,7 +16,7 @@ import (
 const maxEventDataBytes = 256 * 1024
 
 // SessionEventParams are the parameters for the session.event RPC method.
-// These arrive from the opencode plugin via the daemon's Unix socket.
+// These arrive from the opencode plugin via the daemon's HTTP API.
 type SessionEventParams struct {
 	EventType string          `json:"event_type"`
 	SessionID string          `json:"session_id"`
@@ -30,13 +30,7 @@ type SessionEventParams struct {
 //
 // On session.created events, the handler also correlates the session ID to
 // a pool agent or spawn entry that hasn't been assigned a session yet.
-func (d *Daemon) handleSessionEvent(rawParams json.RawMessage) *Response {
-	var params SessionEventParams
-	if len(rawParams) > 0 {
-		if err := json.Unmarshal(rawParams, &params); err != nil {
-			return &Response{Success: false, Error: fmt.Sprintf("invalid params: %v", err)}
-		}
-	}
+func (d *Daemon) handleSessionEvent(params SessionEventParams) *Response {
 	if params.SessionID == "" {
 		return &Response{Success: false, Error: "session_id is required"}
 	}
@@ -79,13 +73,7 @@ type EventsListResult struct {
 // handleEventsList returns events for an agent from the in-memory event buffer.
 // The agent is looked up in the pool and spawn registry to resolve its session ID,
 // then events are read from the buffer. Supports incremental reads via after_timestamp.
-func (d *Daemon) handleEventsList(rawParams json.RawMessage) *Response {
-	var params EventsListParams
-	if len(rawParams) > 0 {
-		if err := json.Unmarshal(rawParams, &params); err != nil {
-			return &Response{Success: false, Error: fmt.Sprintf("invalid params: %v", err)}
-		}
-	}
+func (d *Daemon) handleEventsList(params EventsListParams) *Response {
 	if params.AgentName == "" {
 		return &Response{Success: false, Error: "agent_name is required"}
 	}
@@ -259,6 +247,31 @@ func (d *Daemon) claimSession(sessionID string) {
 					"spawn_id", c.agentID,
 					"error", err,
 				)
+			}
+		}
+		// Update the persistent RemoteSpawnStore so `af session attach <spawn_id>`
+		// can resolve the session_id for remote (provider-backed) spawns.
+		if d.rspawns != nil {
+			if rs, err := d.rspawns.GetBySpawnID(c.agentID); err != nil {
+				d.log.Warn("failed to look up remote spawn for session binding",
+					"spawn_id", c.agentID,
+					"error", err,
+				)
+			} else if rs != nil {
+				rs.SessionID = sessionID
+				rs.State = RemoteSpawnRunning
+				if err := d.rspawns.Upsert(*rs); err != nil {
+					d.log.Warn("failed to persist session_id to remote spawn store",
+						"spawn_id", c.agentID,
+						"session_id", sessionID,
+						"error", err,
+					)
+				} else {
+					d.log.Info("remote spawn session bound",
+						"spawn_id", c.agentID,
+						"session_id", sessionID,
+					)
+				}
 			}
 		}
 	}

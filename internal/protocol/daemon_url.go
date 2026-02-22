@@ -15,13 +15,13 @@ const (
 // for different projects don't collide.
 //
 // Port allocation: hash the project name to a port in the range
-// [7071, 7170] (100 slots). Collisions are possible but unlikely
-// for typical usage (1-5 projects).
+// [7071, 8070] (1000 slots). Collisions are possible but unlikely
+// for typical usage (1-10 projects).
 func DaemonURLFor(project string) string {
 	if project == "" {
 		return DefaultDaemonURL
 	}
-	port := DefaultDaemonPort + 1 + int(simpleHash(project)%100)
+	port := DefaultDaemonPort + 1 + int(simpleHash(project)%1000)
 	return fmt.Sprintf("http://127.0.0.1:%d", port)
 }
 

@@ -147,8 +147,8 @@ func TestIsRemoteSpawnPending(t *testing.T) {
 
 	for _, tc := range tests {
 		rec := &daemon.RemoteSpawnRecord{State: tc.state}
-		if got := isRemoteSpawnPending(rec); got != tc.want {
-			t.Fatalf("isRemoteSpawnPending(%q) = %v, want %v", tc.state, got, tc.want)
+		if got := daemon.IsRemoteSpawnPending(rec); got != tc.want {
+			t.Fatalf("IsRemoteSpawnPending(%q) = %v, want %v", tc.state, got, tc.want)
 		}
 	}
 }
@@ -167,8 +167,8 @@ func TestIsRemoteSpawnTerminal(t *testing.T) {
 
 	for _, tc := range tests {
 		rec := &daemon.RemoteSpawnRecord{State: tc.state}
-		if got := isRemoteSpawnTerminal(rec); got != tc.want {
-			t.Fatalf("isRemoteSpawnTerminal(%q) = %v, want %v", tc.state, got, tc.want)
+		if got := daemon.IsRemoteSpawnTerminal(rec); got != tc.want {
+			t.Fatalf("IsRemoteSpawnTerminal(%q) = %v, want %v", tc.state, got, tc.want)
 		}
 	}
 }
