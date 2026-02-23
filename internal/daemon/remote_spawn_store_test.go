@@ -95,6 +95,7 @@ func TestRemoteSpawnStoreTransitionValidation(t *testing.T) {
 		{"spawning → requested (invalid)", RemoteSpawnSpawning, RemoteSpawnRequested, true},
 		{"running → terminated", RemoteSpawnRunning, RemoteSpawnTerminated, false},
 		{"running → failed", RemoteSpawnRunning, RemoteSpawnFailed, false},
+		{"running → unknown", RemoteSpawnRunning, RemoteSpawnUnknown, false},
 		{"running → spawning (invalid)", RemoteSpawnRunning, RemoteSpawnSpawning, true},
 		{"unknown → running", RemoteSpawnUnknown, RemoteSpawnRunning, false},
 		{"unknown → failed", RemoteSpawnUnknown, RemoteSpawnFailed, false},
@@ -132,6 +133,51 @@ func TestRemoteSpawnStoreTransitionValidation(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestIsRemoteSpawnPending(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		state RemoteSpawnState
+		want  bool
+	}{
+		{state: RemoteSpawnRequested, want: true},
+		{state: RemoteSpawnSpawning, want: true},
+		{state: RemoteSpawnUnknown, want: true},
+		{state: RemoteSpawnFailed, want: false},
+		{state: RemoteSpawnTerminated, want: false},
+		{state: RemoteSpawnRunning, want: false},
+	}
+
+	for _, tc := range tests {
+		rec := &RemoteSpawnRecord{State: tc.state}
+		if got := IsRemoteSpawnPending(rec); got != tc.want {
+			t.Fatalf("IsRemoteSpawnPending(%q) = %v, want %v", tc.state, got, tc.want)
+		}
+	}
+}
+
+func TestIsRemoteSpawnTerminal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		state RemoteSpawnState
+		want  bool
+	}{
+		{state: RemoteSpawnFailed, want: true},
+		{state: RemoteSpawnTerminated, want: true},
+		{state: RemoteSpawnRequested, want: false},
+		{state: RemoteSpawnSpawning, want: false},
+		{state: RemoteSpawnUnknown, want: false},
+	}
+
+	for _, tc := range tests {
+		rec := &RemoteSpawnRecord{State: tc.state}
+		if got := IsRemoteSpawnTerminal(rec); got != tc.want {
+			t.Fatalf("IsRemoteSpawnTerminal(%q) = %v, want %v", tc.state, got, tc.want)
+		}
 	}
 }
 

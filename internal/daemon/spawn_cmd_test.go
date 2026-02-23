@@ -87,15 +87,15 @@ func TestIsValidSessionID(t *testing.T) {
 
 	valid := []string{"ses_abc123", "ses-def-456", "ABC_xyz", "a"}
 	for _, id := range valid {
-		if !isValidSessionID(id) {
-			t.Errorf("isValidSessionID(%q) = false, want true", id)
+		if !IsValidSessionID(id) {
+			t.Errorf("IsValidSessionID(%q) = false, want true", id)
 		}
 	}
 
 	invalid := []string{"", "has space", "semi;colon", strings.Repeat("a", 129)}
 	for _, id := range invalid {
-		if isValidSessionID(id) {
-			t.Errorf("isValidSessionID(%q) = true, want false", id)
+		if IsValidSessionID(id) {
+			t.Errorf("IsValidSessionID(%q) = true, want false", id)
 		}
 	}
 }

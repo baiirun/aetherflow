@@ -23,17 +23,17 @@ func WithSessionFlag(spawnCmd, sessionID string) string {
 	if sessionID == "" {
 		return spawnCmd
 	}
-	if !isValidSessionID(sessionID) {
+	if !IsValidSessionID(sessionID) {
 		return spawnCmd
 	}
 	return strings.TrimSpace(spawnCmd + " --session " + sessionID)
 }
 
-// isValidSessionID checks that a session ID contains only safe characters.
+// IsValidSessionID checks that a session ID contains only safe characters.
 // Session IDs from opencode follow the ses_<random> format (alphanumeric
 // with underscores). This rejects whitespace, shell metacharacters, and
 // path separators that could corrupt the spawn command or API URLs.
-func isValidSessionID(id string) bool {
+func IsValidSessionID(id string) bool {
 	if len(id) == 0 || len(id) > 128 {
 		return false
 	}

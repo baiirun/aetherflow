@@ -374,7 +374,7 @@ func IsRemoteSpawnTerminal(rec *RemoteSpawnRecord) bool {
 var validRemoteSpawnTransitions = map[RemoteSpawnState][]RemoteSpawnState{
 	RemoteSpawnRequested: {RemoteSpawnSpawning, RemoteSpawnFailed},
 	RemoteSpawnSpawning:  {RemoteSpawnRunning, RemoteSpawnFailed, RemoteSpawnUnknown},
-	RemoteSpawnRunning:   {RemoteSpawnFailed, RemoteSpawnTerminated},
+	RemoteSpawnRunning:   {RemoteSpawnFailed, RemoteSpawnTerminated, RemoteSpawnUnknown},
 	RemoteSpawnUnknown:   {RemoteSpawnRunning, RemoteSpawnFailed, RemoteSpawnTerminated},
 	// Terminal states: no outgoing transitions.
 	RemoteSpawnFailed:     {},

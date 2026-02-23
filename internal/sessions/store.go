@@ -25,6 +25,12 @@ const (
 	StatusIdle       Status = "idle"
 	StatusTerminated Status = "terminated"
 	StatusStale      Status = "stale"
+
+	// StatusPending and StatusInactive are display-only statuses used when
+	// mapping remote spawn states to session listing output. They are not
+	// persisted by the session store itself.
+	StatusPending  Status = "pending"
+	StatusInactive Status = "inactive"
 )
 
 // OriginType identifies how a session was created.

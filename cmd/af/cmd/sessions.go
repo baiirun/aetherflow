@@ -61,6 +61,15 @@ type sessionMessage struct {
 	} `json:"parts"`
 }
 
+// sessionListEntry is the unified display/JSON shape for `af sessions`.
+// It embeds a sessions.Record with an optional SpawnID field so remote
+// spawns that don't yet have a session_id are visible in the listing.
+type sessionListEntry struct {
+	sessions.Record
+	SpawnID  string `json:"spawn_id,omitempty"`
+	Provider string `json:"provider,omitempty"`
+}
+
 type attachPendingResult struct {
 	Success           bool   `json:"success"`
 	Code              string `json:"code"`
@@ -104,51 +113,166 @@ func runSessions(cmd *cobra.Command, _ []string) {
 		Fatal("reading session registry: %v", err)
 	}
 
-	if serverFilter != "" {
-		filtered := recs[:0]
-		for _, r := range recs {
-			if r.ServerRef == serverFilter {
-				filtered = append(filtered, r)
-			}
+	// Merge remote spawn records that aren't already represented.
+	var remoteRecs []daemon.RemoteSpawnRecord
+	if remoteStore, rsErr := openRemoteSpawnStore(cmd); rsErr == nil {
+		var listErr error
+		remoteRecs, listErr = remoteStore.List()
+		if listErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: reading remote spawn store: %v\n", listErr)
 		}
-		recs = filtered
 	}
+	entries := buildSessionListEntries(recs, remoteRecs, serverFilter)
 
 	if jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		_ = enc.Encode(recs)
+		_ = enc.Encode(entries)
 		return
 	}
 
-	if len(recs) == 0 {
+	if len(entries) == 0 {
 		fmt.Println("no sessions found")
 		return
 	}
 
+	// Extract plain records for semantic index (remote-spawn-only entries
+	// have empty SessionID so they'll be skipped by the enrichment).
+	plainRecs := make([]sessions.Record, len(entries))
+	for i := range entries {
+		plainRecs[i] = entries[i].Record
+	}
 	sessionIndex := loadOpencodeSessionIndex()
-	semanticIndex := loadSessionSemanticIndex(recs, sessionIndex)
+	semanticIndex := loadSessionSemanticIndex(plainRecs, sessionIndex)
 
 	fmt.Printf("%-34s  %-24s  %-10s  %-8s  %-14s  %-14s  %s\n", "SESSION", "SERVER", "STATUS", "ORIGIN", "UPDATED", "WORK", "WHAT")
-	for _, r := range recs {
-		updated := r.UpdatedAt
+	for _, e := range entries {
+		updated := e.UpdatedAt
 		if updated.IsZero() {
-			updated = r.CreatedAt
+			updated = e.CreatedAt
 		}
-		work := r.WorkRef
+		work := e.WorkRef
 		if work == "" {
 			work = "-"
 		}
+		// Show spawn_id in the SESSION column when session_id is unknown.
+		displayID := e.SessionID
+		if displayID == "" && e.SpawnID != "" {
+			const pendingSuffix = " (pending)"
+			displayID = truncate(e.SpawnID, 34-len(pendingSuffix)) + pendingSuffix
+		}
+		what := sessionWhatForEntry(e, sessionIndex, semanticIndex)
 		fmt.Printf("%-34s  %-24s  %-10s  %-8s  %-14s  %-14s  %s\n",
-			r.SessionID,
-			truncateString(r.ServerRef, 24),
-			r.Status,
-			r.Origin,
+			truncate(displayID, 34),
+			truncate(e.ServerRef, 24),
+			e.Status,
+			e.Origin,
 			humanSince(updated),
-			truncateString(work, 14),
-			truncateString(sessionWhatForRecord(r, sessionIndex, semanticIndex), 96),
+			truncate(work, 14),
+			truncate(what, 96),
 		)
 	}
+}
+
+// buildSessionListEntries merges session records with remote spawn records
+// into a unified, sorted list. Remote spawns that already have a session_id
+// matching an existing session record are skipped (the session record wins).
+func buildSessionListEntries(recs []sessions.Record, remoteRecs []daemon.RemoteSpawnRecord, serverFilter string) []sessionListEntry {
+	// Index session IDs already present.
+	seenSessionIDs := make(map[string]struct{}, len(recs))
+	for _, r := range recs {
+		if r.SessionID != "" {
+			seenSessionIDs[r.SessionID] = struct{}{}
+		}
+	}
+
+	// Start with session records (applying server filter if set).
+	entries := make([]sessionListEntry, 0, len(recs)+len(remoteRecs))
+	for _, r := range recs {
+		if serverFilter != "" && r.ServerRef != serverFilter {
+			continue
+		}
+		entries = append(entries, sessionListEntry{Record: r})
+	}
+
+	// Merge remote spawn records that aren't already represented.
+	for _, rs := range remoteRecs {
+		// Skip if the session is already in the session registry.
+		if _, seen := seenSessionIDs[rs.SessionID]; rs.SessionID != "" && seen {
+			continue
+		}
+		// Apply server filter if set. Records with empty ServerRef are
+		// excluded when a filter is active — they haven't been assigned
+		// a server yet and don't match any specific filter.
+		if serverFilter != "" && rs.ServerRef != serverFilter {
+			continue
+		}
+		entries = append(entries, sessionListEntry{
+			Record: sessions.Record{
+				ServerRef: rs.ServerRef,
+				SessionID: rs.SessionID,
+				Origin:    sessions.OriginSpawn,
+				Status:    remoteSpawnStatusToSessionStatus(rs.State),
+				CreatedAt: rs.CreatedAt,
+				UpdatedAt: rs.UpdatedAt,
+			},
+			SpawnID:  rs.SpawnID,
+			Provider: rs.Provider,
+		})
+	}
+
+	// Sort by UpdatedAt descending (most recent first).
+	// Use CreatedAt as fallback for entries with zero UpdatedAt.
+	// SliceStable preserves insertion order for equal timestamps.
+	sort.SliceStable(entries, func(i, j int) bool {
+		ti := entries[i].UpdatedAt
+		if ti.IsZero() {
+			ti = entries[i].CreatedAt
+		}
+		tj := entries[j].UpdatedAt
+		if tj.IsZero() {
+			tj = entries[j].CreatedAt
+		}
+		return ti.After(tj)
+	})
+
+	return entries
+}
+
+// remoteSpawnStatusToSessionStatus maps remote spawn states to session
+// display statuses per the plan:
+//   - requested|spawning|unknown → "pending"
+//   - running → "active"
+//   - failed|terminated → "inactive"
+func remoteSpawnStatusToSessionStatus(state daemon.RemoteSpawnState) sessions.Status {
+	switch state {
+	case daemon.RemoteSpawnRequested, daemon.RemoteSpawnSpawning, daemon.RemoteSpawnUnknown:
+		return sessions.StatusPending
+	case daemon.RemoteSpawnRunning:
+		return sessions.StatusActive
+	case daemon.RemoteSpawnFailed, daemon.RemoteSpawnTerminated:
+		return sessions.StatusInactive
+	default:
+		return sessions.StatusPending
+	}
+}
+
+// sessionWhatForEntry returns the display string for the WHAT column.
+// Delegates to sessionWhatForRecord for session-backed entries, and
+// shows provider info for remote-spawn-only entries.
+func sessionWhatForEntry(e sessionListEntry, index map[string]opencodeSessionSummary, semanticIndex map[string]string) string {
+	// If there's a session ID, use the existing logic.
+	if e.SessionID != "" {
+		return sessionWhatForRecord(e.Record, index, semanticIndex)
+	}
+	// Remote spawn without a session yet — show provider context.
+	if e.Provider != "" {
+		return e.Provider + ": " + e.SpawnID
+	}
+	if e.SpawnID != "" {
+		return e.SpawnID
+	}
+	return "-"
 }
 
 func recordKey(serverRef, sessionID string) string {
@@ -179,6 +303,11 @@ func loadSessionSemanticIndex(recs []sessions.Record, index map[string]opencodeS
 	client := &http.Client{Timeout: 2 * time.Second}
 	for _, r := range recs {
 		if r.ServerRef == "" || r.SessionID == "" {
+			continue
+		}
+		// Only enrich local sessions — remote hosts don't expose the
+		// opencode session message API.
+		if u, parseErr := url.Parse(r.ServerRef); parseErr != nil || (u.Hostname() != "127.0.0.1" && u.Hostname() != "localhost") {
 			continue
 		}
 		title := strings.TrimSpace(index[r.SessionID].Title)
@@ -335,28 +464,27 @@ func runSessionAttach(cmd *cobra.Command, args []string) {
 	if len(matches) == 0 {
 		remoteStore, rsErr := openRemoteSpawnStore(cmd)
 		if rsErr != nil {
-			handleAttachError(jsonOut, "REMOTE_SPAWN_STORE_ERROR", rsErr)
+			handleAttachError(jsonOut, "REMOTE_SPAWN_STORE_ERROR", nil, rsErr)
 			os.Exit(1)
 		}
 		rs, getErr := remoteStore.GetBySpawnID(requestedID)
 		if getErr != nil {
-			handleAttachError(jsonOut, "REMOTE_SPAWN_STORE_ERROR", getErr)
+			handleAttachError(jsonOut, "REMOTE_SPAWN_STORE_ERROR", nil, getErr)
 			os.Exit(1)
 		}
 		if rs != nil {
 			if serverFilter != "" && rs.ServerRef != "" && rs.ServerRef != serverFilter {
-				if jsonOut {
-					handleAttachErrorWithSpawn(jsonOut, "SERVER_FILTER_MISMATCH", rs, fmt.Errorf("spawn %s maps to server %s, not %s", rs.SpawnID, rs.ServerRef, serverFilter))
-					os.Exit(1)
-				}
-				Fatal("spawn %q not found for server %q", requestedID, serverFilter)
+				handleAttachError(jsonOut, "SERVER_FILTER_MISMATCH", rs, fmt.Errorf("spawn %s maps to server %s, not %s", rs.SpawnID, rs.ServerRef, serverFilter))
+				os.Exit(1)
 			}
-			if daemon.IsRemoteSpawnPending(rs) {
+			if daemon.IsRemoteSpawnPending(rs) || (rs.State == daemon.RemoteSpawnRunning && rs.SessionID == "") {
 				handleAttachPending(jsonOut, rs)
 				os.Exit(3)
 			}
 			if daemon.IsRemoteSpawnTerminal(rs) && rs.SessionID == "" {
-				handleAttachErrorWithSpawn(jsonOut, "SESSION_NOT_AVAILABLE", rs, fmt.Errorf("spawn %s is %s: %s", rs.SpawnID, rs.State, strings.TrimSpace(rs.LastError)))
+				// Show a sanitized message — full provider error stays in
+				// remote_spawns.json for debugging.
+				handleAttachError(jsonOut, "SESSION_NOT_AVAILABLE", rs, fmt.Errorf("spawn %s is %s (see remote_spawns.json for details)", rs.SpawnID, rs.State))
 				os.Exit(1)
 			}
 			if rs.SessionID != "" {
@@ -385,8 +513,8 @@ func runSessionAttach(cmd *cobra.Command, args []string) {
 	if _, err := daemon.ValidateServerURLAttachTarget(target.ServerRef); err != nil {
 		Fatal("invalid server_ref %q in session registry: %v", target.ServerRef, err)
 	}
-	if strings.HasPrefix(target.ServerRef, "-") {
-		Fatal("invalid server_ref %q in session registry", target.ServerRef)
+	if !daemon.IsValidSessionID(target.SessionID) {
+		Fatal("invalid session_id %q in session registry", target.SessionID)
 	}
 	attach := exec.Command("opencode", "attach", target.ServerRef, "--session", target.SessionID)
 	attach.Stdin = os.Stdin
@@ -416,23 +544,18 @@ func handleAttachPending(jsonOut bool, rec *daemon.RemoteSpawnRecord) {
 	fmt.Fprintf(os.Stderr, "SESSION_NOT_READY: spawn %s is %s; retry in ~5s\n", rec.SpawnID, rec.State)
 }
 
-func handleAttachError(jsonOut bool, code string, err error) {
-	if jsonOut {
-		_ = json.NewEncoder(os.Stdout).Encode(attachErrorResult{Success: false, Code: code, Error: err.Error()})
-		return
+func handleAttachError(jsonOut bool, code string, rec *daemon.RemoteSpawnRecord, err error) {
+	errMsg := code
+	if err != nil {
+		errMsg = err.Error()
 	}
-	fmt.Fprintf(os.Stderr, "%s: %v\n", code, err)
-}
-
-func handleAttachErrorWithSpawn(jsonOut bool, code string, rec *daemon.RemoteSpawnRecord, err error) {
+	result := attachErrorResult{Success: false, Code: code, Error: errMsg}
+	if rec != nil {
+		result.State = string(rec.State)
+		result.SpawnID = rec.SpawnID
+	}
 	if jsonOut {
-		_ = json.NewEncoder(os.Stdout).Encode(attachErrorResult{
-			Success: false,
-			Code:    code,
-			State:   string(rec.State),
-			SpawnID: rec.SpawnID,
-			Error:   err.Error(),
-		})
+		_ = json.NewEncoder(os.Stdout).Encode(result)
 		return
 	}
 	fmt.Fprintf(os.Stderr, "%s: %v\n", code, err)
@@ -477,14 +600,4 @@ func humanSince(t time.Time) string {
 		return fmt.Sprintf("%dh ago", int(d.Hours()))
 	}
 	return t.Format("2006-01-02")
-}
-
-func truncateString(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	if max <= 3 {
-		return s[:max]
-	}
-	return s[:max-3] + "..."
 }

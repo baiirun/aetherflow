@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/baiirun/aetherflow/internal/daemon"
 	"github.com/baiirun/aetherflow/internal/sessions"
@@ -132,43 +134,185 @@ func TestShouldEnrichSessionTitle(t *testing.T) {
 	}
 }
 
-func TestIsRemoteSpawnPending(t *testing.T) {
+func TestRemoteSpawnStatusToSessionStatus(t *testing.T) {
 	tests := []struct {
 		state daemon.RemoteSpawnState
-		want  bool
+		want  sessions.Status
 	}{
-		{state: daemon.RemoteSpawnRequested, want: true},
-		{state: daemon.RemoteSpawnSpawning, want: true},
-		{state: daemon.RemoteSpawnUnknown, want: true},
-		{state: daemon.RemoteSpawnFailed, want: false},
-		{state: daemon.RemoteSpawnTerminated, want: false},
-		{state: daemon.RemoteSpawnRunning, want: false},
+		{state: daemon.RemoteSpawnRequested, want: sessions.StatusPending},
+		{state: daemon.RemoteSpawnSpawning, want: sessions.StatusPending},
+		{state: daemon.RemoteSpawnUnknown, want: sessions.StatusPending},
+		{state: daemon.RemoteSpawnRunning, want: sessions.StatusActive},
+		{state: daemon.RemoteSpawnFailed, want: sessions.StatusInactive},
+		{state: daemon.RemoteSpawnTerminated, want: sessions.StatusInactive},
 	}
-
 	for _, tc := range tests {
-		rec := &daemon.RemoteSpawnRecord{State: tc.state}
-		if got := daemon.IsRemoteSpawnPending(rec); got != tc.want {
-			t.Fatalf("IsRemoteSpawnPending(%q) = %v, want %v", tc.state, got, tc.want)
+		got := remoteSpawnStatusToSessionStatus(tc.state)
+		if got != tc.want {
+			t.Fatalf("remoteSpawnStatusToSessionStatus(%q) = %q, want %q", tc.state, got, tc.want)
 		}
 	}
 }
 
-func TestIsRemoteSpawnTerminal(t *testing.T) {
+func TestSessionWhatForEntry(t *testing.T) {
 	tests := []struct {
-		state daemon.RemoteSpawnState
-		want  bool
+		name  string
+		entry sessionListEntry
+		want  string
 	}{
-		{state: daemon.RemoteSpawnFailed, want: true},
-		{state: daemon.RemoteSpawnTerminated, want: true},
-		{state: daemon.RemoteSpawnRequested, want: false},
-		{state: daemon.RemoteSpawnSpawning, want: false},
-		{state: daemon.RemoteSpawnUnknown, want: false},
+		{
+			name: "session-backed entry delegates to record logic",
+			entry: sessionListEntry{
+				Record: sessions.Record{SessionID: "ses_1", WorkRef: "ts-123"},
+			},
+			want: "ts-123",
+		},
+		{
+			name: "remote spawn with provider shows provider prefix",
+			entry: sessionListEntry{
+				Record:   sessions.Record{Origin: sessions.OriginSpawn},
+				SpawnID:  "spawn-ghost_wolf-a3f2",
+				Provider: "sprites",
+			},
+			want: "sprites: spawn-ghost_wolf-a3f2",
+		},
+		{
+			name: "remote spawn without provider shows spawn_id",
+			entry: sessionListEntry{
+				Record:  sessions.Record{Origin: sessions.OriginSpawn},
+				SpawnID: "spawn-ghost_wolf-a3f2",
+			},
+			want: "spawn-ghost_wolf-a3f2",
+		},
+		{
+			name: "empty entry returns dash",
+			entry: sessionListEntry{
+				Record: sessions.Record{},
+			},
+			want: "-",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sessionWhatForEntry(tt.entry, nil, nil)
+			if got != tt.want {
+				t.Fatalf("sessionWhatForEntry() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildSessionListEntries(t *testing.T) {
+	now := time.Now()
+	earlier := now.Add(-1 * time.Hour)
+	earliest := now.Add(-2 * time.Hour)
+
+	t.Run("merges remote spawns and deduplicates by session_id", func(t *testing.T) {
+		recs := []sessions.Record{
+			{ServerRef: "http://127.0.0.1:4096", SessionID: "ses_1", UpdatedAt: earlier},
+		}
+		remoteRecs := []daemon.RemoteSpawnRecord{
+			// This one already has ses_1 — should be deduped.
+			{SpawnID: "spawn-a", SessionID: "ses_1", ServerRef: "http://127.0.0.1:4096", State: daemon.RemoteSpawnRunning, UpdatedAt: now},
+			// This one is new — should appear.
+			{SpawnID: "spawn-b", SessionID: "", ServerRef: "", State: daemon.RemoteSpawnSpawning, CreatedAt: earliest},
+		}
+
+		entries := buildSessionListEntries(recs, remoteRecs, "")
+		if len(entries) != 2 {
+			t.Fatalf("len(entries) = %d, want 2", len(entries))
+		}
+		// First entry should be ses_1 (earlier > earliest).
+		if entries[0].SessionID != "ses_1" {
+			t.Fatalf("entries[0].SessionID = %q, want ses_1", entries[0].SessionID)
+		}
+		// Second entry should be spawn-b.
+		if entries[1].SpawnID != "spawn-b" {
+			t.Fatalf("entries[1].SpawnID = %q, want spawn-b", entries[1].SpawnID)
+		}
+	})
+
+	t.Run("sorts by UpdatedAt descending with CreatedAt fallback", func(t *testing.T) {
+		recs := []sessions.Record{
+			{ServerRef: "http://a", SessionID: "old", UpdatedAt: earliest},
+			{ServerRef: "http://b", SessionID: "new", UpdatedAt: now},
+		}
+		entries := buildSessionListEntries(recs, nil, "")
+		if entries[0].SessionID != "new" {
+			t.Fatalf("entries[0].SessionID = %q, want new (most recent)", entries[0].SessionID)
+		}
+		if entries[1].SessionID != "old" {
+			t.Fatalf("entries[1].SessionID = %q, want old", entries[1].SessionID)
+		}
+	})
+
+	t.Run("applies server filter to remote spawns", func(t *testing.T) {
+		remoteRecs := []daemon.RemoteSpawnRecord{
+			{SpawnID: "spawn-a", ServerRef: "http://match", State: daemon.RemoteSpawnRunning, UpdatedAt: now},
+			{SpawnID: "spawn-b", ServerRef: "http://other", State: daemon.RemoteSpawnRunning, UpdatedAt: now},
+			// Empty ServerRef is excluded when filter is active.
+			{SpawnID: "spawn-c", ServerRef: "", State: daemon.RemoteSpawnSpawning, CreatedAt: now},
+		}
+		entries := buildSessionListEntries(nil, remoteRecs, "http://match")
+		if len(entries) != 1 {
+			t.Fatalf("len(entries) = %d, want 1", len(entries))
+		}
+		if entries[0].SpawnID != "spawn-a" {
+			t.Fatalf("entries[0].SpawnID = %q, want spawn-a", entries[0].SpawnID)
+		}
+	})
+
+	t.Run("applies server filter to session records", func(t *testing.T) {
+		recs := []sessions.Record{
+			{ServerRef: "http://match", SessionID: "ses_1", UpdatedAt: now},
+			{ServerRef: "http://other", SessionID: "ses_2", UpdatedAt: now},
+		}
+		entries := buildSessionListEntries(recs, nil, "http://match")
+		if len(entries) != 1 {
+			t.Fatalf("len(entries) = %d, want 1", len(entries))
+		}
+		if entries[0].SessionID != "ses_1" {
+			t.Fatalf("entries[0].SessionID = %q, want ses_1", entries[0].SessionID)
+		}
+	})
+
+	t.Run("maps remote spawn status correctly", func(t *testing.T) {
+		remoteRecs := []daemon.RemoteSpawnRecord{
+			{SpawnID: "spawn-a", State: daemon.RemoteSpawnSpawning, CreatedAt: now},
+		}
+		entries := buildSessionListEntries(nil, remoteRecs, "")
+		if entries[0].Status != sessions.StatusPending {
+			t.Fatalf("Status = %q, want %q", entries[0].Status, sessions.StatusPending)
+		}
+	})
+}
+
+func TestSessionListEntryJSONContract(t *testing.T) {
+	// Verify the JSON shape includes spawn_id and provider when set.
+	entry := sessionListEntry{
+		Record: sessions.Record{
+			ServerRef: "https://test.sprites.app",
+			Origin:    sessions.OriginSpawn,
+			Status:    sessions.StatusPending,
+		},
+		SpawnID:  "spawn-ghost_wolf-a3f2",
+		Provider: "sprites",
 	}
 
-	for _, tc := range tests {
-		rec := &daemon.RemoteSpawnRecord{State: tc.state}
-		if got := daemon.IsRemoteSpawnTerminal(rec); got != tc.want {
-			t.Fatalf("IsRemoteSpawnTerminal(%q) = %v, want %v", tc.state, got, tc.want)
-		}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if m["spawn_id"] != "spawn-ghost_wolf-a3f2" {
+		t.Fatalf("spawn_id = %v, want %q", m["spawn_id"], "spawn-ghost_wolf-a3f2")
+	}
+	if m["provider"] != "sprites" {
+		t.Fatalf("provider = %v, want %q", m["provider"], "sprites")
 	}
 }

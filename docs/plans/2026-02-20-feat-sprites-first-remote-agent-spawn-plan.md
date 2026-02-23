@@ -353,7 +353,7 @@ Implemented in:
 - `cmd/af/cmd/spawn.go`
 - `internal/daemon/remote_spawn_store.go`
 
-### Phase 3: Daemon HTTP transport
+### Phase 3: Daemon HTTP transport ✅ DONE
 
 Migrate the daemon from Unix socket RPC to an HTTP API. This is the prerequisite for remote session discovery — the plugin on a sprite needs to reach the daemon over the network.
 
@@ -374,7 +374,7 @@ Suggested implementation files:
 - `internal/install/plugins/aetherflow-events.ts` (socket → fetch)
 - `cmd/af/cmd/root.go` (socket path resolution → URL resolution)
 
-### Phase 4: Attach + session discovery over HTTP
+### Phase 4: Attach + session discovery over HTTP ✅ DONE
 
 Wire `af session attach` for Sprites-backed sessions and enable session discovery through the HTTP event pipeline.
 
@@ -382,10 +382,10 @@ Wire `af session attach` for Sprites-backed sessions and enable session discover
 - `claimSession` works unchanged — plugin events now arrive over HTTP instead of Unix socket.
 - Define deterministic attach output for `requested|spawning|unknown` states (human + JSON modes).
 
-Suggested implementation files:
+Implemented in:
 
-- `cmd/af/cmd/sessions.go`
-- `internal/daemon/event_rpc.go` (adapt to HTTP handler)
+- `cmd/af/cmd/sessions.go` — merged remote spawn records into `af sessions` listing with status mapping, unified JSON output shape, spawn_id display for pending entries
+- `cmd/af/cmd/sessions_test.go` — JSON contract tests for sessionListEntry, attachPendingResult, attachErrorResult; status mapping tests
 
 ### Phase 5: Observability + docs
 
@@ -402,38 +402,38 @@ Suggested implementation files:
 ### Functional
 
 - [x] User can start a remote spawn on Sprites from `af spawn` and receive a stable `spawn_id` handle immediately.
-- [ ] `af sessions` lists Sprites-backed sessions with enough info to attach.
-- [ ] `af session attach <session-id>` succeeds for active Sprites-backed sessions.
-- [ ] `af session attach <spawn-id>` resolves and attaches once mapped session is running.
-- [ ] Users can still use Sprites-native CLI/API directly without Aetherflow interference.
+- [x] `af sessions` lists Sprites-backed sessions with enough info to attach.
+- [x] `af session attach <session-id>` succeeds for active Sprites-backed sessions.
+- [x] `af session attach <spawn-id>` resolves and attaches once mapped session is running.
+- [x] Users can still use Sprites-native CLI/API directly without Aetherflow interference.
 - [x] `af session attach` returns deterministic pending/unknown response for non-attachable states and never silently succeeds/fails.
 
 ### Transport
 
-- [ ] Daemon listens on HTTP instead of Unix socket.
-- [ ] CLI communicates with daemon over HTTP.
-- [ ] Plugin sends events to daemon over HTTP (supports `AETHERFLOW_URL`).
-- [ ] Session discovery works for remote spawns via plugin HTTP events.
+- [x] Daemon listens on HTTP instead of Unix socket.
+- [x] CLI communicates with daemon over HTTP.
+- [x] Plugin sends events to daemon over HTTP (supports `AETHERFLOW_URL`).
+- [x] Session discovery works for remote spawns via plugin HTTP events.
 
 ### Security / Trust
 
-- [ ] Only trusted remote endpoint patterns are accepted by default; insecure endpoints are rejected with actionable errors.
-- [ ] Sprites token values are never printed in logs, status output, or error chains.
-- [ ] TLS hostname and certificate validation failures are surfaced with stable error categories.
-- [ ] Private/link-local endpoint targets are rejected by default unless explicitly allowlisted.
+- [x] Only trusted remote endpoint patterns are accepted by default; insecure endpoints are rejected with actionable errors.
+- [x] Sprites token values are never printed in logs, status output, or error chains.
+- [x] TLS hostname and certificate validation failures are surfaced with stable error categories.
+- [x] Private/link-local endpoint targets are rejected by default unless explicitly allowlisted.
 
 ### Resilience / Correctness
 
 - [x] Duplicate spawn submissions with same idempotency key do not create duplicate remote runtimes.
-- [ ] Same idempotency key with different payload fails fast with conflict and creates no runtime.
-- [ ] Partial failure paths (remote success/local persist failure and inverse) converge to one terminal state.
-- [ ] Concurrent spawn attempts for the same logical request converge to one runtime + one canonical record.
+- [x] Same idempotency key with different payload fails fast with conflict and creates no runtime.
+- [x] Partial failure paths (remote success/local persist failure and inverse) converge to one terminal state.
+- [x] Concurrent spawn attempts for the same logical request converge to one runtime + one canonical record.
 
 ### Quality Gates
 
 - [ ] Add integration tests for happy path, auth failure, and timeout/retry.
 - [ ] Add regression tests for existing local spawn/session flows.
-- [ ] Add JSON contract tests for `af sessions` and `af session attach` pending/unknown/error states.
+- [x] Add JSON contract tests for `af sessions` and `af session attach` pending/unknown/error states.
 
 ## Success Metrics
 
