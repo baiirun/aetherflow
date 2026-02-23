@@ -71,13 +71,14 @@ type taskShowResponse struct {
 	} `json:"logs"`
 }
 
-// StatusSources groups the data sources consulted by BuildFullStatus.
-// Using a struct avoids a long positional parameter list and makes call
-// sites self-documenting (e.g., StatusSources{RemoteSpawns: rspawns}).
+// StatusSources groups the data sources consulted by BuildFullStatus and
+// BuildAgentDetail. Using a struct avoids a long positional parameter list
+// and makes call sites self-documenting.
 type StatusSources struct {
 	Pool         *Pool
 	Spawns       *SpawnRegistry
 	RemoteSpawns *RemoteSpawnStore
+	Events       *EventBuffer // used by BuildAgentDetail only
 }
 
 // BuildFullStatus assembles the full swarm status by enriching pool data
@@ -214,10 +215,13 @@ func BuildFullStatus(ctx context.Context, src StatusSources, cfg Config, runner 
 
 // AgentDetail is the response for the status.agent RPC method.
 // It provides a detailed view of a single agent with tool call history.
+// For remote spawns, the RemoteSpawn field is populated with full provider
+// details so agents get discrete fields instead of parsing TaskTitle.
 type AgentDetail struct {
 	AgentStatus
-	ToolCalls []ToolCall `json:"tool_calls"`
-	Errors    []string   `json:"errors,omitempty"`
+	RemoteSpawn *RemoteSpawnStatus `json:"remote_spawn,omitempty"`
+	ToolCalls   []ToolCall         `json:"tool_calls"`
+	Errors      []string           `json:"errors,omitempty"`
 }
 
 // StatusAgentParams are the parameters for the status.agent RPC method.
@@ -233,11 +237,11 @@ const defaultToolCallLimit = 20
 // Session ID comes from the agent's state (populated by claimSession on
 // session.created events from the plugin).
 // The lookup order is: pool → spawn registry → remote spawn store.
-func BuildAgentDetail(ctx context.Context, pool *Pool, spawns *SpawnRegistry, rspawns *RemoteSpawnStore, events *EventBuffer, cfg Config, runner CommandRunner, params StatusAgentParams) (*AgentDetail, error) {
+func BuildAgentDetail(ctx context.Context, src StatusSources, cfg Config, runner CommandRunner, params StatusAgentParams) (*AgentDetail, error) {
 	// Find the agent in the pool by name.
 	var agent *Agent
-	if pool != nil {
-		agents := pool.Status()
+	if src.Pool != nil {
+		agents := src.Pool.Status()
 		for i := range agents {
 			if string(agents[i].ID) == params.AgentName {
 				agent = &agents[i]
@@ -247,20 +251,24 @@ func BuildAgentDetail(ctx context.Context, pool *Pool, spawns *SpawnRegistry, rs
 	}
 
 	// Check the spawn registry if not found in pool.
-	if agent == nil && spawns != nil {
-		if entry := spawns.Get(params.AgentName); entry != nil {
-			return buildSpawnDetail(ctx, entry, events, cfg, params)
+	if agent == nil && src.Spawns != nil {
+		if entry := src.Spawns.Get(params.AgentName); entry != nil {
+			return buildSpawnDetail(entry, src.Events, params)
 		}
 	}
 
 	// Check the remote spawn store if not found in pool or spawn registry.
-	if agent == nil && rspawns != nil {
-		rec, err := rspawns.GetBySpawnID(params.AgentName)
+	// Hard error: unlike BuildFullStatus which degrades gracefully for the
+	// overview, a detail lookup for a specific agent should fail if the store
+	// is unreadable — the user asked for this specific agent and partial
+	// results would be misleading.
+	if agent == nil && src.RemoteSpawns != nil {
+		rec, err := src.RemoteSpawns.GetBySpawnID(params.AgentName)
 		if err != nil {
 			return nil, fmt.Errorf("looking up remote spawn %q: %w", params.AgentName, err)
 		}
 		if rec != nil {
-			return buildRemoteSpawnDetail(rec, events, params)
+			return buildRemoteSpawnDetail(rec, src.Events, params)
 		}
 	}
 
@@ -279,16 +287,7 @@ func BuildAgentDetail(ctx context.Context, pool *Pool, spawns *SpawnRegistry, rs
 		},
 	}
 
-	limit := params.Limit
-	if limit <= 0 {
-		limit = defaultToolCallLimit
-	}
-
-	// Extract tool calls from the event buffer using the agent's session ID.
-	if events != nil && agent.SessionID != "" {
-		evs := events.Events(agent.SessionID)
-		detail.ToolCalls = ToolCallsFromEvents(evs, limit)
-	}
+	detail.ToolCalls = extractToolCalls(src.Events, agent.SessionID, params.Limit)
 
 	// Fetch task title + last log from prog (only when prog enrichment is relevant).
 	if cfg.SpawnPolicy.Normalized().ProgEnrichmentEnabled() && agent.TaskID != "" {
@@ -313,11 +312,10 @@ const maxTitleDisplayRunes = 80
 // buildSpawnDetail assembles a detail view for a spawned agent.
 // Unlike pool agents, spawned agents don't have a prog task — the prompt is the spec.
 // Session ID comes from the spawn entry (populated by claimSession).
-func buildSpawnDetail(_ context.Context, entry *SpawnEntry, events *EventBuffer, _ Config, params StatusAgentParams) (*AgentDetail, error) {
+func buildSpawnDetail(entry *SpawnEntry, events *EventBuffer, params StatusAgentParams) (*AgentDetail, error) {
 	detail := &AgentDetail{
 		AgentStatus: AgentStatus{
 			ID:        entry.SpawnID,
-			TaskID:    "",
 			Role:      string(RoleSpawn),
 			PID:       entry.PID,
 			SpawnTime: entry.SpawnTime,
@@ -326,53 +324,65 @@ func buildSpawnDetail(_ context.Context, entry *SpawnEntry, events *EventBuffer,
 		},
 	}
 
-	limit := params.Limit
-	if limit <= 0 {
-		limit = defaultToolCallLimit
-	}
-
-	// Extract tool calls from the event buffer using the spawn's session ID.
-	if events != nil && entry.SessionID != "" {
-		evs := events.Events(entry.SessionID)
-		detail.ToolCalls = ToolCallsFromEvents(evs, limit)
-	}
+	detail.ToolCalls = extractToolCalls(events, entry.SessionID, params.Limit)
 
 	return detail, nil
 }
 
-// maxLastErrorLen caps LastError in wire-type mapping to avoid leaking raw
+// maxLastErrorRunes caps LastError in wire-type mapping to avoid leaking raw
 // provider API response bodies into status output and the JSON store.
-const maxLastErrorLen = 256
+const maxLastErrorRunes = 256
+
+// extractToolCalls returns tool calls from the event buffer for a given session.
+// Centralizes the limit-defaulting and nil-checking that was duplicated across
+// the three detail builders.
+func extractToolCalls(events *EventBuffer, sessionID string, limit int) []ToolCall {
+	if limit <= 0 {
+		limit = defaultToolCallLimit
+	}
+	if events == nil || sessionID == "" {
+		return nil
+	}
+	return ToolCallsFromEvents(events.Events(sessionID), limit)
+}
 
 // buildRemoteSpawnDetail assembles a detail view for a remote (provider-backed) spawn.
 // Unlike pool agents or local spawns, remote spawns don't have a PID or prompt — the
 // provider and state are the primary identifiers. Tool calls come from the event buffer
 // if a session has been established.
 func buildRemoteSpawnDetail(rec *RemoteSpawnRecord, events *EventBuffer, params StatusAgentParams) (*AgentDetail, error) {
+	if rec == nil {
+		return nil, fmt.Errorf("buildRemoteSpawnDetail: rec must not be nil")
+	}
+
+	wireStatus := RemoteSpawnStatus{
+		SpawnID:           rec.SpawnID,
+		Provider:          rec.Provider,
+		ProviderSandboxID: rec.ProviderSandboxID,
+		ServerRef:         rec.ServerRef,
+		SessionID:         rec.SessionID,
+		State:             rec.State,
+		LastError:         truncateLastError(rec.LastError),
+		CreatedAt:         rec.CreatedAt,
+		UpdatedAt:         rec.UpdatedAt,
+	}
+
 	detail := &AgentDetail{
 		AgentStatus: AgentStatus{
 			ID:        rec.SpawnID,
-			Role:      "remote",
+			Role:      string(RoleRemote),
 			SpawnTime: rec.CreatedAt,
 			SessionID: rec.SessionID,
 			TaskTitle: fmt.Sprintf("[%s] %s", rec.Provider, rec.State),
 		},
+		RemoteSpawn: &wireStatus,
 	}
 
 	if rec.LastError != "" {
 		detail.Errors = append(detail.Errors, truncateLastError(rec.LastError))
 	}
 
-	limit := params.Limit
-	if limit <= 0 {
-		limit = defaultToolCallLimit
-	}
-
-	// Extract tool calls from the event buffer using the remote spawn's session ID.
-	if events != nil && rec.SessionID != "" {
-		evs := events.Events(rec.SessionID)
-		detail.ToolCalls = ToolCallsFromEvents(evs, limit)
-	}
+	detail.ToolCalls = extractToolCalls(events, rec.SessionID, params.Limit)
 
 	return detail, nil
 }
@@ -380,11 +390,13 @@ func buildRemoteSpawnDetail(rec *RemoteSpawnRecord, events *EventBuffer, params 
 // truncateLastError sanitizes the error string at the wire-type boundary.
 // Provider errors can contain full HTTP response bodies; we cap them here
 // so they don't leak into af status or af status --json unsanitized.
+// Uses rune-based truncation to avoid splitting multi-byte UTF-8 sequences.
 func truncateLastError(s string) string {
-	if len(s) <= maxLastErrorLen {
+	runes := []rune(s)
+	if len(runes) <= maxLastErrorRunes {
 		return s
 	}
-	return s[:maxLastErrorLen] + "...[truncated]"
+	return string(runes[:maxLastErrorRunes]) + "...[truncated]"
 }
 
 // truncatePrompt shortens a user prompt for display in status views.

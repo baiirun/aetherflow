@@ -71,7 +71,7 @@ func TestBuildAgentDetailHappyPath(t *testing.T) {
 
 	// Build the detail.
 	cfg.Runner = runner
-	detail, err := BuildAgentDetail(ctx, pool, nil, nil, events, cfg, runner, StatusAgentParams{
+	detail, err := BuildAgentDetail(ctx, StatusSources{Pool: pool, Events: events}, cfg, runner, StatusAgentParams{
 		AgentName: agentName,
 	})
 	if err != nil {
@@ -126,7 +126,7 @@ func TestBuildAgentDetailAgentNotFound(t *testing.T) {
 	pool := NewPool(cfg, nil, nil, testLogger())
 	pool.ctx = context.Background()
 
-	_, err := BuildAgentDetail(context.Background(), pool, nil, nil, nil, cfg, nil, StatusAgentParams{
+	_, err := BuildAgentDetail(context.Background(), StatusSources{Pool: pool}, cfg, nil, StatusAgentParams{
 		AgentName: "nonexistent_agent",
 	})
 	if err == nil {
@@ -135,7 +135,7 @@ func TestBuildAgentDetailAgentNotFound(t *testing.T) {
 }
 
 func TestBuildAgentDetailNilPool(t *testing.T) {
-	_, err := BuildAgentDetail(context.Background(), nil, nil, nil, nil, Config{}, nil, StatusAgentParams{
+	_, err := BuildAgentDetail(context.Background(), StatusSources{}, Config{}, nil, StatusAgentParams{
 		AgentName: "some_agent",
 	})
 	if err == nil {
@@ -182,7 +182,7 @@ func TestBuildAgentDetailNoSessionID(t *testing.T) {
 	// Event buffer exists but agent has no session ID — no events to extract.
 	events := NewEventBuffer(DefaultEventBufSize)
 
-	detail, err := BuildAgentDetail(ctx, pool, nil, nil, events, cfg, runner, StatusAgentParams{
+	detail, err := BuildAgentDetail(ctx, StatusSources{Pool: pool, Events: events}, cfg, runner, StatusAgentParams{
 		AgentName: agentName,
 	})
 	if err != nil {
@@ -243,7 +243,7 @@ func TestBuildAgentDetailProgShowFails(t *testing.T) {
 		Data:      json.RawMessage(`{"part":{"id":"prt_1","type":"tool","tool":"read","state":{"status":"completed","input":{"filePath":"/foo"},"time":{"start":1,"end":2}}}}`),
 	})
 
-	detail, err := BuildAgentDetail(ctx, pool, nil, nil, events, cfg, runner, StatusAgentParams{
+	detail, err := BuildAgentDetail(ctx, StatusSources{Pool: pool, Events: events}, cfg, runner, StatusAgentParams{
 		AgentName: agentName,
 	})
 	if err != nil {
@@ -288,7 +288,7 @@ func TestBuildAgentDetailSpawnWithEvents(t *testing.T) {
 		Data:      json.RawMessage(`{"part":{"id":"prt_2","type":"tool","tool":"edit","state":{"status":"completed","input":{"filePath":"/src/auth.go"},"title":"auth.go","time":{"start":1500,"end":2000}}}}`),
 	})
 
-	detail, err := BuildAgentDetail(context.Background(), nil, spawns, nil, events, Config{}, nil, StatusAgentParams{
+	detail, err := BuildAgentDetail(context.Background(), StatusSources{Spawns: spawns, Events: events}, Config{}, nil, StatusAgentParams{
 		AgentName: "spawn-abc",
 	})
 	if err != nil {
@@ -335,7 +335,7 @@ func TestBuildAgentDetailSpawnNoSessionID(t *testing.T) {
 
 	events := NewEventBuffer(DefaultEventBufSize)
 
-	detail, err := BuildAgentDetail(context.Background(), nil, spawns, nil, events, Config{}, nil, StatusAgentParams{
+	detail, err := BuildAgentDetail(context.Background(), StatusSources{Spawns: spawns, Events: events}, Config{}, nil, StatusAgentParams{
 		AgentName: "spawn-nostream",
 	})
 	if err != nil {
@@ -379,7 +379,7 @@ func TestBuildAgentDetailRemoteSpawn(t *testing.T) {
 		Data:      json.RawMessage(`{"part":{"id":"prt_1","type":"tool","tool":"bash","state":{"status":"completed","input":{"command":"ls"},"time":{"start":500,"end":1000}}}}`),
 	})
 
-	detail, err := BuildAgentDetail(context.Background(), nil, nil, rspawns, events, Config{}, nil, StatusAgentParams{
+	detail, err := BuildAgentDetail(context.Background(), StatusSources{RemoteSpawns: rspawns, Events: events}, Config{}, nil, StatusAgentParams{
 		AgentName: "sprites-xyz",
 	})
 	if err != nil {
@@ -389,8 +389,8 @@ func TestBuildAgentDetailRemoteSpawn(t *testing.T) {
 	if detail.ID != "sprites-xyz" {
 		t.Errorf("ID = %q, want %q", detail.ID, "sprites-xyz")
 	}
-	if detail.Role != "remote" {
-		t.Errorf("Role = %q, want %q", detail.Role, "remote")
+	if detail.Role != string(RoleRemote) {
+		t.Errorf("Role = %q, want %q", detail.Role, string(RoleRemote))
 	}
 	if detail.SessionID != sessionID {
 		t.Errorf("SessionID = %q, want %q", detail.SessionID, sessionID)
@@ -401,6 +401,24 @@ func TestBuildAgentDetailRemoteSpawn(t *testing.T) {
 	if detail.ToolCalls[0].Tool != "bash" {
 		t.Errorf("call[0].Tool = %q, want %q", detail.ToolCalls[0].Tool, "bash")
 	}
+
+	// Verify RemoteSpawn field is populated with provider details.
+	if detail.RemoteSpawn == nil {
+		t.Fatal("RemoteSpawn should be populated for remote spawn detail")
+	}
+	if detail.RemoteSpawn.Provider != "sprites" {
+		t.Errorf("RemoteSpawn.Provider = %q, want %q", detail.RemoteSpawn.Provider, "sprites")
+	}
+	if detail.RemoteSpawn.ProviderSandboxID != "sandbox-789" {
+		t.Errorf("RemoteSpawn.ProviderSandboxID = %q, want %q", detail.RemoteSpawn.ProviderSandboxID, "sandbox-789")
+	}
+	if detail.RemoteSpawn.ServerRef != "https://sprites.dev/sandbox/xyz" {
+		t.Errorf("RemoteSpawn.ServerRef = %q, want %q", detail.RemoteSpawn.ServerRef, "https://sprites.dev/sandbox/xyz")
+	}
+	if detail.RemoteSpawn.State != RemoteSpawnRunning {
+		t.Errorf("RemoteSpawn.State = %q, want %q", detail.RemoteSpawn.State, RemoteSpawnRunning)
+	}
+
 	if len(detail.Errors) != 0 {
 		t.Errorf("unexpected errors: %v", detail.Errors)
 	}
@@ -424,7 +442,7 @@ func TestBuildAgentDetailRemoteSpawnWithError(t *testing.T) {
 		t.Fatalf("Upsert() error = %v", err)
 	}
 
-	detail, err := BuildAgentDetail(context.Background(), nil, nil, rspawns, nil, Config{}, nil, StatusAgentParams{
+	detail, err := BuildAgentDetail(context.Background(), StatusSources{RemoteSpawns: rspawns}, Config{}, nil, StatusAgentParams{
 		AgentName: "sprites-fail",
 	})
 	if err != nil {

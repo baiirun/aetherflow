@@ -150,11 +150,6 @@ func IsRemoteSpawnRunning(state string) bool {
 	return state == RemoteSpawnRunning
 }
 
-// IsRemoteSpawnPending reports whether the remote spawn is still being provisioned.
-func IsRemoteSpawnPending(state string) bool {
-	return state == RemoteSpawnRequested || state == RemoteSpawnSpawning || state == RemoteSpawnUnknown
-}
-
 // NormalizedSpawnPolicy returns the effective spawn policy for status display.
 func (s *FullStatus) NormalizedSpawnPolicy() string {
 	if s.SpawnPolicy == "" {
@@ -224,10 +219,13 @@ type ToolCall struct {
 }
 
 // AgentDetail is the detailed view of a single agent with tool call history.
+// For remote spawns, the RemoteSpawn field is populated with full provider
+// details so consumers get discrete fields instead of parsing TaskTitle.
 type AgentDetail struct {
 	AgentStatus
-	ToolCalls []ToolCall `json:"tool_calls"`
-	Errors    []string   `json:"errors,omitempty"`
+	RemoteSpawn *RemoteSpawnStatus `json:"remote_spawn,omitempty"`
+	ToolCalls   []ToolCall         `json:"tool_calls"`
+	Errors      []string           `json:"errors,omitempty"`
 }
 
 // StatusAgentParams are the parameters for the status.agent RPC.

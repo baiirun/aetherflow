@@ -265,6 +265,8 @@ func printStatus(s *client.FullStatus) {
 	}
 
 	// Show remote (provider-backed) spawns.
+	// Cap display to avoid flooding the terminal when many remote spawns exist.
+	const maxRemoteSpawnDisplay = 50
 	if len(s.RemoteSpawns) > 0 {
 		var running, pending, terminal int
 		for _, rs := range s.RemoteSpawns {
@@ -304,7 +306,12 @@ func printStatus(s *client.FullStatus) {
 			detailMax = 20
 		}
 
-		for _, rs := range s.RemoteSpawns {
+		displaySpawns := s.RemoteSpawns
+		if len(displaySpawns) > maxRemoteSpawnDisplay {
+			displaySpawns = displaySpawns[:maxRemoteSpawnDisplay]
+		}
+
+		for _, rs := range displaySpawns {
 			age := formatUptime(rs.CreatedAt)
 			nameColor := term.Cyan
 			stateColor := term.Green
@@ -334,6 +341,9 @@ func printStatus(s *client.FullStatus) {
 				term.PadLeft(age, colUptime, uptimeColor),
 				term.Dim(quote(detail)),
 			)
+		}
+		if len(s.RemoteSpawns) > maxRemoteSpawnDisplay {
+			fmt.Printf("  %s\n", term.Dimf("... and %d more (use --json to see all)", len(s.RemoteSpawns)-maxRemoteSpawnDisplay))
 		}
 		fmt.Println()
 	}

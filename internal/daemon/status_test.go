@@ -487,6 +487,31 @@ func TestRemoteSpawnStatusWireContract(t *testing.T) {
 		}
 	}
 
+	// Verify omitempty: marshal a zero-valued struct and assert that optional
+	// keys (provider_sandbox_id, server_ref, session_id, last_error) are absent.
+	// This ensures we don't accidentally remove omitempty tags.
+	zeroWire := RemoteSpawnStatus{
+		SpawnID:   "zero-test",
+		Provider:  "test",
+		State:     RemoteSpawnRequested,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	zeroData, err := json.Marshal(zeroWire)
+	if err != nil {
+		t.Fatalf("Marshal(zero) error = %v", err)
+	}
+	var zeroRaw map[string]json.RawMessage
+	if err := json.Unmarshal(zeroData, &zeroRaw); err != nil {
+		t.Fatalf("Unmarshal(zero) error = %v", err)
+	}
+	optionalKeys := []string{"provider_sandbox_id", "server_ref", "session_id", "last_error"}
+	for _, key := range optionalKeys {
+		if _, ok := zeroRaw[key]; ok {
+			t.Errorf("zero-valued RemoteSpawnStatus should omit %q (omitempty), but it was present", key)
+		}
+	}
+
 	// Verify that the state constants used by daemon and client are in sync.
 	// We test the string values since client uses plain strings while daemon uses typed strings.
 	daemonStates := []RemoteSpawnState{
@@ -511,8 +536,8 @@ func TestTruncateLastError(t *testing.T) {
 
 	long := strings.Repeat("x", 300)
 	got := truncateLastError(long)
-	if len(got) != maxLastErrorLen+len("...[truncated]") {
-		t.Errorf("truncateLastError(300 chars) len = %d, want %d", len(got), maxLastErrorLen+len("...[truncated]"))
+	if len([]rune(got)) != maxLastErrorRunes+len([]rune("...[truncated]")) {
+		t.Errorf("truncateLastError(300 chars) rune len = %d, want %d", len([]rune(got)), maxLastErrorRunes+len([]rune("...[truncated]")))
 	}
 	if !strings.HasSuffix(got, "...[truncated]") {
 		t.Errorf("truncateLastError() should end with '...[truncated]', got suffix %q", got[len(got)-20:])
