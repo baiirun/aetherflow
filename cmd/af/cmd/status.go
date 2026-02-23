@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strings"
 	"syscall"
 	"time"
 
@@ -258,6 +259,80 @@ func printStatus(s *client.FullStatus) {
 				term.PadRight(sp.SpawnID, colID, nameColor),
 				term.PadLeft(uptime, colUptime, uptimeColor),
 				term.Dim(quote(prompt)),
+			)
+		}
+		fmt.Println()
+	}
+
+	// Show remote (provider-backed) spawns.
+	if len(s.RemoteSpawns) > 0 {
+		var running, pending, terminal int
+		for _, rs := range s.RemoteSpawns {
+			switch {
+			case client.IsRemoteSpawnTerminal(rs.State):
+				terminal++
+			case client.IsRemoteSpawnRunning(rs.State):
+				running++
+			default:
+				// Unknown/unrecognized states degrade to pending rather than
+				// silently counting as running.
+				pending++
+			}
+		}
+		parts := make([]string, 0, 3)
+		if running > 0 {
+			parts = append(parts, fmt.Sprintf("%d running", running))
+		}
+		if pending > 0 {
+			parts = append(parts, fmt.Sprintf("%d pending", pending))
+		}
+		if terminal > 0 {
+			parts = append(parts, fmt.Sprintf("%d terminated", terminal))
+		}
+		remoteSummary := strings.Join(parts, ", ")
+		fmt.Printf("%s %s\n", term.Bold("Remote:"), term.Cyan(remoteSummary))
+
+		width := term.Width(100)
+		const (
+			remoteIDCol       = 20
+			remoteProviderCol = 10
+			remoteStateCol    = 12
+		)
+		// Layout: 2 indent + ID + 1 + provider + 1 + state + 1 + uptime(6) + 2 + detail
+		detailMax := width - 2 - remoteIDCol - 1 - remoteProviderCol - 1 - remoteStateCol - 1 - colUptime - 2
+		if detailMax < 20 {
+			detailMax = 20
+		}
+
+		for _, rs := range s.RemoteSpawns {
+			age := formatUptime(rs.CreatedAt)
+			nameColor := term.Cyan
+			stateColor := term.Green
+			uptimeColor := term.Green
+
+			switch {
+			case client.IsRemoteSpawnTerminal(rs.State):
+				nameColor = term.Dim
+				stateColor = term.Red
+				uptimeColor = term.Dim
+			case client.IsRemoteSpawnRunning(rs.State):
+				// Green defaults are already set.
+			default:
+				// Pending + unknown/unrecognized states get yellow.
+				stateColor = term.Yellow
+			}
+
+			detail := ""
+			if rs.LastError != "" {
+				detail = truncate(stripANSI(rs.LastError), detailMax)
+			}
+
+			fmt.Printf("  %s %s %s %s  %s\n",
+				term.PadRight(rs.SpawnID, remoteIDCol, nameColor),
+				term.PadRight(rs.Provider, remoteProviderCol, term.Magenta),
+				term.PadRight(rs.State, remoteStateCol, stateColor),
+				term.PadLeft(age, colUptime, uptimeColor),
+				term.Dim(quote(detail)),
 			)
 		}
 		fmt.Println()

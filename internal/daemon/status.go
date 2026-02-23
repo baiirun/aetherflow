@@ -12,14 +12,30 @@ import (
 // FullStatus is the response for the status.full RPC method.
 // It enriches the live pool data with task metadata from prog.
 type FullStatus struct {
-	PoolSize    int           `json:"pool_size"`
-	PoolMode    PoolMode      `json:"pool_mode"`
-	Project     string        `json:"project"`
-	SpawnPolicy SpawnPolicy   `json:"spawn_policy"`
-	Agents      []AgentStatus `json:"agents"`
-	Spawns      []SpawnStatus `json:"spawns,omitempty"`
-	Queue       []Task        `json:"queue"`
-	Errors      []string      `json:"errors,omitempty"`
+	PoolSize     int                 `json:"pool_size"`
+	PoolMode     PoolMode            `json:"pool_mode"`
+	Project      string              `json:"project"`
+	SpawnPolicy  SpawnPolicy         `json:"spawn_policy"`
+	Agents       []AgentStatus       `json:"agents"`
+	Spawns       []SpawnStatus       `json:"spawns,omitempty"`
+	RemoteSpawns []RemoteSpawnStatus `json:"remote_spawns,omitempty"`
+	Queue        []Task              `json:"queue"`
+	Errors       []string            `json:"errors,omitempty"`
+}
+
+// RemoteSpawnStatus is the wire-safe view of a remote spawn for status responses.
+// It omits internal fields (RequestID, ProviderOperation) that are only relevant
+// to the daemon's idempotency logic and should not leak over the API.
+type RemoteSpawnStatus struct {
+	SpawnID           string           `json:"spawn_id"`
+	Provider          string           `json:"provider"`
+	ProviderSandboxID string           `json:"provider_sandbox_id,omitempty"`
+	ServerRef         string           `json:"server_ref,omitempty"`
+	SessionID         string           `json:"session_id,omitempty"`
+	State             RemoteSpawnState `json:"state"`
+	LastError         string           `json:"last_error,omitempty"`
+	CreatedAt         time.Time        `json:"created_at"`
+	UpdatedAt         time.Time        `json:"updated_at"`
 }
 
 // SpawnStatus is the status of a spawned agent registered with the daemon.
@@ -55,11 +71,20 @@ type taskShowResponse struct {
 	} `json:"logs"`
 }
 
+// StatusSources groups the data sources consulted by BuildFullStatus.
+// Using a struct avoids a long positional parameter list and makes call
+// sites self-documenting (e.g., StatusSources{RemoteSpawns: rspawns}).
+type StatusSources struct {
+	Pool         *Pool
+	Spawns       *SpawnRegistry
+	RemoteSpawns *RemoteSpawnStore
+}
+
 // BuildFullStatus assembles the full swarm status by enriching pool data
 // with task metadata from prog. Each prog show call runs in its own goroutine
 // with a per-call timeout. Partial failures are captured in the Errors slice
 // rather than failing the entire request.
-func BuildFullStatus(ctx context.Context, pool *Pool, spawns *SpawnRegistry, cfg Config, runner CommandRunner) FullStatus {
+func BuildFullStatus(ctx context.Context, src StatusSources, cfg Config, runner CommandRunner) FullStatus {
 	policy := cfg.SpawnPolicy.Normalized()
 
 	status := FullStatus{
@@ -68,10 +93,10 @@ func BuildFullStatus(ctx context.Context, pool *Pool, spawns *SpawnRegistry, cfg
 		SpawnPolicy: policy,
 	}
 
-	if pool != nil {
-		status.PoolMode = pool.Mode()
+	if src.Pool != nil {
+		status.PoolMode = src.Pool.Mode()
 
-		agents := pool.Status()
+		agents := src.Pool.Status()
 		enriched := make([]AgentStatus, len(agents))
 		for i, agent := range agents {
 			enriched[i] = AgentStatus{
@@ -139,8 +164,8 @@ func BuildFullStatus(ctx context.Context, pool *Pool, spawns *SpawnRegistry, cfg
 	}
 
 	// Include spawned agents from the registry.
-	if spawns != nil {
-		entries := spawns.List()
+	if src.Spawns != nil {
+		entries := src.Spawns.List()
 		if len(entries) > 0 {
 			spawned := make([]SpawnStatus, len(entries))
 			for i, e := range entries {
@@ -151,6 +176,36 @@ func BuildFullStatus(ctx context.Context, pool *Pool, spawns *SpawnRegistry, cfg
 				return spawned[i].SpawnTime.Before(spawned[j].SpawnTime)
 			})
 			status.Spawns = spawned
+		}
+	}
+
+	// Include remote (provider-backed) spawns from the persistent store.
+	if src.RemoteSpawns != nil {
+		recs, err := src.RemoteSpawns.List()
+		if err != nil {
+			status.Errors = append(status.Errors, fmt.Sprintf("remote spawn store: %v", err))
+		} else if len(recs) > 0 {
+			// Map to wire-safe display type, omitting internal fields.
+			display := make([]RemoteSpawnStatus, len(recs))
+			for i, r := range recs {
+				display[i] = RemoteSpawnStatus{
+					SpawnID:           r.SpawnID,
+					Provider:          r.Provider,
+					ProviderSandboxID: r.ProviderSandboxID,
+					ServerRef:         r.ServerRef,
+					SessionID:         r.SessionID,
+					State:             r.State,
+					LastError:         truncateLastError(r.LastError),
+					CreatedAt:         r.CreatedAt,
+					UpdatedAt:         r.UpdatedAt,
+				}
+			}
+			// List() returns most-recently-updated first; re-sort to
+			// oldest-first for consistency with local spawns display.
+			sort.Slice(display, func(i, j int) bool {
+				return display[i].CreatedAt.Before(display[j].CreatedAt)
+			})
+			status.RemoteSpawns = display
 		}
 	}
 
@@ -177,7 +232,8 @@ const defaultToolCallLimit = 20
 // It fetches task metadata from prog and reads tool calls from the event buffer.
 // Session ID comes from the agent's state (populated by claimSession on
 // session.created events from the plugin).
-func BuildAgentDetail(ctx context.Context, pool *Pool, spawns *SpawnRegistry, events *EventBuffer, cfg Config, runner CommandRunner, params StatusAgentParams) (*AgentDetail, error) {
+// The lookup order is: pool → spawn registry → remote spawn store.
+func BuildAgentDetail(ctx context.Context, pool *Pool, spawns *SpawnRegistry, rspawns *RemoteSpawnStore, events *EventBuffer, cfg Config, runner CommandRunner, params StatusAgentParams) (*AgentDetail, error) {
 	// Find the agent in the pool by name.
 	var agent *Agent
 	if pool != nil {
@@ -197,8 +253,19 @@ func BuildAgentDetail(ctx context.Context, pool *Pool, spawns *SpawnRegistry, ev
 		}
 	}
 
+	// Check the remote spawn store if not found in pool or spawn registry.
+	if agent == nil && rspawns != nil {
+		rec, err := rspawns.GetBySpawnID(params.AgentName)
+		if err != nil {
+			return nil, fmt.Errorf("looking up remote spawn %q: %w", params.AgentName, err)
+		}
+		if rec != nil {
+			return buildRemoteSpawnDetail(rec, events, params)
+		}
+	}
+
 	if agent == nil {
-		return nil, fmt.Errorf("agent %q not found in pool or spawn registry", params.AgentName)
+		return nil, fmt.Errorf("agent %q not found in pool, spawn registry, or remote spawn store", params.AgentName)
 	}
 
 	detail := &AgentDetail{
@@ -271,6 +338,53 @@ func buildSpawnDetail(_ context.Context, entry *SpawnEntry, events *EventBuffer,
 	}
 
 	return detail, nil
+}
+
+// maxLastErrorLen caps LastError in wire-type mapping to avoid leaking raw
+// provider API response bodies into status output and the JSON store.
+const maxLastErrorLen = 256
+
+// buildRemoteSpawnDetail assembles a detail view for a remote (provider-backed) spawn.
+// Unlike pool agents or local spawns, remote spawns don't have a PID or prompt — the
+// provider and state are the primary identifiers. Tool calls come from the event buffer
+// if a session has been established.
+func buildRemoteSpawnDetail(rec *RemoteSpawnRecord, events *EventBuffer, params StatusAgentParams) (*AgentDetail, error) {
+	detail := &AgentDetail{
+		AgentStatus: AgentStatus{
+			ID:        rec.SpawnID,
+			Role:      "remote",
+			SpawnTime: rec.CreatedAt,
+			SessionID: rec.SessionID,
+			TaskTitle: fmt.Sprintf("[%s] %s", rec.Provider, rec.State),
+		},
+	}
+
+	if rec.LastError != "" {
+		detail.Errors = append(detail.Errors, truncateLastError(rec.LastError))
+	}
+
+	limit := params.Limit
+	if limit <= 0 {
+		limit = defaultToolCallLimit
+	}
+
+	// Extract tool calls from the event buffer using the remote spawn's session ID.
+	if events != nil && rec.SessionID != "" {
+		evs := events.Events(rec.SessionID)
+		detail.ToolCalls = ToolCallsFromEvents(evs, limit)
+	}
+
+	return detail, nil
+}
+
+// truncateLastError sanitizes the error string at the wire-type boundary.
+// Provider errors can contain full HTTP response bodies; we cap them here
+// so they don't leak into af status or af status --json unsanitized.
+func truncateLastError(s string) string {
+	if len(s) <= maxLastErrorLen {
+		return s
+	}
+	return s[:maxLastErrorLen] + "...[truncated]"
 }
 
 // truncatePrompt shortens a user prompt for display in status views.

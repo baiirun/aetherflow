@@ -71,7 +71,7 @@ func TestBuildAgentDetailHappyPath(t *testing.T) {
 
 	// Build the detail.
 	cfg.Runner = runner
-	detail, err := BuildAgentDetail(ctx, pool, nil, events, cfg, runner, StatusAgentParams{
+	detail, err := BuildAgentDetail(ctx, pool, nil, nil, events, cfg, runner, StatusAgentParams{
 		AgentName: agentName,
 	})
 	if err != nil {
@@ -126,7 +126,7 @@ func TestBuildAgentDetailAgentNotFound(t *testing.T) {
 	pool := NewPool(cfg, nil, nil, testLogger())
 	pool.ctx = context.Background()
 
-	_, err := BuildAgentDetail(context.Background(), pool, nil, nil, cfg, nil, StatusAgentParams{
+	_, err := BuildAgentDetail(context.Background(), pool, nil, nil, nil, cfg, nil, StatusAgentParams{
 		AgentName: "nonexistent_agent",
 	})
 	if err == nil {
@@ -135,7 +135,7 @@ func TestBuildAgentDetailAgentNotFound(t *testing.T) {
 }
 
 func TestBuildAgentDetailNilPool(t *testing.T) {
-	_, err := BuildAgentDetail(context.Background(), nil, nil, nil, Config{}, nil, StatusAgentParams{
+	_, err := BuildAgentDetail(context.Background(), nil, nil, nil, nil, Config{}, nil, StatusAgentParams{
 		AgentName: "some_agent",
 	})
 	if err == nil {
@@ -182,7 +182,7 @@ func TestBuildAgentDetailNoSessionID(t *testing.T) {
 	// Event buffer exists but agent has no session ID — no events to extract.
 	events := NewEventBuffer(DefaultEventBufSize)
 
-	detail, err := BuildAgentDetail(ctx, pool, nil, events, cfg, runner, StatusAgentParams{
+	detail, err := BuildAgentDetail(ctx, pool, nil, nil, events, cfg, runner, StatusAgentParams{
 		AgentName: agentName,
 	})
 	if err != nil {
@@ -243,7 +243,7 @@ func TestBuildAgentDetailProgShowFails(t *testing.T) {
 		Data:      json.RawMessage(`{"part":{"id":"prt_1","type":"tool","tool":"read","state":{"status":"completed","input":{"filePath":"/foo"},"time":{"start":1,"end":2}}}}`),
 	})
 
-	detail, err := BuildAgentDetail(ctx, pool, nil, events, cfg, runner, StatusAgentParams{
+	detail, err := BuildAgentDetail(ctx, pool, nil, nil, events, cfg, runner, StatusAgentParams{
 		AgentName: agentName,
 	})
 	if err != nil {
@@ -288,7 +288,7 @@ func TestBuildAgentDetailSpawnWithEvents(t *testing.T) {
 		Data:      json.RawMessage(`{"part":{"id":"prt_2","type":"tool","tool":"edit","state":{"status":"completed","input":{"filePath":"/src/auth.go"},"title":"auth.go","time":{"start":1500,"end":2000}}}}`),
 	})
 
-	detail, err := BuildAgentDetail(context.Background(), nil, spawns, events, Config{}, nil, StatusAgentParams{
+	detail, err := BuildAgentDetail(context.Background(), nil, spawns, nil, events, Config{}, nil, StatusAgentParams{
 		AgentName: "spawn-abc",
 	})
 	if err != nil {
@@ -335,7 +335,7 @@ func TestBuildAgentDetailSpawnNoSessionID(t *testing.T) {
 
 	events := NewEventBuffer(DefaultEventBufSize)
 
-	detail, err := BuildAgentDetail(context.Background(), nil, spawns, events, Config{}, nil, StatusAgentParams{
+	detail, err := BuildAgentDetail(context.Background(), nil, spawns, nil, events, Config{}, nil, StatusAgentParams{
 		AgentName: "spawn-nostream",
 	})
 	if err != nil {
@@ -347,6 +347,98 @@ func TestBuildAgentDetailSpawnNoSessionID(t *testing.T) {
 	}
 	if len(detail.ToolCalls) != 0 {
 		t.Errorf("expected 0 tool calls, got %d", len(detail.ToolCalls))
+	}
+}
+
+func TestBuildAgentDetailRemoteSpawn(t *testing.T) {
+	// Remote spawn found via RemoteSpawnStore fallback.
+	dir := t.TempDir()
+	rspawns, err := OpenRemoteSpawnStore(dir)
+	if err != nil {
+		t.Fatalf("OpenRemoteSpawnStore() error = %v", err)
+	}
+
+	sessionID := "ses_remote_test"
+	if err := rspawns.Upsert(RemoteSpawnRecord{
+		SpawnID:           "sprites-xyz",
+		Provider:          "sprites",
+		RequestID:         "req-1",
+		State:             RemoteSpawnRunning,
+		SessionID:         sessionID,
+		ProviderSandboxID: "sandbox-789",
+		ServerRef:         "https://sprites.dev/sandbox/xyz",
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	events := NewEventBuffer(DefaultEventBufSize)
+	events.Push(SessionEvent{
+		EventType: "message.part.updated",
+		SessionID: sessionID,
+		Timestamp: 1000,
+		Data:      json.RawMessage(`{"part":{"id":"prt_1","type":"tool","tool":"bash","state":{"status":"completed","input":{"command":"ls"},"time":{"start":500,"end":1000}}}}`),
+	})
+
+	detail, err := BuildAgentDetail(context.Background(), nil, nil, rspawns, events, Config{}, nil, StatusAgentParams{
+		AgentName: "sprites-xyz",
+	})
+	if err != nil {
+		t.Fatalf("BuildAgentDetail for remote spawn: %v", err)
+	}
+
+	if detail.ID != "sprites-xyz" {
+		t.Errorf("ID = %q, want %q", detail.ID, "sprites-xyz")
+	}
+	if detail.Role != "remote" {
+		t.Errorf("Role = %q, want %q", detail.Role, "remote")
+	}
+	if detail.SessionID != sessionID {
+		t.Errorf("SessionID = %q, want %q", detail.SessionID, sessionID)
+	}
+	if len(detail.ToolCalls) != 1 {
+		t.Fatalf("got %d tool calls, want 1", len(detail.ToolCalls))
+	}
+	if detail.ToolCalls[0].Tool != "bash" {
+		t.Errorf("call[0].Tool = %q, want %q", detail.ToolCalls[0].Tool, "bash")
+	}
+	if len(detail.Errors) != 0 {
+		t.Errorf("unexpected errors: %v", detail.Errors)
+	}
+}
+
+func TestBuildAgentDetailRemoteSpawnWithError(t *testing.T) {
+	// Remote spawn with a LastError should include it in detail errors.
+	dir := t.TempDir()
+	rspawns, err := OpenRemoteSpawnStore(dir)
+	if err != nil {
+		t.Fatalf("OpenRemoteSpawnStore() error = %v", err)
+	}
+
+	if err := rspawns.Upsert(RemoteSpawnRecord{
+		SpawnID:   "sprites-fail",
+		Provider:  "sprites",
+		RequestID: "req-2",
+		State:     RemoteSpawnFailed,
+		LastError: "sandbox provisioning timed out",
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	detail, err := BuildAgentDetail(context.Background(), nil, nil, rspawns, nil, Config{}, nil, StatusAgentParams{
+		AgentName: "sprites-fail",
+	})
+	if err != nil {
+		t.Fatalf("BuildAgentDetail for failed remote spawn: %v", err)
+	}
+
+	if detail.ID != "sprites-fail" {
+		t.Errorf("ID = %q, want %q", detail.ID, "sprites-fail")
+	}
+	if len(detail.Errors) != 1 {
+		t.Fatalf("Errors count = %d, want 1", len(detail.Errors))
+	}
+	if detail.Errors[0] != "sandbox provisioning timed out" {
+		t.Errorf("Errors[0] = %q, want %q", detail.Errors[0], "sandbox provisioning timed out")
 	}
 }
 

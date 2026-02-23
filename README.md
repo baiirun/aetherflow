@@ -70,6 +70,24 @@ af spawn "add rate limiting to /api/users" -d
 
 The agent works in an isolated git worktree, implements the prompt, and creates a PR (or merges to main in `--solo` mode). No daemon or task tracker required -- the prompt is the spec, the PR is the deliverable.
 
+### Spawn a remote agent (Sprites)
+
+```bash
+# Spawn an agent in a remote Sprites sandbox
+export SPRITES_TOKEN=your-token
+af spawn "refactor the auth module" --provider sprites
+
+# List sessions (includes remote spawns)
+af sessions
+
+# Attach to the remote session once it's running
+af session attach <spawn-id>
+```
+
+Remote spawns run in isolated cloud environments on [Sprites](https://sprites.dev). The spawn returns immediately with a `spawn_id` handle while the runtime provisions in the background. Use `af sessions` to check status and `af session attach` to connect once the session is ready.
+
+Remote spawn metadata is persisted locally so attach works across daemon restarts. `af status` shows remote spawns alongside local ones.
+
 ### Run the daemon (automatic task scheduling)
 
 ```bash
@@ -397,6 +415,8 @@ The daemon runs several concurrent loops. In `--spawn-policy=manual` (the defaul
 
 **Spawn registry** -- tracks agents spawned via `af spawn` (outside the pool). Registration is best-effort via the `spawn.register` RPC. Entries transition from running to exited when the agent process dies, and are kept for 1 hour after exit so `af status <agent>` works post-mortem. A periodic sweep checks PID liveness and removes stale entries.
 
+**Remote spawn store** -- persists metadata for provider-backed spawns (e.g., Sprites) to `~/.config/aetherflow/sessions/remote_spawns.json`. Each record tracks the spawn lifecycle (`requested` -> `spawning` -> `running` -> `terminated`), provider sandbox ID, and the opencode session ID once bound. This enables `af sessions`, `af session attach`, and `af status` to work with remote spawns across daemon restarts. Records are pruned after 48 hours (matching the session registry retention).
+
 **Spawn sequence**: For each task, the pool:
 1. Fetches task metadata from prog (`prog show --json`) to infer the agent role
 2. Renders the role prompt template, replacing `{{task_id}}` and landing instructions
@@ -596,6 +616,8 @@ Manual mode without a project uses the global default socket path. Starting a se
 | `af spawn "<prompt>" -d` | Spawn in background (detached) |
 | `af spawn "<prompt>" --solo` | Agent merges to main instead of creating a PR |
 | `af spawn "<prompt>" --json` | Output spawn metadata as JSON |
+| `af spawn "<prompt>" --provider sprites` | Spawn in a remote Sprites sandbox |
+| `af spawn "<prompt>" --provider sprites --request-id <key>` | Idempotent remote spawn (safe to retry) |
 
 ### Daemon
 
@@ -611,15 +633,15 @@ Manual mode without a project uses the global default socket path. Starting a se
 
 | Command | Description |
 |---------|-------------|
-| `af status` | Swarm overview -- pool utilization, active agents, queue |
+| `af status` | Swarm overview -- pool utilization, agents, remote spawns, queue |
 | `af status <agent>` | Agent detail -- task info, uptime, recent tool calls |
 | `af status -w` | Watch mode -- continuous refresh |
 | `af status --json` | Machine-readable output |
 | `af logs <agent> -f` | Tail an agent's event stream (from daemon's event buffer) |
 | `af logs <agent> --raw` | Raw events instead of formatted output |
-| `af sessions` | List known opencode sessions from the global registry |
+| `af sessions` | List sessions (local + remote spawns merged) |
 | `af sessions --json` | Machine-readable session list |
-| `af session attach <id>` | Attach interactively to a session |
+| `af session attach <id>` | Attach to a session or remote spawn by ID |
 | `af tui` | Interactive terminal dashboard (k9s-style) |
 
 ### Flow Control
@@ -645,7 +667,7 @@ Manual mode without a project uses the global default socket path. Starting a se
 
 **External triggers.** Spawn agents from Slack, Linear, Discord, or any webhook. A lightweight API layer that accepts a prompt and queues it into the pool.
 
-**Remote sandboxes.** Run agents in isolated cloud environments instead of local processes. [Sprites](https://sprites.dev) and similar sandboxing runtimes would let you scale beyond your machine and provide stronger isolation between concurrent agents.
+**Multi-provider remote spawns.** Remote spawns currently support [Sprites](https://sprites.dev). A provider adapter interface would let you swap in other sandboxing runtimes (E2B, Daytona, etc.) with the same `af spawn --provider` UX.
 
 ## License
 

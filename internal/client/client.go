@@ -110,14 +110,15 @@ func (c *Client) decodeResponse(resp *http.Response, result any) error {
 
 // FullStatus is the enriched swarm status returned by the status.full RPC.
 type FullStatus struct {
-	PoolSize    int           `json:"pool_size"`
-	PoolMode    string        `json:"pool_mode"`
-	Project     string        `json:"project"`
-	SpawnPolicy string        `json:"spawn_policy"`
-	Agents      []AgentStatus `json:"agents"`
-	Spawns      []SpawnStatus `json:"spawns,omitempty"`
-	Queue       []Task        `json:"queue"`
-	Errors      []string      `json:"errors,omitempty"`
+	PoolSize     int                 `json:"pool_size"`
+	PoolMode     string              `json:"pool_mode"`
+	Project      string              `json:"project"`
+	SpawnPolicy  string              `json:"spawn_policy"`
+	Agents       []AgentStatus       `json:"agents"`
+	Spawns       []SpawnStatus       `json:"spawns,omitempty"`
+	RemoteSpawns []RemoteSpawnStatus `json:"remote_spawns,omitempty"`
+	Queue        []Task              `json:"queue"`
+	Errors       []string            `json:"errors,omitempty"`
 }
 
 const (
@@ -129,7 +130,30 @@ const (
 	// import daemon types. The JSON wire format is the boundary.
 	SpawnStateRunning = "running"
 	SpawnStateExited  = "exited"
+
+	// RemoteSpawnState constants mirror daemon.RemoteSpawnState.
+	RemoteSpawnRequested  = "requested"
+	RemoteSpawnSpawning   = "spawning"
+	RemoteSpawnRunning    = "running"
+	RemoteSpawnFailed     = "failed"
+	RemoteSpawnTerminated = "terminated"
+	RemoteSpawnUnknown    = "unknown"
 )
+
+// IsRemoteSpawnTerminal reports whether the remote spawn is in a terminal state.
+func IsRemoteSpawnTerminal(state string) bool {
+	return state == RemoteSpawnFailed || state == RemoteSpawnTerminated
+}
+
+// IsRemoteSpawnRunning reports whether the remote spawn is actively running.
+func IsRemoteSpawnRunning(state string) bool {
+	return state == RemoteSpawnRunning
+}
+
+// IsRemoteSpawnPending reports whether the remote spawn is still being provisioned.
+func IsRemoteSpawnPending(state string) bool {
+	return state == RemoteSpawnRequested || state == RemoteSpawnSpawning || state == RemoteSpawnUnknown
+}
 
 // NormalizedSpawnPolicy returns the effective spawn policy for status display.
 func (s *FullStatus) NormalizedSpawnPolicy() string {
@@ -153,6 +177,21 @@ type SpawnStatus struct {
 	Prompt    string    `json:"prompt"`
 	SpawnTime time.Time `json:"spawn_time"`
 	ExitedAt  time.Time `json:"exited_at,omitempty"`
+}
+
+// RemoteSpawnStatus is the status of a remote (provider-backed) spawn.
+// These are persisted in the RemoteSpawnStore and have different fields
+// than local spawns (provider, sandbox ID, etc.).
+type RemoteSpawnStatus struct {
+	SpawnID           string    `json:"spawn_id"`
+	Provider          string    `json:"provider"`
+	ProviderSandboxID string    `json:"provider_sandbox_id,omitempty"`
+	SessionID         string    `json:"session_id,omitempty"`
+	ServerRef         string    `json:"server_ref,omitempty"`
+	State             string    `json:"state"`
+	LastError         string    `json:"last_error,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // AgentStatus is a single agent's enriched status.

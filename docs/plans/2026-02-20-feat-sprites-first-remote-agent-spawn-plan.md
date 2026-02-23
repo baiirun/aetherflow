@@ -2,7 +2,7 @@
 title: "feat: sprites-first remote agent spawn with session attach"
 type: feat
 date: 2026-02-20
-updated: 2026-02-21
+updated: 2026-02-22
 brainstorm: docs/brainstorms/2026-02-20-remote-sandbox-spawn-brainstorm.md
 ---
 
@@ -387,15 +387,20 @@ Implemented in:
 - `cmd/af/cmd/sessions.go` — merged remote spawn records into `af sessions` listing with status mapping, unified JSON output shape, spawn_id display for pending entries
 - `cmd/af/cmd/sessions_test.go` — JSON contract tests for sessionListEntry, attachPendingResult, attachErrorResult; status mapping tests
 
-### Phase 5: Observability + docs
+### Phase 5: Observability + docs ✅
 
 - Add structured lifecycle logs/metrics and clear CLI error messages.
 - Update README/docs for Sprites-first remote spawn usage and escape hatches.
+- Add remote spawn display to `af status`.
 
-Suggested implementation files:
+Implementation files:
 
-- `cmd/af/cmd/logs.go`
-- `README.md`
+- `README.md` — Remote spawn Quick Start section, CLI reference updates, architecture docs
+- `internal/daemon/status.go` — `RemoteSpawns` field on `FullStatus`, `*RemoteSpawnStore` param on `BuildFullStatus`
+- `internal/daemon/daemon.go` — Pass `d.rspawns` to `BuildFullStatus`
+- `internal/client/client.go` — Client-side `RemoteSpawnStatus` type, `IsRemoteSpawnTerminal`/`IsRemoteSpawnPending` helpers
+- `cmd/af/cmd/status.go` — "Remote:" display section with state-colored output
+- `internal/daemon/status_test.go` — `TestBuildFullStatusWithRemoteSpawns`
 
 ## Acceptance Criteria
 

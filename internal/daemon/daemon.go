@@ -336,7 +336,7 @@ func (d *Daemon) handleStatusAgent(ctx context.Context, params StatusAgentParams
 	}
 
 	start := time.Now()
-	detail, err := BuildAgentDetail(ctx, d.pool, d.spawns, d.events, d.config, d.config.Runner, params)
+	detail, err := BuildAgentDetail(ctx, d.pool, d.spawns, d.rspawns, d.events, d.config, d.config.Runner, params)
 	if err != nil {
 		return &Response{Success: false, Error: err.Error()}
 	}
@@ -361,10 +361,16 @@ func (d *Daemon) handleStatusAgent(ctx context.Context, params StatusAgentParams
 
 func (d *Daemon) handleStatusFull(ctx context.Context) *Response {
 	start := time.Now()
-	status := BuildFullStatus(ctx, d.pool, d.spawns, d.config, d.config.Runner)
+	status := BuildFullStatus(ctx, StatusSources{
+		Pool:         d.pool,
+		Spawns:       d.spawns,
+		RemoteSpawns: d.rspawns,
+	}, d.config, d.config.Runner)
 
 	d.log.Info("status.full",
 		"agents", len(status.Agents),
+		"spawns", len(status.Spawns),
+		"remote_spawns", len(status.RemoteSpawns),
 		"queue", len(status.Queue),
 		"errors", len(status.Errors),
 		"duration", time.Since(start),
