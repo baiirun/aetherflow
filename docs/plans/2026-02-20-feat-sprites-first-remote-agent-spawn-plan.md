@@ -436,8 +436,8 @@ Implementation files:
 
 ### Quality Gates
 
-- [ ] Add integration tests for happy path, auth failure, and timeout/retry.
-- [ ] Add regression tests for existing local spawn/session flows.
+- [x] Add integration tests for happy path, auth failure, and timeout/retry.
+- [x] Add regression tests for existing local spawn/session flows.
 - [x] Add JSON contract tests for `af sessions` and `af session attach` pending/unknown/error states.
 
 ## Success Metrics

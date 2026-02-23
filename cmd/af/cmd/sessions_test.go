@@ -287,6 +287,234 @@ func TestBuildSessionListEntries(t *testing.T) {
 	})
 }
 
+// --- Regression tests: attach pending/error JSON contracts ---
+
+func TestAttachPendingResultJSONContract(t *testing.T) {
+	t.Parallel()
+
+	result := attachPendingResult{
+		Success:           false,
+		Code:              "SESSION_NOT_READY",
+		State:             "spawning",
+		SpawnID:           "spawn-ghost_wolf-a3f2",
+		SessionID:         "",
+		RetryAfterSeconds: 5,
+	}
+
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	// Required fields.
+	if m["success"] != false {
+		t.Errorf("success = %v, want false", m["success"])
+	}
+	if m["code"] != "SESSION_NOT_READY" {
+		t.Errorf("code = %v, want %q", m["code"], "SESSION_NOT_READY")
+	}
+	if m["state"] != "spawning" {
+		t.Errorf("state = %v, want %q", m["state"], "spawning")
+	}
+	if m["spawn_id"] != "spawn-ghost_wolf-a3f2" {
+		t.Errorf("spawn_id = %v, want %q", m["spawn_id"], "spawn-ghost_wolf-a3f2")
+	}
+	if m["retry_after_seconds"] != float64(5) {
+		t.Errorf("retry_after_seconds = %v, want 5", m["retry_after_seconds"])
+	}
+
+	// session_id should be omitted when empty.
+	if _, ok := m["session_id"]; ok {
+		t.Error("session_id should be omitted when empty (omitempty)")
+	}
+}
+
+func TestAttachPendingResultWithSessionID(t *testing.T) {
+	t.Parallel()
+
+	result := attachPendingResult{
+		Success:           false,
+		Code:              "SESSION_NOT_READY",
+		State:             "running",
+		SpawnID:           "spawn-test",
+		SessionID:         "ses_abc123",
+		RetryAfterSeconds: 5,
+	}
+
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if m["session_id"] != "ses_abc123" {
+		t.Errorf("session_id = %v, want %q", m["session_id"], "ses_abc123")
+	}
+}
+
+func TestAttachErrorResultJSONContract(t *testing.T) {
+	t.Parallel()
+
+	result := attachErrorResult{
+		Success: false,
+		Code:    "SESSION_NOT_AVAILABLE",
+		State:   "failed",
+		SpawnID: "spawn-ghost_wolf-a3f2",
+		Error:   "spawn spawn-ghost_wolf-a3f2 is failed (see remote_spawns.json for details)",
+	}
+
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if m["success"] != false {
+		t.Errorf("success = %v, want false", m["success"])
+	}
+	if m["code"] != "SESSION_NOT_AVAILABLE" {
+		t.Errorf("code = %v, want %q", m["code"], "SESSION_NOT_AVAILABLE")
+	}
+	if m["state"] != "failed" {
+		t.Errorf("state = %v, want %q", m["state"], "failed")
+	}
+	if m["spawn_id"] != "spawn-ghost_wolf-a3f2" {
+		t.Errorf("spawn_id = %v, want %q", m["spawn_id"], "spawn-ghost_wolf-a3f2")
+	}
+	if m["error"] == nil || m["error"] == "" {
+		t.Error("error field should be populated")
+	}
+}
+
+func TestAttachErrorResultOmitsEmptyOptionalFields(t *testing.T) {
+	t.Parallel()
+
+	// When rec is nil, state and spawn_id should be omitted.
+	result := attachErrorResult{
+		Success: false,
+		Code:    "REMOTE_SPAWN_STORE_ERROR",
+		Error:   "store read failed",
+	}
+
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	optional := []string{"state", "spawn_id"}
+	for _, key := range optional {
+		if _, ok := m[key]; ok {
+			t.Errorf("%s should be omitted when empty (omitempty)", key)
+		}
+	}
+}
+
+// --- Regression tests: remote spawn state → session status mapping ---
+
+func TestRemoteSpawnStatusToSessionStatusAllStates(t *testing.T) {
+	t.Parallel()
+
+	// Verify every known state maps correctly.
+	tests := []struct {
+		state daemon.RemoteSpawnState
+		want  sessions.Status
+	}{
+		{daemon.RemoteSpawnRequested, sessions.StatusPending},
+		{daemon.RemoteSpawnSpawning, sessions.StatusPending},
+		{daemon.RemoteSpawnUnknown, sessions.StatusPending},
+		{daemon.RemoteSpawnRunning, sessions.StatusActive},
+		{daemon.RemoteSpawnFailed, sessions.StatusInactive},
+		{daemon.RemoteSpawnTerminated, sessions.StatusInactive},
+	}
+
+	for _, tt := range tests {
+		got := remoteSpawnStatusToSessionStatus(tt.state)
+		if got != tt.want {
+			t.Errorf("remoteSpawnStatusToSessionStatus(%q) = %q, want %q", tt.state, got, tt.want)
+		}
+	}
+}
+
+func TestRemoteSpawnStatusToSessionStatusUnknownState(t *testing.T) {
+	t.Parallel()
+
+	// Unknown/future states should default to pending (safe default).
+	got := remoteSpawnStatusToSessionStatus(daemon.RemoteSpawnState("some-future-state"))
+	if got != sessions.StatusPending {
+		t.Errorf("unrecognized state mapped to %q, want %q (safe default)", got, sessions.StatusPending)
+	}
+}
+
+// --- Regression tests: session list entry merge with local sessions ---
+
+func TestBuildSessionListEntriesLocalOnly(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	recs := []sessions.Record{
+		{ServerRef: "http://127.0.0.1:4096", SessionID: "ses_1", Status: sessions.StatusActive, UpdatedAt: now},
+		{ServerRef: "http://127.0.0.1:4096", SessionID: "ses_2", Status: sessions.StatusActive, UpdatedAt: now.Add(-time.Minute)},
+	}
+
+	entries := buildSessionListEntries(recs, nil, "")
+	if len(entries) != 2 {
+		t.Fatalf("len(entries) = %d, want 2", len(entries))
+	}
+	// Should be sorted by UpdatedAt descending.
+	if entries[0].SessionID != "ses_1" {
+		t.Errorf("entries[0].SessionID = %q, want ses_1 (most recent)", entries[0].SessionID)
+	}
+	// SpawnID should be empty for local sessions.
+	if entries[0].SpawnID != "" {
+		t.Errorf("entries[0].SpawnID = %q, want empty for local session", entries[0].SpawnID)
+	}
+}
+
+func TestBuildSessionListEntriesRemoteOnly(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	remoteRecs := []daemon.RemoteSpawnRecord{
+		{SpawnID: "spawn-a", Provider: "sprites", State: daemon.RemoteSpawnRunning, ServerRef: "https://test.sprites.app", SessionID: "ses_remote_1", UpdatedAt: now},
+		{SpawnID: "spawn-b", Provider: "sprites", State: daemon.RemoteSpawnSpawning, CreatedAt: now.Add(-time.Minute)},
+	}
+
+	entries := buildSessionListEntries(nil, remoteRecs, "")
+	if len(entries) != 2 {
+		t.Fatalf("len(entries) = %d, want 2", len(entries))
+	}
+	if entries[0].SpawnID != "spawn-a" {
+		t.Errorf("entries[0].SpawnID = %q, want spawn-a (most recent)", entries[0].SpawnID)
+	}
+	if entries[0].Provider != "sprites" {
+		t.Errorf("entries[0].Provider = %q, want sprites", entries[0].Provider)
+	}
+	if entries[1].SpawnID != "spawn-b" {
+		t.Errorf("entries[1].SpawnID = %q, want spawn-b", entries[1].SpawnID)
+	}
+	if entries[1].Status != sessions.StatusPending {
+		t.Errorf("entries[1].Status = %q, want pending (spawning state)", entries[1].Status)
+	}
+}
+
 func TestSessionListEntryJSONContract(t *testing.T) {
 	// Verify the JSON shape includes spawn_id and provider when set.
 	entry := sessionListEntry{
