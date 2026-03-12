@@ -31,20 +31,20 @@ const (
 
 // Daemon holds the daemon state.
 type Daemon struct {
-	config        Config
-	httpServer    *http.Server
-	poller        *Poller
-	pool          *Pool
-	spawns        *SpawnRegistry
-	sstore        *sessions.Store
-	events        *EventBuffer
-	server        *exec.Cmd
-	serverMu      sync.Mutex
-	shutdown      chan struct{}
-	shutdownOnce  sync.Once
-	lifeMu        sync.RWMutex
-	life          protocol.DaemonLifecycleStatus
-	log           *slog.Logger
+	config       Config
+	httpServer   *http.Server
+	poller       *Poller
+	pool         *Pool
+	spawns       *SpawnRegistry
+	sstore       *sessions.Store
+	events       *EventBuffer
+	server       *exec.Cmd
+	serverMu     sync.Mutex
+	shutdown     chan struct{}
+	shutdownOnce sync.Once
+	lifeMu       sync.RWMutex
+	life         protocol.DaemonLifecycleStatus
+	log          *slog.Logger
 }
 
 // Response is the JSON-RPC style response envelope.
