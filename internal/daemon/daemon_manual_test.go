@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/baiirun/aetherflow/internal/client"
+	"github.com/baiirun/aetherflow/internal/protocol"
 )
 
 // noopServerStarter skips the real opencode server startup in tests.

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/baiirun/aetherflow/internal/protocol"
 )
 
 // Client communicates with the aetherd daemon over HTTP.
@@ -241,10 +242,10 @@ func (c *Client) StatusFull() (*FullStatus, error) {
 	return &result, nil
 }
 
-// DaemonLifecycle returns daemon lifecycle status over RPC.
+// DaemonLifecycle returns daemon lifecycle status.
 func (c *Client) DaemonLifecycle() (*protocol.DaemonLifecycleStatus, error) {
 	var result protocol.DaemonLifecycleStatus
-	if err := c.call("daemon.lifecycle", nil, &result); err != nil {
+	if err := c.doGet("/api/v1/lifecycle", &result); err != nil {
 		return nil, err
 	}
 	return &result, nil

@@ -18,6 +18,9 @@ func (d *Daemon) newHTTPHandler() http.Handler {
 	// GET /api/v1/events — list events for an agent (was events.list)
 	mux.HandleFunc("GET /api/v1/events", d.httpEventsList)
 
+	// GET /api/v1/lifecycle — daemon lifecycle state
+	mux.HandleFunc("GET /api/v1/lifecycle", d.httpLifecycle)
+
 	// GET /api/v1/status — full swarm status (was status.full)
 	mux.HandleFunc("GET /api/v1/status", d.httpStatusFull)
 
@@ -158,6 +161,16 @@ func (d *Daemon) httpSpawnDeregister(w http.ResponseWriter, r *http.Request) {
 
 func (d *Daemon) httpShutdown(w http.ResponseWriter, r *http.Request) {
 	writeResponse(w, d.handleShutdown())
+}
+
+func (d *Daemon) httpLifecycle(w http.ResponseWriter, _ *http.Request) {
+	status := d.lifecycleStatus()
+	result, err := json.Marshal(status)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, &Response{Success: false, Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, &Response{Success: true, Result: result})
 }
 
 // daemonURLToListenAddr extracts the host:port from a daemon URL string.
