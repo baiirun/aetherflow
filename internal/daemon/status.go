@@ -7,6 +7,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/baiirun/aetherflow/internal/sessions"
 )
 
 // FullStatus is the response for the status.full RPC method.
@@ -24,25 +26,32 @@ type FullStatus struct {
 
 // SpawnStatus is the status of a spawned agent registered with the daemon.
 type SpawnStatus struct {
-	SpawnID   string     `json:"spawn_id"`
-	PID       int        `json:"pid"`
-	SessionID string     `json:"session_id,omitempty"`
-	State     SpawnState `json:"state"`
-	Prompt    string     `json:"prompt"`
-	SpawnTime time.Time  `json:"spawn_time"`
-	ExitedAt  time.Time  `json:"exited_at,omitempty"`
+	SpawnID         string     `json:"spawn_id"`
+	PID             int        `json:"pid"`
+	SessionID       string     `json:"session_id,omitempty"`
+	State           SpawnState `json:"state"`
+	LifecycleState  string     `json:"lifecycle_state,omitempty"`
+	LastActivityAt  time.Time  `json:"last_activity_at,omitempty"`
+	AttentionNeeded bool       `json:"attention_needed,omitempty"`
+	Prompt          string     `json:"prompt"`
+	SpawnTime       time.Time  `json:"spawn_time"`
+	ExitedAt        time.Time  `json:"exited_at,omitempty"`
 }
 
 // AgentStatus enriches an Agent with task metadata from prog.
 type AgentStatus struct {
-	ID        string    `json:"id"`
-	TaskID    string    `json:"task_id"`
-	Role      string    `json:"role"`
-	PID       int       `json:"pid"`
-	SpawnTime time.Time `json:"spawn_time"`
-	TaskTitle string    `json:"task_title"`
-	LastLog   string    `json:"last_log,omitempty"`
-	SessionID string    `json:"session_id,omitempty"`
+	ID              string    `json:"id"`
+	TaskID          string    `json:"task_id"`
+	Role            string    `json:"role"`
+	PID             int       `json:"pid"`
+	SpawnTime       time.Time `json:"spawn_time"`
+	TaskTitle       string    `json:"task_title"`
+	LastLog         string    `json:"last_log,omitempty"`
+	SessionID       string    `json:"session_id,omitempty"`
+	State           string    `json:"state,omitempty"`
+	LifecycleState  string    `json:"lifecycle_state,omitempty"`
+	LastActivityAt  time.Time `json:"last_activity_at,omitempty"`
+	AttentionNeeded bool      `json:"attention_needed,omitempty"`
 }
 
 // taskShowResponse is the sparse parse target for `prog show --json`.
@@ -59,13 +68,17 @@ type taskShowResponse struct {
 // with task metadata from prog. Each prog show call runs in its own goroutine
 // with a per-call timeout. Partial failures are captured in the Errors slice
 // rather than failing the entire request.
-func BuildFullStatus(ctx context.Context, pool *Pool, spawns *SpawnRegistry, cfg Config, runner CommandRunner) FullStatus {
+func BuildFullStatus(ctx context.Context, pool *Pool, spawns *SpawnRegistry, sstore *sessions.Store, events *EventBuffer, cfg Config, runner CommandRunner) FullStatus {
 	policy := cfg.SpawnPolicy.Normalized()
 
 	status := FullStatus{
 		PoolSize:    cfg.PoolSize,
 		Project:     cfg.Project,
 		SpawnPolicy: policy,
+	}
+	sessionIndex, sessionIndexErr := loadSessionIndex(sstore, cfg.ServerURL)
+	if sessionIndexErr != nil {
+		status.Errors = append(status.Errors, fmt.Sprintf("session index: %v", sessionIndexErr))
 	}
 
 	if pool != nil {
@@ -75,12 +88,16 @@ func BuildFullStatus(ctx context.Context, pool *Pool, spawns *SpawnRegistry, cfg
 		enriched := make([]AgentStatus, len(agents))
 		for i, agent := range agents {
 			enriched[i] = AgentStatus{
-				ID:        string(agent.ID),
-				TaskID:    agent.TaskID,
-				Role:      string(agent.Role),
-				PID:       agent.PID,
-				SpawnTime: agent.SpawnTime,
+				ID:             string(agent.ID),
+				TaskID:         agent.TaskID,
+				Role:           string(agent.Role),
+				PID:            agent.PID,
+				SpawnTime:      agent.SpawnTime,
+				SessionID:      agent.SessionID,
+				State:          string(agent.State),
+				LifecycleState: string(agent.State),
 			}
+			applySessionSummaryToAgent(&enriched[i], sessionSummaryForAgent(agent, sessionIndex, events))
 		}
 
 		// In manual mode, status must be prog-optional. Return pool snapshots
@@ -124,7 +141,7 @@ func BuildFullStatus(ctx context.Context, pool *Pool, spawns *SpawnRegistry, cfg
 			}()
 
 			wg.Wait()
-			status.Errors = errors
+			status.Errors = append(status.Errors, errors...)
 			if queueErr != nil {
 				status.Errors = append(status.Errors, fmt.Sprintf("prog ready: %v", queueErr))
 			}
@@ -144,7 +161,17 @@ func BuildFullStatus(ctx context.Context, pool *Pool, spawns *SpawnRegistry, cfg
 		if len(entries) > 0 {
 			spawned := make([]SpawnStatus, len(entries))
 			for i, e := range entries {
-				spawned[i] = SpawnStatus(e)
+				spawned[i] = SpawnStatus{
+					SpawnID:   e.SpawnID,
+					PID:       e.PID,
+					SessionID: e.SessionID,
+					State:     e.State,
+					Prompt:    e.Prompt,
+					SpawnTime: e.SpawnTime,
+					ExitedAt:  e.ExitedAt,
+				}
+				spawned[i].LifecycleState = string(e.State)
+				applySessionSummaryToSpawn(&spawned[i], sessionSummaryForSpawn(e, sessionIndex, events))
 			}
 			// Sort by spawn time, oldest first.
 			sort.Slice(spawned, func(i, j int) bool {
@@ -155,6 +182,93 @@ func BuildFullStatus(ctx context.Context, pool *Pool, spawns *SpawnRegistry, cfg
 	}
 
 	return status
+}
+
+type sessionSummary struct {
+	lifecycleState string
+	lastActivityAt time.Time
+	attention      bool
+}
+
+func loadSessionIndex(sstore *sessions.Store, serverRef string) (map[string]sessions.Record, error) {
+	if sstore == nil {
+		return nil, nil
+	}
+	recs, err := sstore.List()
+	if err != nil {
+		return nil, err
+	}
+	index := make(map[string]sessions.Record, len(recs))
+	for _, rec := range recs {
+		if rec.ServerRef != serverRef || rec.SessionID == "" {
+			continue
+		}
+		index[rec.SessionID] = rec
+	}
+	return index, nil
+}
+
+func sessionSummaryForAgent(agent Agent, index map[string]sessions.Record, events *EventBuffer) sessionSummary {
+	summary := sessionSummary{
+		lifecycleState: string(agent.State),
+		lastActivityAt: agent.SpawnTime,
+		attention:      agent.State != AgentRunning,
+	}
+	return mergeSessionSummary(summary, agent.SessionID, index, events)
+}
+
+func sessionSummaryForSpawn(entry SpawnEntry, index map[string]sessions.Record, events *EventBuffer) sessionSummary {
+	summary := sessionSummary{
+		lifecycleState: string(entry.State),
+		lastActivityAt: entry.SpawnTime,
+		attention:      entry.State != SpawnRunning,
+	}
+	if entry.State == SpawnExited && !entry.ExitedAt.IsZero() {
+		summary.lastActivityAt = entry.ExitedAt
+	}
+	return mergeSessionSummary(summary, entry.SessionID, index, events)
+}
+
+func mergeSessionSummary(summary sessionSummary, sessionID string, index map[string]sessions.Record, events *EventBuffer) sessionSummary {
+	if sessionID == "" {
+		return summary
+	}
+	if rec, ok := index[sessionID]; ok {
+		summary.lifecycleState = string(rec.Status)
+		if rec.Status == sessions.StatusTerminated || rec.Status == sessions.StatusStale {
+			summary.attention = true
+		}
+		if !rec.LastSeenAt.IsZero() && rec.LastSeenAt.After(summary.lastActivityAt) {
+			summary.lastActivityAt = rec.LastSeenAt
+		}
+	}
+	if ts, ok := latestEventTime(events, sessionID); ok && ts.After(summary.lastActivityAt) {
+		summary.lastActivityAt = ts
+	}
+	return summary
+}
+
+func latestEventTime(events *EventBuffer, sessionID string) (time.Time, bool) {
+	if events == nil || sessionID == "" {
+		return time.Time{}, false
+	}
+	ts, ok := events.LatestTimestamp(sessionID)
+	if !ok {
+		return time.Time{}, false
+	}
+	return time.UnixMilli(ts), true
+}
+
+func applySessionSummaryToAgent(agent *AgentStatus, summary sessionSummary) {
+	agent.LifecycleState = summary.lifecycleState
+	agent.LastActivityAt = summary.lastActivityAt
+	agent.AttentionNeeded = summary.attention
+}
+
+func applySessionSummaryToSpawn(spawn *SpawnStatus, summary sessionSummary) {
+	spawn.LifecycleState = summary.lifecycleState
+	spawn.LastActivityAt = summary.lastActivityAt
+	spawn.AttentionNeeded = summary.attention
 }
 
 // AgentDetail is the response for the status.agent RPC method.

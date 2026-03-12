@@ -301,3 +301,22 @@ func TestEventBufferSessionCount(t *testing.T) {
 		t.Errorf("SessionCount after Clear = %d, want 1", buf.SessionCount())
 	}
 }
+
+func TestEventBufferLatestTimestamp(t *testing.T) {
+	buf := NewEventBuffer(100)
+
+	if ts, ok := buf.LatestTimestamp("missing"); ok || ts != 0 {
+		t.Fatalf("LatestTimestamp(missing) = (%d, %v), want (0, false)", ts, ok)
+	}
+
+	buf.Push(SessionEvent{SessionID: "ses-1", EventType: "ev-1", Timestamp: 100})
+	buf.Push(SessionEvent{SessionID: "ses-1", EventType: "ev-2", Timestamp: 250})
+
+	ts, ok := buf.LatestTimestamp("ses-1")
+	if !ok {
+		t.Fatal("LatestTimestamp(ses-1) ok = false, want true")
+	}
+	if ts != 250 {
+		t.Fatalf("LatestTimestamp(ses-1) = %d, want 250", ts)
+	}
+}

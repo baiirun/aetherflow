@@ -418,7 +418,7 @@ func (d *Daemon) handleStatusAgent(ctx context.Context, rawParams json.RawMessag
 
 func (d *Daemon) handleStatusFull(ctx context.Context) *Response {
 	start := time.Now()
-	status := BuildFullStatus(ctx, d.pool, d.spawns, d.config, d.config.Runner)
+	status := BuildFullStatus(ctx, d.pool, d.spawns, d.sstore, d.events, d.config, d.config.Runner)
 
 	d.log.Info("status.full",
 		"agents", len(status.Agents),
