@@ -28,3 +28,8 @@ Thumbs.db
 
 # Build
 /dist/
+/macos/*/.build/
+/macos/*/.swiftpm/
+/macos/*/build/
+*.xcodeproj/xcuserdata/
+*.xcuserstate
