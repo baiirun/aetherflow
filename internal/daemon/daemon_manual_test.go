@@ -125,7 +125,7 @@ func TestDaemonManualPolicySkipsProgRunnerCalls(t *testing.T) {
 		t.Fatalf("runner calls = %d, want 0 in manual mode", got)
 	}
 
-	if err := c.Shutdown(); err != nil {
+	if err := c.Shutdown(false); err != nil {
 		t.Fatalf("shutdown failed: %v", err)
 	}
 	waitForDaemonExit(t, done, 2*time.Second)
@@ -176,7 +176,7 @@ func TestDaemonAutoPolicyUsesRunnerCalls(t *testing.T) {
 		t.Fatalf("prog ready calls did not increase after baseline (baseline=%d current=%d total_runner_calls=%d)", baselineReady, got, calls.Load())
 	}
 
-	if err := c.Shutdown(); err != nil {
+	if err := c.Shutdown(false); err != nil {
 		t.Fatalf("shutdown failed: %v", err)
 	}
 	waitForDaemonExit(t, done, 2*time.Second)
@@ -219,7 +219,7 @@ func TestDaemonSecondInstanceSameAddrFailsFast(t *testing.T) {
 		t.Fatal("second daemon startup did not fail within timeout")
 	}
 
-	if err := c.Shutdown(); err != nil {
+	if err := c.Shutdown(false); err != nil {
 		t.Fatalf("shutdown failed: %v", err)
 	}
 	waitForDaemonExit(t, done1, 2*time.Second)

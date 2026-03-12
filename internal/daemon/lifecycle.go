@@ -63,6 +63,7 @@ func (d *Daemon) setLifecycleState(state protocol.LifecycleState, lastErr string
 	d.life.State = state
 	d.life.Project = d.config.Project
 	d.life.ServerURL = d.config.ServerURL
+	d.life.DaemonURL = "http://" + d.config.ListenAddr
 	d.life.SpawnPolicy = string(d.config.SpawnPolicy.Normalized())
 	d.life.LastError = lastErr
 	d.life.UpdatedAt = time.Now()

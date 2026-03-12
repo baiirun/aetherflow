@@ -30,13 +30,7 @@ type SessionEventParams struct {
 //
 // On session.created events, the handler also correlates the session ID to
 // a pool agent or spawn entry that hasn't been assigned a session yet.
-func (d *Daemon) handleSessionEvent(rawParams json.RawMessage) *Response {
-	var params SessionEventParams
-	if len(rawParams) > 0 {
-		if err := json.Unmarshal(rawParams, &params); err != nil {
-			return &Response{Success: false, Error: fmt.Sprintf("invalid params: %v", err)}
-		}
-	}
+func (d *Daemon) handleSessionEvent(params SessionEventParams) *Response {
 	if params.SessionID == "" {
 		return &Response{Success: false, Error: "session_id is required"}
 	}
@@ -80,13 +74,7 @@ type EventsListResult struct {
 // handleEventsList returns events for an agent from the in-memory event buffer.
 // The agent is looked up in the pool and spawn registry to resolve its session ID,
 // then events are read from the buffer. Supports incremental reads via after_timestamp.
-func (d *Daemon) handleEventsList(rawParams json.RawMessage) *Response {
-	var params EventsListParams
-	if len(rawParams) > 0 {
-		if err := json.Unmarshal(rawParams, &params); err != nil {
-			return &Response{Success: false, Error: fmt.Sprintf("invalid params: %v", err)}
-		}
-	}
+func (d *Daemon) handleEventsList(params EventsListParams) *Response {
 	if params.AgentName == "" {
 		return &Response{Success: false, Error: "agent_name is required"}
 	}

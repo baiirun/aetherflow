@@ -10,7 +10,7 @@ final class TransportStore: ObservableObject {
             phase: .primed,
             projectName: context.projectName,
             workingDirectory: context.workingDirectory,
-            socketPath: context.socketPath,
+            daemonURL: context.daemonURL,
             cliPath: context.cliPath,
             note: "Shell bootstrap is resolved. Waiting for the first lifecycle probe."
         )
@@ -21,7 +21,7 @@ final class TransportStore: ObservableObject {
             phase: phase,
             projectName: snapshot.projectName,
             workingDirectory: snapshot.workingDirectory,
-            socketPath: snapshot.socketPath,
+            daemonURL: snapshot.daemonURL,
             cliPath: snapshot.cliPath,
             note: note
         )
@@ -48,7 +48,9 @@ final class DaemonLifecycleStore: ObservableObject {
     private let context: ShellBootstrapContext
     private let transportStore: TransportStore
     private let controller: DaemonControlling
-    private let socketExists: (String) -> Bool
+    /// Returns true when the error indicates the daemon is not running
+    /// (e.g. connection refused). False means it is running but the probe failed.
+    private let isDaemonAbsent: (Error) -> Bool
     private let pollIntervalNanoseconds: UInt64
     private let startupTimeout: TimeInterval
     private var monitorTask: Task<Void, Never>?
@@ -60,7 +62,12 @@ final class DaemonLifecycleStore: ObservableObject {
         context: ShellBootstrapContext,
         transportStore: TransportStore,
         controller: DaemonControlling = DefaultDaemonController(),
-        socketExists: @escaping (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+        isDaemonAbsent: @escaping (Error) -> Bool = { error in
+            if let urlError = error as? URLError {
+                return urlError.code == .cannotConnectToHost || urlError.code == .networkConnectionLost
+            }
+            return false
+        },
         pollIntervalNanoseconds: UInt64 = 2_000_000_000,
         startupTimeout: TimeInterval = 10,
         autoStartMonitoring: Bool = true
@@ -68,7 +75,7 @@ final class DaemonLifecycleStore: ObservableObject {
         self.context = context
         self.transportStore = transportStore
         self.controller = controller
-        self.socketExists = socketExists
+        self.isDaemonAbsent = isDaemonAbsent
         self.pollIntervalNanoseconds = pollIntervalNanoseconds
         self.startupTimeout = startupTimeout
         if autoStartMonitoring {
@@ -141,9 +148,9 @@ final class DaemonLifecycleStore: ObservableObject {
 
     func refresh() async {
         let controller = self.controller
-        let socketPath = context.socketPath
+        let daemonURL = context.daemonURL
         do {
-            let lifecycle = try await controller.fetchLifecycle(socketPath: socketPath)
+            let lifecycle = try await controller.fetchLifecycle(daemonURL: daemonURL)
             applyLifecycle(lifecycle)
         } catch {
             applyUnavailableState(error: error)
@@ -155,18 +162,18 @@ final class DaemonLifecycleStore: ObservableObject {
             return
         }
         let controller = self.controller
-        let socketPath = context.socketPath
+        let daemonURL = context.daemonURL
         actionInFlight = .stopping
         banner = nil
         appendDiagnostic(
             title: force ? "Forced stop requested" : "Stop requested",
-            detail: "Requesting daemon shutdown over \(context.socketPath).",
+            detail: "Requesting daemon shutdown at \(context.daemonURL).",
             tone: .info
         )
 
         Task {
             do {
-                let response = try await controller.requestStop(socketPath: socketPath, force: force)
+                let response = try await controller.requestStop(daemonURL: daemonURL, force: force)
                 applyStopResponse(response)
                 await refresh()
             } catch {
@@ -189,12 +196,12 @@ final class DaemonLifecycleStore: ObservableObject {
             activeSessionIDs: [],
             serverURL: snapshot.serverURL,
             spawnPolicy: snapshot.spawnPolicy,
-            statusCopy: "Daemon start requested. Waiting for the socket handshake.",
+            statusCopy: "Daemon start requested. Waiting for the HTTP endpoint to respond.",
             lastError: nil,
             updatedAt: .now
         )
         banner = LifecycleBanner(tone: .info, title: "Start requested", message: receipt.message)
-        transportStore.updatePhase(.unreachable, note: "Start requested. Waiting for the daemon socket to become reachable.")
+        transportStore.updatePhase(.unreachable, note: "Start requested. Waiting for the daemon to become reachable.")
     }
 
     private func applyStopResponse(_ response: DaemonStopResponse) {
@@ -247,13 +254,13 @@ final class DaemonLifecycleStore: ObservableObject {
     }
 
     private func applyUnavailableState(error: Error) {
-        let socketPresent = socketExists(context.socketPath)
+        let daemonAbsent = isDaemonAbsent(error)
         let detail = error.localizedDescription
         if pendingAction == .starting, startupTimedOut() {
             pendingAction = nil
             startupDeadline = nil
             banner = LifecycleBanner(tone: .error, title: "Start timed out", message: "The daemon never became reachable after the start request.")
-            appendDiagnostic(title: "Start timed out", detail: "No daemon socket became reachable within \(Int(startupTimeout)) seconds.", tone: .error)
+            appendDiagnostic(title: "Start timed out", detail: "The daemon did not respond within \(Int(startupTimeout)) seconds.", tone: .error)
             snapshot = DaemonLifecycleSnapshot(
                 phase: .failed,
                 activeSessions: 0,
@@ -264,13 +271,13 @@ final class DaemonLifecycleStore: ObservableObject {
                 lastError: detail,
                 updatedAt: .now
             )
-            transportStore.updatePhase(.unreachable, note: "The daemon start request timed out before a socket became reachable.")
+            transportStore.updatePhase(.unreachable, note: "The daemon start request timed out before becoming reachable.")
             lastTransportPhase = .unreachable
             return
         }
 
-        if socketPresent {
-            let note = "Socket is present, but the lifecycle probe failed. \(detail)"
+        if !daemonAbsent {
+            let note = "The daemon is running but the lifecycle probe failed. \(detail)"
             transportStore.updatePhase(.unreachable, note: note)
             lastTransportPhase = .unreachable
 
@@ -281,7 +288,7 @@ final class DaemonLifecycleStore: ObservableObject {
                 activeSessionIDs: snapshot.activeSessionIDs,
                 serverURL: snapshot.serverURL,
                 spawnPolicy: snapshot.spawnPolicy,
-                statusCopy: phase == .starting ? "Daemon start requested. Waiting for the process to accept RPCs." : "Transport failed while the daemon socket still exists.",
+                statusCopy: phase == .starting ? "Daemon start requested. Waiting for the process to accept requests." : "Transport failed while the daemon is still running.",
                 lastError: detail,
                 updatedAt: .now
             )
@@ -291,12 +298,12 @@ final class DaemonLifecycleStore: ObservableObject {
 
         let phase: DaemonLifecyclePhase = pendingAction == .starting ? .starting : .stopped
         let note = pendingAction == .starting
-            ? "Start requested. Waiting for the daemon socket to appear."
-            : "Daemon socket is absent. Start the daemon to begin monitoring."
+            ? "Start requested. Waiting for the daemon to start."
+            : "Daemon is not running. Start the daemon to begin monitoring."
         transportStore.updatePhase(.unreachable, note: note)
         if lastTransportPhase == .connected && pendingAction == .stopping {
-            appendDiagnostic(title: "Daemon disconnected", detail: "The daemon socket is gone after the stop request.", tone: .success)
-            banner = LifecycleBanner(tone: .success, title: "Daemon stopped", message: "The daemon stopped responding and the socket disappeared.")
+            appendDiagnostic(title: "Daemon disconnected", detail: "The daemon stopped responding after the stop request.", tone: .success)
+            banner = LifecycleBanner(tone: .success, title: "Daemon stopped", message: "The daemon stopped responding to lifecycle probes.")
             pendingAction = nil
             startupDeadline = nil
         }
@@ -359,7 +366,7 @@ final class DaemonLifecycleStore: ObservableObject {
             }
             return "Daemon is running and ready for new work."
         case .stopping:
-            return "Daemon is stopping. Reconnect behavior will settle once the socket disappears."
+            return "Daemon is stopping. Reconnect behavior will settle once the daemon exits."
         case .stopped:
             return "Daemon is stopped."
         case .failed:

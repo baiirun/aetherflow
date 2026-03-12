@@ -31,26 +31,20 @@ const (
 
 // Daemon holds the daemon state.
 type Daemon struct {
-	config     Config
-	httpServer *http.Server
-	poller     *Poller
-	pool       *Pool
-	spawns     *SpawnRegistry
-	sstore     *sessions.Store
-	events     *EventBuffer
-	server     *exec.Cmd
-	serverMu   sync.Mutex
-	shutdown   chan struct{}
-	lifeMu     sync.RWMutex
-	life       protocol.DaemonLifecycleStatus
-	log        *slog.Logger
-}
-
-// Request is the JSON-RPC style request envelope.
-// Retained for compatibility with internal handler methods.
-type Request struct {
-	Method string          `json:"method"`
-	Params json.RawMessage `json:"params,omitempty"`
+	config        Config
+	httpServer    *http.Server
+	poller        *Poller
+	pool          *Pool
+	spawns        *SpawnRegistry
+	sstore        *sessions.Store
+	events        *EventBuffer
+	server        *exec.Cmd
+	serverMu      sync.Mutex
+	shutdown      chan struct{}
+	shutdownOnce  sync.Once
+	lifeMu        sync.RWMutex
+	life          protocol.DaemonLifecycleStatus
+	log           *slog.Logger
 }
 
 // Response is the JSON-RPC style response envelope.
@@ -103,6 +97,7 @@ func New(cfg Config) *Daemon {
 			State:       protocol.LifecycleStateStopped,
 			Project:     cfg.Project,
 			ServerURL:   cfg.ServerURL,
+			DaemonURL:   "http://" + cfg.ListenAddr,
 			SpawnPolicy: string(cfg.SpawnPolicy.Normalized()),
 		},
 		log: log,
@@ -136,14 +131,19 @@ func (d *Daemon) Run() error {
 	conn, err := net.DialTimeout("tcp", d.config.ListenAddr, 200*time.Millisecond)
 	if err == nil {
 		_ = conn.Close()
+		_, port, _ := net.SplitHostPort(d.config.ListenAddr)
 		d.setLifecycleState(protocol.LifecycleStateFailed, fmt.Sprintf("daemon already running on %s", d.config.ListenAddr))
-		return fmt.Errorf("daemon already running on %s", d.config.ListenAddr)
+		return fmt.Errorf("daemon already running on %s (run `lsof -i :%s` to identify the owner, or set listen_addr in .aetherflow.yaml to use a different port)", d.config.ListenAddr, port)
 	}
 
 	// Create HTTP server with the API handler.
 	d.httpServer = &http.Server{
-		Addr:    d.config.ListenAddr,
-		Handler: d.newHTTPHandler(),
+		Addr:              d.config.ListenAddr,
+		Handler:           d.newHTTPHandler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	// Start listener early so we can detect port conflicts before launching
@@ -330,24 +330,36 @@ func (d *Daemon) sweepStale(ctx context.Context) {
 	}
 }
 
-func (d *Daemon) handleShutdown() *Response {
-	d.log.Info("shutdown requested via API")
+func (d *Daemon) handleShutdown(force bool) *Response {
+	d.log.Info("shutdown requested via API", "force", force)
+
+	life := d.lifecycleStatus()
+	if !force && life.ActiveSessionCount > 0 {
+		result, _ := json.Marshal(protocol.StopDaemonResult{
+			Outcome: protocol.StopOutcomeRefused,
+			Status:  life,
+			Message: fmt.Sprintf("refusing stop with %d active session(s); retry with --force after confirmation", life.ActiveSessionCount),
+		})
+		return &Response{Success: true, Result: result}
+	}
+
 	// Signal shutdown in background so we can send the response first.
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		d.setLifecycleState(protocol.LifecycleStateStopping, "")
-		close(d.shutdown)
-	}()
-	return &Response{Success: true, Result: json.RawMessage(`null`)}
+	d.shutdownOnce.Do(func() {
+		go func() {
+			d.setLifecycleState(protocol.LifecycleStateStopping, "")
+			close(d.shutdown)
+		}()
+	})
+
+	result, _ := json.Marshal(protocol.StopDaemonResult{
+		Outcome: protocol.StopOutcomeStopping,
+		Status:  d.lifecycleStatus(),
+		Message: "daemon stopping",
+	})
+	return &Response{Success: true, Result: result}
 }
 
-func (d *Daemon) handleStatusAgent(ctx context.Context, rawParams json.RawMessage) *Response {
-	var params StatusAgentParams
-	if len(rawParams) > 0 {
-		if err := json.Unmarshal(rawParams, &params); err != nil {
-			return &Response{Success: false, Error: fmt.Sprintf("invalid params: %v", err)}
-		}
-	}
+func (d *Daemon) handleStatusAgent(ctx context.Context, params StatusAgentParams) *Response {
 	if params.AgentName == "" {
 		return &Response{Success: false, Error: "agent_name is required"}
 	}

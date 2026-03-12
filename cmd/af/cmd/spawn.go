@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -164,7 +165,8 @@ func deregisterSpawn(daemonURL, spawnID string) {
 // isConnectionRefused returns true if the error is a "connection refused"
 // from dialing the daemon — i.e., no daemon is running.
 func isConnectionRefused(err error) bool {
-	if opErr, ok := err.(*net.OpError); ok {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
 		if sysErr, ok := opErr.Err.(*os.SyscallError); ok {
 			return sysErr.Err == syscall.ECONNREFUSED
 		}

@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/baiirun/aetherflow/internal/protocol"
@@ -178,6 +180,19 @@ func (c *Config) ApplyDefaults() {
 // Validate checks that configuration values are valid.
 // Call after ApplyDefaults.
 func (c *Config) Validate() error {
+	// Reject whitespace in ListenAddr and non-loopback hosts to prevent
+	// remote exposure: binding to 0.0.0.0 would expose POST /api/v1/shutdown
+	// to any host on the local network with no authentication.
+	if strings.TrimSpace(c.ListenAddr) != c.ListenAddr {
+		return fmt.Errorf("listen_addr must not contain leading or trailing whitespace")
+	}
+	if c.ListenAddr != "" {
+		host, _, err := net.SplitHostPort(c.ListenAddr)
+		if err == nil && host != "" && host != "127.0.0.1" && host != "::1" && host != "localhost" {
+			return fmt.Errorf("listen_addr host %q is not a loopback address (only 127.0.0.1, ::1, or localhost are permitted)", host)
+		}
+	}
+
 	if c.PollInterval <= 0 {
 		return fmt.Errorf("poll-interval must be positive, got %v", c.PollInterval)
 	}

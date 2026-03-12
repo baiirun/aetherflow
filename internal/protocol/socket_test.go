@@ -27,9 +27,9 @@ func TestDaemonURLFor(t *testing.T) {
 		t.Errorf("DaemonURLFor is non-deterministic: %q vs %q", got, got2)
 	}
 
-	// Different projects produce different URLs (in almost all cases).
+	// Different projects produce different URLs (inputs are fixed; no collision expected).
 	other := DaemonURLFor("other-project")
 	if got == other {
-		t.Logf("hash collision between %q and %q (acceptable but unlikely)", "myproject", "other-project")
+		t.Errorf("unexpected hash collision between %q and %q", "myproject", "other-project")
 	}
 }

@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -22,13 +21,7 @@ type SpawnRegisterParams struct {
 }
 
 // handleSpawnRegister registers a spawned agent with the daemon for observability.
-func (d *Daemon) handleSpawnRegister(rawParams json.RawMessage) *Response {
-	var params SpawnRegisterParams
-	if len(rawParams) > 0 {
-		if err := json.Unmarshal(rawParams, &params); err != nil {
-			return &Response{Success: false, Error: fmt.Sprintf("invalid params: %v", err)}
-		}
-	}
+func (d *Daemon) handleSpawnRegister(params SpawnRegisterParams) *Response {
 	if params.SpawnID == "" {
 		return &Response{Success: false, Error: "spawn_id is required"}
 	}
@@ -74,13 +67,7 @@ type SpawnDeregisterParams struct {
 // handleSpawnDeregister marks a spawned agent as exited in the registry.
 // The entry is kept (preserving the agent→session mapping for af status)
 // until the periodic sweep removes it after exitedSpawnTTL.
-func (d *Daemon) handleSpawnDeregister(rawParams json.RawMessage) *Response {
-	var params SpawnDeregisterParams
-	if len(rawParams) > 0 {
-		if err := json.Unmarshal(rawParams, &params); err != nil {
-			return &Response{Success: false, Error: fmt.Sprintf("invalid params: %v", err)}
-		}
-	}
+func (d *Daemon) handleSpawnDeregister(params SpawnDeregisterParams) *Response {
 	if params.SpawnID == "" {
 		return &Response{Success: false, Error: "spawn_id is required"}
 	}

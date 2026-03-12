@@ -44,14 +44,12 @@ func testPoolForClaim(t *testing.T) *Pool {
 func TestHandleSessionEventSuccess(t *testing.T) {
 	d := newTestDaemonForEvents()
 
-	params, _ := json.Marshal(SessionEventParams{
+	resp := d.handleSessionEvent(SessionEventParams{
 		EventType: "session.created",
 		SessionID: "ses-abc",
 		Timestamp: 1000,
 		Data:      json.RawMessage(`{"info":{"id":"ses-abc"}}`),
 	})
-
-	resp := d.handleSessionEvent(params)
 	if !resp.Success {
 		t.Fatalf("expected success, got error: %s", resp.Error)
 	}
@@ -78,12 +76,10 @@ func TestHandleSessionEventSuccess(t *testing.T) {
 func TestHandleSessionEventMissingSessionID(t *testing.T) {
 	d := newTestDaemonForEvents()
 
-	params, _ := json.Marshal(SessionEventParams{
+	resp := d.handleSessionEvent(SessionEventParams{
 		EventType: "session.created",
 		Timestamp: 1000,
 	})
-
-	resp := d.handleSessionEvent(params)
 	if resp.Success {
 		t.Fatal("expected failure for missing session_id")
 	}
@@ -95,26 +91,15 @@ func TestHandleSessionEventMissingSessionID(t *testing.T) {
 func TestHandleSessionEventMissingEventType(t *testing.T) {
 	d := newTestDaemonForEvents()
 
-	params, _ := json.Marshal(SessionEventParams{
+	resp := d.handleSessionEvent(SessionEventParams{
 		SessionID: "ses-abc",
 		Timestamp: 1000,
 	})
-
-	resp := d.handleSessionEvent(params)
 	if resp.Success {
 		t.Fatal("expected failure for missing event_type")
 	}
 	if resp.Error != "event_type is required" {
 		t.Errorf("Error = %q, want %q", resp.Error, "event_type is required")
-	}
-}
-
-func TestHandleSessionEventInvalidJSON(t *testing.T) {
-	d := newTestDaemonForEvents()
-
-	resp := d.handleSessionEvent(json.RawMessage(`{invalid json`))
-	if resp.Success {
-		t.Fatal("expected failure for invalid JSON")
 	}
 }
 
@@ -129,14 +114,12 @@ func TestHandleSessionEventOversizedData(t *testing.T) {
 	// Wrap in valid JSON.
 	rawData := json.RawMessage(`"` + string(bigData) + `"`)
 
-	params, _ := json.Marshal(SessionEventParams{
+	resp := d.handleSessionEvent(SessionEventParams{
 		EventType: "message.part.updated",
 		SessionID: "ses-big",
 		Timestamp: 1000,
 		Data:      rawData,
 	})
-
-	resp := d.handleSessionEvent(params)
 	if resp.Success {
 		t.Fatal("expected failure for oversized event data")
 	}
@@ -155,12 +138,11 @@ func TestHandleSessionEventMultipleEvents(t *testing.T) {
 
 	types := []string{"session.created", "message.updated", "message.part.updated", "session.idle"}
 	for i, et := range types {
-		params, _ := json.Marshal(SessionEventParams{
+		resp := d.handleSessionEvent(SessionEventParams{
 			EventType: et,
 			SessionID: "ses-abc",
 			Timestamp: int64(i + 1),
 		})
-		resp := d.handleSessionEvent(params)
 		if !resp.Success {
 			t.Fatalf("event %d (%s) failed: %s", i, et, resp.Error)
 		}
@@ -182,12 +164,11 @@ func TestHandleSessionEventIsolatesSessions(t *testing.T) {
 	d := newTestDaemonForEvents()
 
 	for _, sid := range []string{"ses-1", "ses-2"} {
-		params, _ := json.Marshal(SessionEventParams{
+		resp := d.handleSessionEvent(SessionEventParams{
 			EventType: "session.created",
 			SessionID: sid,
 			Timestamp: 1,
 		})
-		resp := d.handleSessionEvent(params)
 		if !resp.Success {
 			t.Fatalf("event for %s failed: %s", sid, resp.Error)
 		}
@@ -205,7 +186,7 @@ func TestHandleSessionEventIsolatesSessions(t *testing.T) {
 
 func TestHandleEventsListMissingAgentName(t *testing.T) {
 	d := newTestDaemonForEvents()
-	resp := d.handleEventsList(nil)
+	resp := d.handleEventsList(EventsListParams{})
 	if resp.Success {
 		t.Fatal("expected error for missing agent_name")
 	}
@@ -216,8 +197,7 @@ func TestHandleEventsListMissingAgentName(t *testing.T) {
 
 func TestHandleEventsListAgentNotFound(t *testing.T) {
 	d := newTestDaemonForEvents()
-	params, _ := json.Marshal(EventsListParams{AgentName: "nonexistent"})
-	resp := d.handleEventsList(params)
+	resp := d.handleEventsList(EventsListParams{AgentName: "nonexistent"})
 
 	if !resp.Success {
 		t.Fatalf("expected success (empty result), got error: %s", resp.Error)
@@ -268,8 +248,7 @@ func TestHandleEventsListWithSpawnEvents(t *testing.T) {
 		Data:      toolData,
 	})
 
-	params, _ := json.Marshal(EventsListParams{AgentName: "agent-x"})
-	resp := d.handleEventsList(params)
+	resp := d.handleEventsList(EventsListParams{AgentName: "agent-x"})
 
 	if !resp.Success {
 		t.Fatalf("expected success, got error: %s", resp.Error)
@@ -338,8 +317,7 @@ func TestHandleEventsListAfterTimestamp(t *testing.T) {
 	}
 
 	// Request events after timestamp 1000 — should get only the second one.
-	params, _ := json.Marshal(EventsListParams{AgentName: "agent-y", AfterTimestamp: 1000})
-	resp := d.handleEventsList(params)
+	resp := d.handleEventsList(EventsListParams{AgentName: "agent-y", AfterTimestamp: 1000})
 
 	if !resp.Success {
 		t.Fatalf("expected success, got error: %s", resp.Error)
@@ -393,8 +371,7 @@ func TestHandleEventsListHidesNonDisplayableEvents(t *testing.T) {
 		Data:      stepData,
 	})
 
-	params, _ := json.Marshal(EventsListParams{AgentName: "agent-z"})
-	resp := d.handleEventsList(params)
+	resp := d.handleEventsList(EventsListParams{AgentName: "agent-z"})
 
 	if !resp.Success {
 		t.Fatalf("expected success, got error: %s", resp.Error)
@@ -411,14 +388,6 @@ func TestHandleEventsListHidesNonDisplayableEvents(t *testing.T) {
 	// But LastTS should still reflect the latest event.
 	if result.LastTS != 1001 {
 		t.Errorf("LastTS = %d, want 1001", result.LastTS)
-	}
-}
-
-func TestHandleEventsListInvalidJSON(t *testing.T) {
-	d := newTestDaemonForEvents()
-	resp := d.handleEventsList(json.RawMessage(`{invalid`))
-	if resp.Success {
-		t.Fatal("expected error for invalid JSON")
 	}
 }
 
@@ -455,12 +424,11 @@ func TestClaimSessionPoolAgent(t *testing.T) {
 	}
 
 	// Send session.created — pool has one unclaimed agent.
-	params, _ := json.Marshal(SessionEventParams{
+	resp := d.handleSessionEvent(SessionEventParams{
 		EventType: "session.created",
 		SessionID: "ses-claimed",
 		Timestamp: 1000,
 	})
-	resp := d.handleSessionEvent(params)
 	if !resp.Success {
 		t.Fatalf("expected success, got error: %s", resp.Error)
 	}
@@ -517,12 +485,11 @@ func TestClaimSessionSpawnEntry(t *testing.T) {
 		log:    slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
 
-	params, _ := json.Marshal(SessionEventParams{
+	resp := d.handleSessionEvent(SessionEventParams{
 		EventType: "session.created",
 		SessionID: "ses-spawn",
 		Timestamp: 1000,
 	})
-	resp := d.handleSessionEvent(params)
 	if !resp.Success {
 		t.Fatalf("expected success, got error: %s", resp.Error)
 	}
@@ -563,12 +530,11 @@ func TestClaimSessionNoCandidates(t *testing.T) {
 	}
 
 	// No pool, no spawns — should not panic, just log.
-	params, _ := json.Marshal(SessionEventParams{
+	resp := d.handleSessionEvent(SessionEventParams{
 		EventType: "session.created",
 		SessionID: "ses-orphan",
 		Timestamp: 1000,
 	})
-	resp := d.handleSessionEvent(params)
 	if !resp.Success {
 		t.Fatalf("expected success even with no candidates, got error: %s", resp.Error)
 	}
@@ -585,12 +551,11 @@ func TestClaimSessionMultipleCandidatesSkips(t *testing.T) {
 		log:    slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
 
-	params, _ := json.Marshal(SessionEventParams{
+	resp := d.handleSessionEvent(SessionEventParams{
 		EventType: "session.created",
 		SessionID: "ses-ambiguous",
 		Timestamp: 1000,
 	})
-	resp := d.handleSessionEvent(params)
 	if !resp.Success {
 		t.Fatalf("expected success, got error: %s", resp.Error)
 	}

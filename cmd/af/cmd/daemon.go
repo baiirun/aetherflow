@@ -141,8 +141,9 @@ var daemonStopCmd = &cobra.Command{
 	Use:   "stop",
 	Short: "Stop the daemon",
 	Run: func(cmd *cobra.Command, args []string) {
+		force, _ := cmd.Flags().GetBool("force")
 		c := client.New(resolveDaemonURL(cmd))
-		if err := c.Shutdown(); err != nil {
+		if err := c.Shutdown(force); err != nil {
 			Fatal("%v", err)
 		}
 		fmt.Println("daemon stopping")

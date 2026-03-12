@@ -3,7 +3,7 @@ import Foundation
 struct ShellBootstrapContext: Equatable, Sendable {
     let projectName: String
     let workingDirectory: String
-    let socketPath: String
+    let daemonURL: String
     let cliPath: String
 
     static func detect(
@@ -16,11 +16,11 @@ struct ShellBootstrapContext: Equatable, Sendable {
         let projectName = environment["AETHERFLOW_PROJECT"]?.trimmedNonEmpty
             ?? configuredProjectName
             ?? fallbackProjectName
-        let socketPath = environment["AETHERFLOW_SOCKET_PATH"]?.trimmedNonEmpty ?? defaultSocketPath(for: projectName)
+        let daemonURL = environment["AETHERFLOW_DAEMON_URL"]?.trimmedNonEmpty ?? defaultDaemonURL(for: projectName)
         let cliPath = environment["AETHERFLOW_CLI_PATH"]?.trimmedNonEmpty
             ?? defaultCLIPath(for: workingDirectory, pathEnvironment: environment["PATH"])
             ?? "af"
-        return Self(projectName: projectName, workingDirectory: workingDirectory, socketPath: socketPath, cliPath: cliPath)
+        return Self(projectName: projectName, workingDirectory: workingDirectory, daemonURL: daemonURL, cliPath: cliPath)
     }
 
     static func defaultProjectName(for currentDirectoryPath: String) -> String {
@@ -31,12 +31,17 @@ struct ShellBootstrapContext: Equatable, Sendable {
         return lastComponent
     }
 
-    static func defaultSocketPath(for projectName: String) -> String {
-        let safeComponent = URL(fileURLWithPath: projectName).lastPathComponent
-        if safeComponent.isEmpty || safeComponent == "." || safeComponent == "/" {
-            return "/tmp/aetherd.sock"
+    /// Returns the daemon HTTP URL for the given project name, using the same
+    /// FNV-1a port-hashing scheme as the Go `protocol.DaemonURLFor` function.
+    /// Empty project → "http://127.0.0.1:7070" (the default port).
+    /// Non-empty project → "http://127.0.0.1:<7071–7170>" (hashed range).
+    static func defaultDaemonURL(for projectName: String) -> String {
+        if projectName.isEmpty {
+            return "http://127.0.0.1:7070"
         }
-        return "/tmp/aetherd-\(safeComponent).sock"
+        let hash = fnv1a32(projectName)
+        let port = 7070 + 1 + Int(hash % 100)
+        return "http://127.0.0.1:\(port)"
     }
 
     static func defaultCLIPath(for workingDirectory: String, pathEnvironment: String?) -> String? {
@@ -74,6 +79,16 @@ struct ShellBootstrapContext: Equatable, Sendable {
             return unquoted.isEmpty ? nil : unquoted
         }
         return nil
+    }
+
+    /// FNV-1a 32-bit hash — matches the Go simpleHash function in protocol/socket.go.
+    private static func fnv1a32(_ s: String) -> UInt32 {
+        var h: UInt32 = 2166136261
+        for byte in s.utf8 {
+            h ^= UInt32(byte)
+            h = h &* 16777619
+        }
+        return h
     }
 }
 

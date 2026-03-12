@@ -17,11 +17,11 @@ actor FakeDaemonController: DaemonControlling {
         self.startResult = startResult
     }
 
-    func fetchLifecycle(socketPath: String) async throws -> DaemonLifecyclePayload {
+    func fetchLifecycle(daemonURL: String) async throws -> DaemonLifecyclePayload {
         try lifecycleResult.get()
     }
 
-    func requestStop(socketPath: String, force: Bool) async throws -> DaemonStopResponse {
+    func requestStop(daemonURL: String, force: Bool) async throws -> DaemonStopResponse {
         stopRequests.append(force)
         return try stopResult.get()
     }
@@ -43,13 +43,13 @@ final class DaemonLifecycleStoreTests: XCTestCase {
             stopResult: .success(Self.stopResponse(outcome: "refused", activeSessions: 2, message: "refusing stop with 2 active workload(s) across 2 attached session(s); retry with force after confirmation")),
             startResult: .success(DaemonStartReceipt(message: "daemon started"))
         )
-        let bootstrap = ShellBootstrapContext(projectName: "aetherflow", workingDirectory: "/tmp/aetherflow", socketPath: "/tmp/aetherd-aetherflow.sock", cliPath: "/tmp/aetherflow/af")
+        let bootstrap = ShellBootstrapContext(projectName: "aetherflow", workingDirectory: "/tmp/aetherflow", daemonURL: "http://127.0.0.1:7070", cliPath: "/tmp/aetherflow/af")
         let transportStore = TransportStore(context: bootstrap)
         let store = DaemonLifecycleStore(
             context: bootstrap,
             transportStore: transportStore,
             controller: controller,
-            socketExists: { _ in true },
+            isDaemonAbsent: { _ in false },
             autoStartMonitoring: false
         )
 
@@ -69,13 +69,13 @@ final class DaemonLifecycleStoreTests: XCTestCase {
             stopResult: .success(Self.stopResponse(outcome: "stopping", activeSessions: 0, message: "daemon stopping")),
             startResult: .success(DaemonStartReceipt(message: "daemon started (pid 42)"))
         )
-        let bootstrap = ShellBootstrapContext(projectName: "aetherflow", workingDirectory: "/tmp/aetherflow", socketPath: "/tmp/aetherd-aetherflow.sock", cliPath: "/tmp/aetherflow/af")
+        let bootstrap = ShellBootstrapContext(projectName: "aetherflow", workingDirectory: "/tmp/aetherflow", daemonURL: "http://127.0.0.1:7070", cliPath: "/tmp/aetherflow/af")
         let transportStore = TransportStore(context: bootstrap)
         let store = DaemonLifecycleStore(
             context: bootstrap,
             transportStore: transportStore,
             controller: controller,
-            socketExists: { _ in false },
+            isDaemonAbsent: { _ in true },
             autoStartMonitoring: false
         )
 
@@ -94,13 +94,13 @@ final class DaemonLifecycleStoreTests: XCTestCase {
             stopResult: .success(Self.stopResponse(outcome: "stopping", activeSessions: 0, message: "daemon stopping")),
             startResult: .success(DaemonStartReceipt(message: "daemon started (pid 42)"))
         )
-        let bootstrap = ShellBootstrapContext(projectName: "aetherflow", workingDirectory: "/tmp/aetherflow", socketPath: "/tmp/aetherd-aetherflow.sock", cliPath: "/tmp/aetherflow/af")
+        let bootstrap = ShellBootstrapContext(projectName: "aetherflow", workingDirectory: "/tmp/aetherflow", daemonURL: "http://127.0.0.1:7070", cliPath: "/tmp/aetherflow/af")
         let transportStore = TransportStore(context: bootstrap)
         let store = DaemonLifecycleStore(
             context: bootstrap,
             transportStore: transportStore,
             controller: controller,
-            socketExists: { _ in false },
+            isDaemonAbsent: { _ in true },
             pollIntervalNanoseconds: 1_000_000,
             startupTimeout: 0.01,
             autoStartMonitoring: false
@@ -121,13 +121,13 @@ final class DaemonLifecycleStoreTests: XCTestCase {
             stopResult: .success(Self.stopResponse(outcome: "refused", activeSessions: 1, message: "refusing stop with 1 active workload(s) across 1 attached session(s); retry with force after confirmation")),
             startResult: .success(DaemonStartReceipt(message: "daemon started"))
         )
-        let bootstrap = ShellBootstrapContext(projectName: "aetherflow", workingDirectory: "/tmp/aetherflow", socketPath: "/tmp/aetherd-aetherflow.sock", cliPath: "/tmp/aetherflow/af")
+        let bootstrap = ShellBootstrapContext(projectName: "aetherflow", workingDirectory: "/tmp/aetherflow", daemonURL: "http://127.0.0.1:7070", cliPath: "/tmp/aetherflow/af")
         let transportStore = TransportStore(context: bootstrap)
         let store = DaemonLifecycleStore(
             context: bootstrap,
             transportStore: transportStore,
             controller: controller,
-            socketExists: { _ in true },
+            isDaemonAbsent: { _ in false },
             autoStartMonitoring: false
         )
 
@@ -146,13 +146,14 @@ final class DaemonLifecycleStoreTests: XCTestCase {
             environment: [
                 "AETHERFLOW_PROJECT": "control-room",
                 "AETHERFLOW_WORKING_DIRECTORY": "/tmp/control-room",
-                "AETHERFLOW_SOCKET_PATH": "/tmp/custom.sock",
+                "AETHERFLOW_DAEMON_URL": "http://127.0.0.1:7099",
                 "AETHERFLOW_CLI_PATH": "/tmp/bin/af",
             ],
             currentDirectoryPath: "/ignored"
         )
 
         XCTAssertEqual(context.cliPath, "/tmp/bin/af")
+        XCTAssertEqual(context.daemonURL, "http://127.0.0.1:7099")
     }
 
     private func eventually(
@@ -176,7 +177,7 @@ final class DaemonLifecycleStoreTests: XCTestCase {
     ) -> DaemonLifecyclePayload {
         DaemonLifecyclePayload(
             state: state,
-            socketPath: "/tmp/aetherd-aetherflow.sock",
+            daemonURL: "http://127.0.0.1:7070",
             project: "aetherflow",
             serverURL: "http://127.0.0.1:4096",
             spawnPolicy: "manual",

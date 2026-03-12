@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 )
 
@@ -44,7 +45,31 @@ func (d *Daemon) newHTTPHandler() http.Handler {
 	// POST /api/v1/shutdown — shut down the daemon (was shutdown)
 	mux.HandleFunc("POST /api/v1/shutdown", d.httpShutdown)
 
-	return mux
+	return hostCheckMiddleware(d.config.ListenAddr, mux)
+}
+
+// hostCheckMiddleware rejects requests whose Host header is not a loopback
+// address, defeating DNS-rebinding attacks at near-zero cost.
+// A cross-origin browser request sends its target domain as the Host header;
+// by requiring the Host to be a loopback address, we ensure only code running
+// on the same machine can reach the daemon API.
+func hostCheckMiddleware(listenAddr string, next http.Handler) http.Handler {
+	listenHost, _, _ := net.SplitHostPort(listenAddr)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqHost, _, _ := net.SplitHostPort(r.Host)
+		if reqHost == "" {
+			reqHost = r.Host // Host header without port
+		}
+		switch reqHost {
+		case "127.0.0.1", "::1", "localhost", listenHost, "":
+			next.ServeHTTP(w, r)
+		default:
+			writeJSON(w, http.StatusForbidden, &Response{
+				Success: false,
+				Error:   "forbidden: requests must originate from localhost",
+			})
+		}
+	})
 }
 
 // writeJSON sends a JSON response with the given status code.
@@ -65,6 +90,7 @@ func writeResponse(w http.ResponseWriter, resp *Response) {
 }
 
 func (d *Daemon) httpSessionEvent(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 512<<10)
 	var params SessionEventParams
 	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
 		writeJSON(w, http.StatusBadRequest, &Response{
@@ -73,8 +99,7 @@ func (d *Daemon) httpSessionEvent(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	raw, _ := json.Marshal(params)
-	writeResponse(w, d.handleSessionEvent(raw))
+	writeResponse(w, d.handleSessionEvent(params))
 }
 
 func (d *Daemon) httpEventsList(w http.ResponseWriter, r *http.Request) {
@@ -91,8 +116,7 @@ func (d *Daemon) httpEventsList(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("raw") == "true" {
 		params.Raw = true
 	}
-	raw, _ := json.Marshal(params)
-	writeResponse(w, d.handleEventsList(raw))
+	writeResponse(w, d.handleEventsList(params))
 }
 
 func (d *Daemon) httpStatusFull(w http.ResponseWriter, r *http.Request) {
@@ -115,8 +139,7 @@ func (d *Daemon) httpStatusAgent(w http.ResponseWriter, r *http.Request) {
 			params.Limit = l
 		}
 	}
-	raw, _ := json.Marshal(params)
-	writeResponse(w, d.handleStatusAgent(r.Context(), raw))
+	writeResponse(w, d.handleStatusAgent(r.Context(), params))
 }
 
 func (d *Daemon) httpPoolDrain(w http.ResponseWriter, r *http.Request) {
@@ -132,6 +155,7 @@ func (d *Daemon) httpPoolResume(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) httpSpawnRegister(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 512<<10)
 	var params SpawnRegisterParams
 	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
 		writeJSON(w, http.StatusBadRequest, &Response{
@@ -140,8 +164,7 @@ func (d *Daemon) httpSpawnRegister(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	raw, _ := json.Marshal(params)
-	writeResponse(w, d.handleSpawnRegister(raw))
+	writeResponse(w, d.handleSpawnRegister(params))
 }
 
 func (d *Daemon) httpSpawnDeregister(w http.ResponseWriter, r *http.Request) {
@@ -153,13 +176,12 @@ func (d *Daemon) httpSpawnDeregister(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	params := SpawnDeregisterParams{SpawnID: spawnID}
-	raw, _ := json.Marshal(params)
-	writeResponse(w, d.handleSpawnDeregister(raw))
+	writeResponse(w, d.handleSpawnDeregister(SpawnDeregisterParams{SpawnID: spawnID}))
 }
 
 func (d *Daemon) httpShutdown(w http.ResponseWriter, r *http.Request) {
-	writeResponse(w, d.handleShutdown())
+	force := r.URL.Query().Get("force") == "true"
+	writeResponse(w, d.handleShutdown(force))
 }
 
 func (d *Daemon) httpLifecycle(w http.ResponseWriter, _ *http.Request) {

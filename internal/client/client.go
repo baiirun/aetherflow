@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/baiirun/aetherflow/internal/protocol"
@@ -89,6 +91,15 @@ func (c *Client) doDelete(path string, result any) error {
 
 // decodeResponse reads and decodes the JSON response envelope.
 func (c *Client) decodeResponse(resp *http.Response, result any) error {
+	if resp.StatusCode >= 400 {
+		// Try to surface a structured error from the response body.
+		var apiResp Response
+		if err := json.NewDecoder(resp.Body).Decode(&apiResp); err == nil && apiResp.Error != "" {
+			return fmt.Errorf("HTTP %d: %s", resp.StatusCode, apiResp.Error)
+		}
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
+	}
+
 	var apiResp Response
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return fmt.Errorf("failed to read response: %w", err)
@@ -222,7 +233,7 @@ type StatusAgentParams struct {
 
 // StatusAgent returns detailed status for a single agent including tool call history.
 func (c *Client) StatusAgent(agentName string, limit int) (*AgentDetail, error) {
-	path := fmt.Sprintf("/api/v1/status/agents/%s", agentName)
+	path := "/api/v1/status/agents/" + url.PathEscape(agentName)
 	if limit > 0 {
 		path = fmt.Sprintf("%s?limit=%d", path, limit)
 	}
@@ -278,10 +289,12 @@ type SessionEvent struct {
 // EventsList returns events for an agent from the daemon's event buffer.
 // When afterTimestamp is set, only events after that timestamp are returned.
 func (c *Client) EventsList(agentName string, afterTimestamp int64) (*EventsListResult, error) {
-	path := fmt.Sprintf("/api/v1/events?agent_name=%s", agentName)
+	vals := url.Values{}
+	vals.Set("agent_name", agentName)
 	if afterTimestamp > 0 {
-		path = fmt.Sprintf("%s&after_timestamp=%d", path, afterTimestamp)
+		vals.Set("after_timestamp", strconv.FormatInt(afterTimestamp, 10))
 	}
+	path := "/api/v1/events?" + vals.Encode()
 	var result EventsListResult
 	if err := c.doGet(path, &result); err != nil {
 		return nil, err
@@ -338,11 +351,24 @@ func (c *Client) SpawnRegister(params SpawnRegisterParams) error {
 
 // SpawnDeregister marks a spawned agent as exited in the daemon's registry.
 func (c *Client) SpawnDeregister(spawnID string) error {
-	path := fmt.Sprintf("/api/v1/spawns/%s", spawnID)
+	path := "/api/v1/spawns/" + url.PathEscape(spawnID)
 	return c.doDelete(path, nil)
 }
 
-// Shutdown stops the daemon.
-func (c *Client) Shutdown() error {
-	return c.doPost("/api/v1/shutdown", nil, nil)
+// Shutdown stops the daemon. When force is false and the daemon has active
+// sessions, it returns a "refused" error with a human-readable message.
+// Pass force=true to stop unconditionally.
+func (c *Client) Shutdown(force bool) error {
+	path := "/api/v1/shutdown"
+	if force {
+		path += "?force=true"
+	}
+	var result protocol.StopDaemonResult
+	if err := c.doPost(path, nil, &result); err != nil {
+		return err
+	}
+	if result.Outcome == protocol.StopOutcomeRefused {
+		return fmt.Errorf("%s (use --force to stop anyway)", result.Message)
+	}
+	return nil
 }

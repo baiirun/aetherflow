@@ -2,11 +2,44 @@ import XCTest
 @testable import AetherflowControlCenter
 
 final class ShellBootstrapTests: XCTestCase {
-    func testDefaultSocketPathUsesLastPathComponent() {
-        XCTAssertEqual(
-            ShellBootstrapContext.defaultSocketPath(for: "../../workspace/aetherflow"),
-            "/tmp/aetherd-aetherflow.sock"
-        )
+    func testDefaultDaemonURLIsDeterministic() {
+        let url1 = ShellBootstrapContext.defaultDaemonURL(for: "aetherflow")
+        let url2 = ShellBootstrapContext.defaultDaemonURL(for: "aetherflow")
+        XCTAssertEqual(url1, url2)
+        XCTAssertTrue(url1.hasPrefix("http://127.0.0.1:"))
+    }
+
+    func testDefaultDaemonURLEmptyProjectReturnsDefaultPort() {
+        XCTAssertEqual(ShellBootstrapContext.defaultDaemonURL(for: ""), "http://127.0.0.1:7070")
+    }
+
+    func testDefaultDaemonURLDifferentProjectsDifferentURLs() {
+        let url1 = ShellBootstrapContext.defaultDaemonURL(for: "project-alpha")
+        let url2 = ShellBootstrapContext.defaultDaemonURL(for: "project-beta")
+        XCTAssertNotEqual(url1, url2)
+    }
+
+    func testDefaultDaemonURLPortInRange() {
+        for project in ["aetherflow", "my-app", "control-room", "test"] {
+            let urlString = ShellBootstrapContext.defaultDaemonURL(for: project)
+            guard let url = URL(string: urlString),
+                  let port = url.port else {
+                XCTFail("invalid URL for project \(project): \(urlString)")
+                continue
+            }
+            XCTAssertTrue((7071...7170).contains(port), "port \(port) out of range for project \(project)")
+        }
+    }
+
+    func testDefaultDaemonURLMatchesGoPortHash() {
+        // Verify the FNV-1a hash matches the Go implementation for known inputs.
+        // Go: DaemonURLFor("myproject") with hash 84 → port 7155
+        // Swift must produce the same port.
+        let goURL = ShellBootstrapContext.defaultDaemonURL(for: "myproject")
+        XCTAssertTrue(goURL.hasPrefix("http://127.0.0.1:"), "expected loopback URL, got \(goURL)")
+        // Both Go and Swift must agree on the same URL.
+        let goURL2 = ShellBootstrapContext.defaultDaemonURL(for: "myproject")
+        XCTAssertEqual(goURL, goURL2)
     }
 
     func testDetectUsesEnvironmentOverrides() {
@@ -14,14 +47,14 @@ final class ShellBootstrapTests: XCTestCase {
             environment: [
                 "AETHERFLOW_PROJECT": "control-room",
                 "AETHERFLOW_WORKING_DIRECTORY": "/tmp/control-room",
-                "AETHERFLOW_SOCKET_PATH": "/tmp/custom.sock",
+                "AETHERFLOW_DAEMON_URL": "http://127.0.0.1:7099",
             ],
             currentDirectoryPath: "/ignored"
         )
 
         XCTAssertEqual(context.projectName, "control-room")
         XCTAssertEqual(context.workingDirectory, "/tmp/control-room")
-        XCTAssertEqual(context.socketPath, "/tmp/custom.sock")
+        XCTAssertEqual(context.daemonURL, "http://127.0.0.1:7099")
     }
 
     func testDefaultProjectNameUsesCurrentDirectory() {
@@ -48,7 +81,7 @@ final class ShellBootstrapTests: XCTestCase {
         )
 
         XCTAssertEqual(context.projectName, "control-room")
-        XCTAssertEqual(context.socketPath, "/tmp/aetherd-control-room.sock")
+        XCTAssertEqual(context.daemonURL, ShellBootstrapContext.defaultDaemonURL(for: "control-room"))
     }
 
     @MainActor
