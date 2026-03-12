@@ -27,9 +27,9 @@ var daemonCmd = &cobra.Command{
 		}
 
 		if lifecycle.State != protocol.LifecycleStateRunning {
-			fmt.Fprintf(os.Stdout, "%s\n", lifecycle.State)
+			_, _ = fmt.Fprintf(os.Stdout, "%s\n", lifecycle.State)
 			if lifecycle.LastError != "" {
-				fmt.Fprintf(os.Stdout, "detail: %s\n", lifecycle.LastError)
+				_, _ = fmt.Fprintf(os.Stdout, "detail: %s\n", lifecycle.LastError)
 			}
 			printDaemonStartHint(os.Stdout)
 			return
@@ -202,12 +202,12 @@ func init() {
 }
 
 func printDaemonNotRunning(w io.Writer) {
-	fmt.Fprintln(w, "not running")
+	_, _ = fmt.Fprintln(w, "not running")
 	printDaemonStartHint(w)
 }
 
 func printDaemonStartHint(w io.Writer) {
-	fmt.Fprintln(w, "\nTo start:")
-	fmt.Fprintln(w, "  af daemon start --project <name>                 # auto mode")
-	fmt.Fprintln(w, "  af daemon start --spawn-policy manual            # manual mode")
+	_, _ = fmt.Fprintln(w, "\nTo start:")
+	_, _ = fmt.Fprintln(w, "  af daemon start --project <name>                 # auto mode")
+	_, _ = fmt.Fprintln(w, "  af daemon start --spawn-policy manual            # manual mode")
 }
