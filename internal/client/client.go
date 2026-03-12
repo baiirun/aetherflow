@@ -36,6 +36,28 @@ type Response struct {
 	Error   string          `json:"error,omitempty"`
 }
 
+type LifecycleState = protocol.LifecycleState
+
+const (
+	LifecycleStateStarting = protocol.LifecycleStateStarting
+	LifecycleStateRunning  = protocol.LifecycleStateRunning
+	LifecycleStateStopping = protocol.LifecycleStateStopping
+	LifecycleStateStopped  = protocol.LifecycleStateStopped
+	LifecycleStateFailed   = protocol.LifecycleStateFailed
+)
+
+type DaemonLifecycleStatus = protocol.DaemonLifecycleStatus
+type StopDaemonParams = protocol.StopDaemonParams
+type StopOutcome = protocol.StopOutcome
+
+const (
+	StopOutcomeStopped = protocol.StopOutcomeStopped
+	StopOutcomeRefused = protocol.StopOutcomeRefused
+	StopOutcomeFailed  = protocol.StopOutcomeFailed
+)
+
+type StopDaemonResult = protocol.StopDaemonResult
+
 func (c *Client) call(method string, params any, result any) error {
 	conn, err := net.Dial("unix", c.socketPath)
 	if err != nil {
@@ -181,6 +203,15 @@ func (c *Client) StatusFull() (*FullStatus, error) {
 	return &result, nil
 }
 
+// DaemonLifecycle returns daemon lifecycle status over RPC.
+func (c *Client) DaemonLifecycle() (*DaemonLifecycleStatus, error) {
+	var result DaemonLifecycleStatus
+	if err := c.call("daemon.lifecycle", nil, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // EventsListParams are the parameters for the events.list RPC.
 type EventsListParams struct {
 	AgentName      string `json:"agent_name"`
@@ -260,7 +291,28 @@ func (c *Client) SpawnDeregister(spawnID string) error {
 	}{SpawnID: spawnID}, nil)
 }
 
-// Shutdown stops the daemon.
+// StopDaemon requests daemon shutdown. The daemon may refuse when active
+// sessions exist unless force is true.
+func (c *Client) StopDaemon(force bool) (*StopDaemonResult, error) {
+	params := StopDaemonParams{Force: force}
+	var result StopDaemonResult
+	if err := c.call("daemon.stop", params, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// Shutdown stops the daemon using the daemon-owned stop contract.
 func (c *Client) Shutdown() error {
-	return c.call("shutdown", nil, nil)
+	result, err := c.StopDaemon(false)
+	if err != nil {
+		return err
+	}
+	if result.Outcome != StopOutcomeStopped {
+		if result.Message != "" {
+			return fmt.Errorf("%s", result.Message)
+		}
+		return fmt.Errorf("daemon stop %s", result.Outcome)
+	}
+	return nil
 }

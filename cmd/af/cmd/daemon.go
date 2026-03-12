@@ -18,15 +18,26 @@ var daemonCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		// Default: show status
 		c := client.New(resolveSocketPath(cmd))
-		status, err := c.StatusFull()
+		lifecycle, err := c.DaemonLifecycle()
 		if err != nil {
-			fmt.Println("not running")
+			Fatal("%v", err)
+		}
+
+		if lifecycle.State != client.LifecycleStateRunning {
+			fmt.Printf("%s\n", lifecycle.State)
+			if lifecycle.LastError != "" {
+				fmt.Printf("detail: %s\n", lifecycle.LastError)
+			}
 			fmt.Println("\nTo start:")
 			fmt.Println("  af daemon start --project <name>                 # auto mode")
 			fmt.Println("  af daemon start --spawn-policy manual            # manual mode")
 			return
 		}
 
+		status, err := c.StatusFull()
+		if err != nil {
+			Fatal("%v", err)
+		}
 		fmt.Printf("running (pool: %d, project: %s, spawn-policy: %s)\n", status.PoolSize, status.Project, status.SpawnPolicy)
 	},
 }
@@ -145,10 +156,23 @@ var daemonStopCmd = &cobra.Command{
 	Short: "Stop the daemon",
 	Run: func(cmd *cobra.Command, args []string) {
 		c := client.New(resolveSocketPath(cmd))
-		if err := c.Shutdown(); err != nil {
+		force, _ := cmd.Flags().GetBool("force")
+		result, err := c.StopDaemon(force)
+		if err != nil {
 			Fatal("%v", err)
 		}
-		fmt.Println("daemon stopped")
+		switch result.Outcome {
+		case client.StopOutcomeStopped:
+			fmt.Println("daemon stopped")
+		case client.StopOutcomeRefused:
+			fmt.Printf("daemon stop refused: %s\n", result.Message)
+			if result.Status.ActiveSessionCount > 0 {
+				fmt.Printf("active sessions: %d\n", result.Status.ActiveSessionCount)
+			}
+			os.Exit(2)
+		default:
+			Fatal("%s", result.Message)
+		}
 	},
 }
 
@@ -168,4 +192,6 @@ func init() {
 	f.Int("max-retries", daemon.DefaultMaxRetries, "Max crash respawns per task")
 	f.Bool("solo", false, "Solo mode: agents merge to main directly instead of creating PRs")
 	f.String("config", "", "Config file path (default: .aetherflow.yaml)")
+
+	daemonStopCmd.Flags().Bool("force", false, "Stop even when the daemon reports active sessions")
 }
