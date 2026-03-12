@@ -2,11 +2,15 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/baiirun/aetherflow/internal/sessions"
 )
 
 // statusRunner creates a CommandRunner for status tests.
@@ -80,7 +84,7 @@ func TestBuildFullStatus(t *testing.T) {
 	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyAuto}
 	runner := statusRunner(showResponses, readyOutput)
 
-	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
+	status := BuildFullStatus(context.Background(), pool, nil, nil, nil, cfg, runner)
 
 	if status.PoolSize != 3 {
 		t.Errorf("PoolSize = %d, want 3", status.PoolSize)
@@ -135,7 +139,7 @@ func TestBuildFullStatusNoAgents(t *testing.T) {
 	readyOutput := "ID           PRI  TITLE\nts-aaa    1    Some task\n"
 	runner := statusRunner(nil, readyOutput)
 
-	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
+	status := BuildFullStatus(context.Background(), pool, nil, nil, nil, cfg, runner)
 
 	if len(status.Agents) != 0 {
 		t.Errorf("Agents count = %d, want 0", len(status.Agents))
@@ -156,7 +160,7 @@ func TestBuildFullStatusManualPolicy(t *testing.T) {
 	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyManual}
 	runner := statusRunner(nil, "ID           PRI  TITLE\n")
 
-	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
+	status := BuildFullStatus(context.Background(), pool, nil, nil, nil, cfg, runner)
 	if status.SpawnPolicy != SpawnPolicyManual {
 		t.Errorf("SpawnPolicy = %q, want %q", status.SpawnPolicy, SpawnPolicyManual)
 	}
@@ -181,7 +185,7 @@ func TestBuildFullStatusManualSkipsProgCalls(t *testing.T) {
 		return nil, fmt.Errorf("unexpected runner call in manual mode: %s %s", name, strings.Join(args, " "))
 	}
 
-	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
+	status := BuildFullStatus(context.Background(), pool, nil, nil, nil, cfg, runner)
 	if len(status.Errors) != 0 {
 		t.Fatalf("Errors = %v, want empty", status.Errors)
 	}
@@ -206,7 +210,7 @@ func TestBuildFullStatusIncludesSpawnsWithoutPool(t *testing.T) {
 	}
 
 	cfg := Config{PoolSize: 3, SpawnPolicy: SpawnPolicyManual}
-	status := BuildFullStatus(context.Background(), nil, spawns, cfg, nil)
+	status := BuildFullStatus(context.Background(), nil, spawns, nil, nil, cfg, nil)
 	if len(status.Spawns) != 1 {
 		t.Fatalf("Spawns count = %d, want 1", len(status.Spawns))
 	}
@@ -231,7 +235,7 @@ func TestBuildFullStatusProgShowFails(t *testing.T) {
 	pool := statusPool(t, agents)
 	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyAuto}
 
-	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
+	status := BuildFullStatus(context.Background(), pool, nil, nil, nil, cfg, runner)
 
 	// Agent should still appear, but with empty title/log.
 	if len(status.Agents) != 1 {
@@ -286,7 +290,7 @@ func TestBuildFullStatusProgReadyFails(t *testing.T) {
 	pool := statusPool(t, agents)
 	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyAuto}
 
-	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
+	status := BuildFullStatus(context.Background(), pool, nil, nil, nil, cfg, runner)
 
 	// Agents should still be populated.
 	if len(status.Agents) != 1 {
@@ -327,7 +331,7 @@ func TestBuildFullStatusNoLogs(t *testing.T) {
 	pool := statusPool(t, agents)
 	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyAuto}
 
-	status := BuildFullStatus(context.Background(), pool, nil, cfg, runner)
+	status := BuildFullStatus(context.Background(), pool, nil, nil, nil, cfg, runner)
 
 	if len(status.Agents) != 1 {
 		t.Fatalf("Agents count = %d, want 1", len(status.Agents))
@@ -361,7 +365,7 @@ func TestBuildFullStatusWithSpawns(t *testing.T) {
 		SpawnTime: time.Now().Add(-2 * time.Minute),
 	})
 
-	status := BuildFullStatus(context.Background(), pool, spawns, cfg, runner)
+	status := BuildFullStatus(context.Background(), pool, spawns, nil, nil, cfg, runner)
 
 	if len(status.Spawns) != 2 {
 		t.Fatalf("Spawns count = %d, want 2", len(status.Spawns))
@@ -383,12 +387,178 @@ func TestBuildFullStatusNilPool(t *testing.T) {
 	cfg := Config{Project: "testproject", PoolSize: 3}
 	runner := statusRunner(nil, "")
 
-	status := BuildFullStatus(context.Background(), nil, nil, cfg, runner)
-
+	status := BuildFullStatus(context.Background(), nil, nil, nil, nil, cfg, runner)
 	if len(status.Agents) != 0 {
 		t.Errorf("Agents count = %d, want 0", len(status.Agents))
 	}
 	if status.PoolSize != 3 {
 		t.Errorf("PoolSize = %d, want 3", status.PoolSize)
+	}
+}
+
+func TestBuildFullStatusAddsSessionSummaryFields(t *testing.T) {
+	now := time.Now()
+	sessionDir := t.TempDir()
+	store, err := sessions.Open(sessionDir)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := store.Upsert(sessions.Record{
+		ServerRef:  "http://127.0.0.1:4096",
+		SessionID:  "ses_agent",
+		Origin:     sessions.OriginPool,
+		WorkRef:    "ts-abc",
+		Status:     sessions.StatusIdle,
+		LastSeenAt: now.Add(-2 * time.Minute),
+	}); err != nil {
+		t.Fatalf("Upsert(agent) error = %v", err)
+	}
+	if err := store.Upsert(sessions.Record{
+		ServerRef:  "http://127.0.0.1:4096",
+		SessionID:  "ses_spawn",
+		Origin:     sessions.OriginSpawn,
+		WorkRef:    "spawn-1",
+		Status:     sessions.StatusTerminated,
+		LastSeenAt: now.Add(-3 * time.Minute),
+	}); err != nil {
+		t.Fatalf("Upsert(spawn) error = %v", err)
+	}
+
+	events := NewEventBuffer(16)
+	events.Push(SessionEvent{
+		EventType: "message.part.updated",
+		SessionID: "ses_agent",
+		Timestamp: now.Add(-30 * time.Second).UnixMilli(),
+		Data:      json.RawMessage(`{"part":{"type":"text","text":"working"}}`),
+	})
+
+	agents := map[string]*Agent{
+		"ts-abc": {
+			ID:        "blur_knife",
+			TaskID:    "ts-abc",
+			Role:      RoleWorker,
+			PID:       1234,
+			SessionID: "ses_agent",
+			SpawnTime: now.Add(-10 * time.Minute),
+			State:     AgentRunning,
+		},
+	}
+	pool := statusPool(t, agents)
+	spawns := NewSpawnRegistry()
+	if err := spawns.Register(SpawnEntry{
+		SpawnID:   "spawn-1",
+		PID:       99,
+		SessionID: "ses_spawn",
+		State:     SpawnExited,
+		Prompt:    "investigate failure",
+		SpawnTime: now.Add(-20 * time.Minute),
+		ExitedAt:  now.Add(-5 * time.Minute),
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyManual, ServerURL: "http://127.0.0.1:4096"}
+	status := BuildFullStatus(context.Background(), pool, spawns, store, events, cfg, nil)
+
+	if got := status.Agents[0].State; got != string(AgentRunning) {
+		t.Fatalf("Agents[0].State = %q, want %q", got, AgentRunning)
+	}
+	if got := status.Agents[0].LifecycleState; got != string(sessions.StatusIdle) {
+		t.Fatalf("Agents[0].LifecycleState = %q, want %q", got, sessions.StatusIdle)
+	}
+	wantAgentLastActivity := now.Add(-30 * time.Second).UnixMilli()
+	if got := status.Agents[0].LastActivityAt.UnixMilli(); got != wantAgentLastActivity {
+		t.Fatalf("Agents[0].LastActivityAt = %d, want %d", got, wantAgentLastActivity)
+	}
+	if status.Agents[0].AttentionNeeded {
+		t.Fatal("Agents[0].AttentionNeeded = true, want false")
+	}
+
+	if got := status.Spawns[0].State; got != SpawnExited {
+		t.Fatalf("Spawns[0].State = %q, want %q", got, SpawnExited)
+	}
+	if got := status.Spawns[0].LifecycleState; got != string(sessions.StatusTerminated) {
+		t.Fatalf("Spawns[0].LifecycleState = %q, want %q", got, sessions.StatusTerminated)
+	}
+	if !status.Spawns[0].AttentionNeeded {
+		t.Fatal("Spawns[0].AttentionNeeded = false, want true")
+	}
+	wantSpawnLastActivity := now.Add(-3 * time.Minute).UnixMilli()
+	if got := status.Spawns[0].LastActivityAt.UnixMilli(); got != wantSpawnLastActivity {
+		t.Fatalf("Spawns[0].LastActivityAt = %d, want %d", got, wantSpawnLastActivity)
+	}
+}
+
+func TestBuildFullStatusUsesServerScopedSessionIdentity(t *testing.T) {
+	now := time.Now()
+	sessionDir := t.TempDir()
+	store, err := sessions.Open(sessionDir)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := store.Upsert(sessions.Record{
+		ServerRef:  "http://wrong-server:4096",
+		SessionID:  "ses_shared",
+		Origin:     sessions.OriginPool,
+		WorkRef:    "ts-abc",
+		Status:     sessions.StatusTerminated,
+		LastSeenAt: now.Add(-1 * time.Minute),
+	}); err != nil {
+		t.Fatalf("Upsert(wrong) error = %v", err)
+	}
+	if err := store.Upsert(sessions.Record{
+		ServerRef:  "http://right-server:4096",
+		SessionID:  "ses_shared",
+		Origin:     sessions.OriginPool,
+		WorkRef:    "ts-abc",
+		Status:     sessions.StatusIdle,
+		LastSeenAt: now.Add(-2 * time.Minute),
+	}); err != nil {
+		t.Fatalf("Upsert(right) error = %v", err)
+	}
+
+	agents := map[string]*Agent{
+		"ts-abc": {
+			ID:        "blur_knife",
+			TaskID:    "ts-abc",
+			Role:      RoleWorker,
+			PID:       1234,
+			SessionID: "ses_shared",
+			SpawnTime: now.Add(-10 * time.Minute),
+			State:     AgentRunning,
+		},
+	}
+	pool := statusPool(t, agents)
+
+	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyManual, ServerURL: "http://right-server:4096"}
+	status := BuildFullStatus(context.Background(), pool, nil, store, nil, cfg, nil)
+
+	if got := status.Agents[0].LifecycleState; got != string(sessions.StatusIdle) {
+		t.Fatalf("Agents[0].LifecycleState = %q, want %q", got, sessions.StatusIdle)
+	}
+	if status.Agents[0].AttentionNeeded {
+		t.Fatal("Agents[0].AttentionNeeded = true, want false")
+	}
+}
+
+func TestBuildFullStatusSurfacesSessionIndexErrors(t *testing.T) {
+	pool := statusPool(t, nil)
+	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyManual, ServerURL: "http://127.0.0.1:4096"}
+
+	sessionDir := t.TempDir()
+	store, err := sessions.Open(sessionDir)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := os.WriteFile(store.Path(), []byte("{not-json"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	status := BuildFullStatus(context.Background(), pool, nil, store, nil, cfg, nil)
+	if len(status.Errors) != 1 {
+		t.Fatalf("Errors count = %d, want 1", len(status.Errors))
+	}
+	if !strings.Contains(status.Errors[0], "session index:") {
+		t.Fatalf("Errors[0] = %q, want session index prefix", status.Errors[0])
 	}
 }

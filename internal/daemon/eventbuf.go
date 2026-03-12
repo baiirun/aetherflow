@@ -169,3 +169,20 @@ func (b *EventBuffer) Len(sessionID string) int {
 	}
 	return len(buf.events)
 }
+
+// LatestTimestamp returns the timestamp of the most recent event for the given
+// session without copying the full event buffer.
+func (b *EventBuffer) LatestTimestamp(sessionID string) (int64, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	buf, ok := b.sessions[sessionID]
+	if !ok || len(buf.events) == 0 {
+		return 0, false
+	}
+	ts := buf.events[len(buf.events)-1].Timestamp
+	if ts <= 0 {
+		return 0, false
+	}
+	return ts, true
+}

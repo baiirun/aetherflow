@@ -104,25 +104,32 @@ func (s *FullStatus) IsManualSpawnPolicy() bool {
 
 // SpawnStatus is the status of a spawned agent registered with the daemon.
 type SpawnStatus struct {
-	SpawnID   string    `json:"spawn_id"`
-	PID       int       `json:"pid"`
-	SessionID string    `json:"session_id,omitempty"`
-	State     string    `json:"state"`
-	Prompt    string    `json:"prompt"`
-	SpawnTime time.Time `json:"spawn_time"`
-	ExitedAt  time.Time `json:"exited_at,omitempty"`
+	SpawnID         string    `json:"spawn_id"`
+	PID             int       `json:"pid"`
+	SessionID       string    `json:"session_id,omitempty"`
+	State           string    `json:"state"`
+	LifecycleState  string    `json:"lifecycle_state,omitempty"`
+	LastActivityAt  time.Time `json:"last_activity_at,omitempty"`
+	AttentionNeeded bool      `json:"attention_needed,omitempty"`
+	Prompt          string    `json:"prompt"`
+	SpawnTime       time.Time `json:"spawn_time"`
+	ExitedAt        time.Time `json:"exited_at,omitempty"`
 }
 
 // AgentStatus is a single agent's enriched status.
 type AgentStatus struct {
-	ID        string    `json:"id"`
-	TaskID    string    `json:"task_id"`
-	Role      string    `json:"role"`
-	PID       int       `json:"pid"`
-	SpawnTime time.Time `json:"spawn_time"`
-	TaskTitle string    `json:"task_title"`
-	LastLog   string    `json:"last_log,omitempty"`
-	SessionID string    `json:"session_id,omitempty"`
+	ID              string    `json:"id"`
+	TaskID          string    `json:"task_id"`
+	Role            string    `json:"role"`
+	PID             int       `json:"pid"`
+	SpawnTime       time.Time `json:"spawn_time"`
+	TaskTitle       string    `json:"task_title"`
+	LastLog         string    `json:"last_log,omitempty"`
+	SessionID       string    `json:"session_id,omitempty"`
+	State           string    `json:"state,omitempty"`
+	LifecycleState  string    `json:"lifecycle_state,omitempty"`
+	LastActivityAt  time.Time `json:"last_activity_at,omitempty"`
+	AttentionNeeded bool      `json:"attention_needed,omitempty"`
 }
 
 // Task is a pending task from the queue.
