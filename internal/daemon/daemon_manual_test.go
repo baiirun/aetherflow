@@ -52,6 +52,129 @@ func waitForDaemonExit(t *testing.T, done <-chan error, timeout time.Duration) {
 	}
 }
 
+func TestDaemonLifecycleReportsRunning(t *testing.T) {
+	socketPath := testSocketPath("aetherd-lifecycle")
+	cfg := Config{
+		SocketPath:        socketPath,
+		Project:           "manual-test",
+		PollInterval:      10 * time.Millisecond,
+		PoolSize:          1,
+		SpawnCmd:          "echo test",
+		SpawnPolicy:       SpawnPolicyManual,
+		ReconcileInterval: DefaultReconcileInterval,
+		ServerStarter:     noopServerStarter,
+		SessionDir:        t.TempDir(),
+	}
+
+	d := New(cfg)
+	done := make(chan error, 1)
+	go func() { done <- d.Run() }()
+
+	c := client.New(socketPath)
+	waitForDaemonStatus(t, c, 2*time.Second)
+
+	lifecycle, err := c.DaemonLifecycle()
+	if err != nil {
+		t.Fatalf("DaemonLifecycle() error = %v", err)
+	}
+	if lifecycle.State != client.LifecycleStateRunning {
+		t.Fatalf("DaemonLifecycle().State = %q, want %q", lifecycle.State, client.LifecycleStateRunning)
+	}
+
+	stopResult, err := c.StopDaemon(true)
+	if err != nil {
+		t.Fatalf("StopDaemon(force) error = %v", err)
+	}
+	if stopResult.Outcome != client.StopOutcomeStopped {
+		t.Fatalf("StopDaemon(force).Outcome = %q, want %q", stopResult.Outcome, client.StopOutcomeStopped)
+	}
+	waitForDaemonExit(t, done, 2*time.Second)
+}
+
+func TestDaemonStopRefusesActiveSessionsWithoutForce(t *testing.T) {
+	socketPath := testSocketPath("aetherd-stop-refuse")
+	cfg := Config{
+		SocketPath:        socketPath,
+		Project:           "manual-test",
+		PollInterval:      10 * time.Millisecond,
+		PoolSize:          1,
+		SpawnCmd:          "echo test",
+		SpawnPolicy:       SpawnPolicyManual,
+		ReconcileInterval: DefaultReconcileInterval,
+		ServerStarter:     noopServerStarter,
+		SessionDir:        t.TempDir(),
+	}
+
+	d := New(cfg)
+	done := make(chan error, 1)
+	go func() { done <- d.Run() }()
+
+	c := client.New(socketPath)
+	waitForDaemonStatus(t, c, 2*time.Second)
+
+	if err := d.spawns.Register(SpawnEntry{
+		SpawnID:   "spawn-test",
+		PID:       os.Getpid(),
+		SessionID: "ses_active",
+		State:     SpawnRunning,
+		SpawnTime: time.Now(),
+	}); err != nil {
+		t.Fatalf("spawns.Register() error = %v", err)
+	}
+
+	result, err := c.StopDaemon(false)
+	if err != nil {
+		t.Fatalf("StopDaemon() error = %v", err)
+	}
+	if result.Outcome != client.StopOutcomeRefused {
+		t.Fatalf("StopDaemon().Outcome = %q, want %q", result.Outcome, client.StopOutcomeRefused)
+	}
+	if result.Status.ActiveSessionCount != 1 {
+		t.Fatalf("StopDaemon().ActiveSessionCount = %d, want 1", result.Status.ActiveSessionCount)
+	}
+
+	lifecycle, err := c.DaemonLifecycle()
+	if err != nil {
+		t.Fatalf("DaemonLifecycle() error = %v", err)
+	}
+	if lifecycle.State != client.LifecycleStateRunning {
+		t.Fatalf("DaemonLifecycle().State after refusal = %q, want %q", lifecycle.State, client.LifecycleStateRunning)
+	}
+
+	forced, err := c.StopDaemon(true)
+	if err != nil {
+		t.Fatalf("StopDaemon(force) error = %v", err)
+	}
+	if forced.Outcome != client.StopOutcomeStopped {
+		t.Fatalf("StopDaemon(force).Outcome = %q, want %q", forced.Outcome, client.StopOutcomeStopped)
+	}
+	waitForDaemonExit(t, done, 2*time.Second)
+}
+
+func TestDaemonRunValidationFailureDoesNotLeaveStartingState(t *testing.T) {
+	cfg := Config{
+		PollInterval:      10 * time.Millisecond,
+		PoolSize:          1,
+		SpawnCmd:          "echo test",
+		SpawnPolicy:       SpawnPolicyAuto,
+		ReconcileInterval: DefaultReconcileInterval,
+		SessionDir:        t.TempDir(),
+	}
+
+	d := New(cfg)
+	err := d.Run()
+	if err == nil {
+		t.Fatal("Run() error = nil, want validation failure")
+	}
+	if !strings.Contains(err.Error(), "requires project") {
+		t.Fatalf("Run() error = %v, want requires-project error", err)
+	}
+
+	if got := d.lifecycleStatus().State; got == client.LifecycleStateStarting {
+		t.Fatalf("lifecycleStatus().State = %q, do not want stale starting state", got)
+	}
+}
+
 func TestDaemonManualPolicySkipsProgRunnerCalls(t *testing.T) {
 	socketPath := testSocketPath("aetherd-manual")
 	var calls atomic.Int64
@@ -70,6 +193,7 @@ func TestDaemonManualPolicySkipsProgRunnerCalls(t *testing.T) {
 		ReconcileInterval: DefaultReconcileInterval,
 		Runner:            runner,
 		ServerStarter:     noopServerStarter,
+		SessionDir:        t.TempDir(),
 	}
 
 	d := New(cfg)
@@ -115,6 +239,7 @@ func TestDaemonAutoPolicyUsesRunnerCalls(t *testing.T) {
 		ReconcileInterval: DefaultReconcileInterval,
 		Runner:            runner,
 		ServerStarter:     noopServerStarter,
+		SessionDir:        t.TempDir(),
 	}
 
 	d := New(cfg)
@@ -152,6 +277,7 @@ func TestDaemonSecondInstanceSameSocketFailsFast(t *testing.T) {
 		SpawnPolicy:       SpawnPolicyManual,
 		ReconcileInterval: DefaultReconcileInterval,
 		ServerStarter:     noopServerStarter,
+		SessionDir:        t.TempDir(),
 	}
 
 	d1 := New(cfg)
@@ -190,6 +316,7 @@ func TestDaemonRunRejectsAutoPolicyWithoutProject(t *testing.T) {
 		SpawnCmd:          "echo test",
 		SpawnPolicy:       SpawnPolicyAuto,
 		ReconcileInterval: DefaultReconcileInterval,
+		SessionDir:        t.TempDir(),
 	}
 
 	d := New(cfg)
@@ -209,6 +336,7 @@ func TestDaemonRunRejectsUnknownSpawnPolicy(t *testing.T) {
 		SpawnCmd:          "echo test",
 		SpawnPolicy:       SpawnPolicy("bogus"),
 		ReconcileInterval: DefaultReconcileInterval,
+		SessionDir:        t.TempDir(),
 	}
 
 	d := New(cfg)
@@ -237,6 +365,7 @@ func TestDaemonRunRejectsNonSocketPathCollision(t *testing.T) {
 		SpawnCmd:          "echo test",
 		SpawnPolicy:       SpawnPolicyManual,
 		ReconcileInterval: DefaultReconcileInterval,
+		SessionDir:        t.TempDir(),
 	}
 
 	d := New(cfg)

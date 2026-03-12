@@ -39,6 +39,9 @@ type Daemon struct {
 	server   *exec.Cmd
 	serverMu sync.Mutex
 	shutdown chan struct{}
+	stopOnce sync.Once
+	lifeMu   sync.RWMutex
+	life     LifecycleStatus
 	log      *slog.Logger
 }
 
@@ -93,7 +96,14 @@ func New(cfg Config) *Daemon {
 		sstore:   store,
 		events:   NewEventBuffer(DefaultEventBufSize),
 		shutdown: make(chan struct{}),
-		log:      log,
+		life: LifecycleStatus{
+			State:       LifecycleStateStopped,
+			SocketPath:  cfg.SocketPath,
+			Project:     cfg.Project,
+			ServerURL:   cfg.ServerURL,
+			SpawnPolicy: string(cfg.SpawnPolicy.Normalized()),
+		},
+		log: log,
 	}
 }
 
@@ -118,36 +128,46 @@ func (d *Daemon) Run() error {
 	if (d.poller == nil) != (d.pool == nil) {
 		return fmt.Errorf("invariant violated: poller and pool must be both nil or both non-nil")
 	}
+	d.setLifecycleState(LifecycleStateStarting, "")
 
 	conn, err := net.DialTimeout("unix", d.config.SocketPath, 200*time.Millisecond)
 	if err == nil {
 		_ = conn.Close()
+		d.setLifecycleState(LifecycleStateFailed, fmt.Sprintf("daemon already running on %s", d.config.SocketPath))
 		return fmt.Errorf("daemon already running on %s", d.config.SocketPath)
 	}
 
 	// Remove stale socket if no daemon is accepting connections.
 	if info, statErr := os.Lstat(d.config.SocketPath); statErr == nil {
 		if info.Mode()&os.ModeSocket == 0 {
+			d.setLifecycleState(LifecycleStateFailed, fmt.Sprintf("socket path exists and is not a unix socket: %s", d.config.SocketPath))
 			return fmt.Errorf("socket path exists and is not a unix socket: %s", d.config.SocketPath)
 		}
 		if rmErr := os.Remove(d.config.SocketPath); rmErr != nil {
+			d.setLifecycleState(LifecycleStateFailed, fmt.Sprintf("failed to remove stale socket %s: %v", d.config.SocketPath, rmErr))
 			return fmt.Errorf("failed to remove stale socket %s: %w", d.config.SocketPath, rmErr)
 		}
 	} else if !os.IsNotExist(statErr) {
+		d.setLifecycleState(LifecycleStateFailed, fmt.Sprintf("failed to stat socket path %s: %v", d.config.SocketPath, statErr))
 		return fmt.Errorf("failed to stat socket path %s: %w", d.config.SocketPath, statErr)
 	}
 
 	listener, err := net.Listen("unix", d.config.SocketPath)
 	if err != nil {
+		d.setLifecycleState(LifecycleStateFailed, fmt.Sprintf("failed to listen on %s: %v", d.config.SocketPath, err))
 		return fmt.Errorf("failed to listen on %s: %w", d.config.SocketPath, err)
 	}
 	// Restrict socket to owner only — prevents other local users from
 	// issuing RPC commands (especially shutdown) to this daemon.
 	if err := os.Chmod(d.config.SocketPath, 0700); err != nil {
 		_ = listener.Close()
+		d.setLifecycleState(LifecycleStateFailed, fmt.Sprintf("failed to set socket permissions on %s: %v", d.config.SocketPath, err))
 		return fmt.Errorf("failed to set socket permissions on %s: %w", d.config.SocketPath, err)
 	}
 	d.listener = listener
+	defer func() {
+		_ = os.Remove(d.config.SocketPath)
+	}()
 
 	d.log.Info("daemon started", "socket", d.config.SocketPath)
 
@@ -167,12 +187,15 @@ func (d *Daemon) Run() error {
 	})
 	if err != nil {
 		_ = listener.Close()
+		d.setLifecycleState(LifecycleStateFailed, err.Error())
 		return err
 	}
 	d.server = serverCmd
 	if serverCmd != nil {
 		go d.superviseServer(ctx)
 	}
+	d.setLifecycleState(LifecycleStateRunning, "")
+	defer d.setLifecycleState(LifecycleStateStopped, "")
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -182,6 +205,7 @@ func (d *Daemon) Run() error {
 		case <-sigCh:
 		case <-d.shutdown:
 		}
+		d.setLifecycleState(LifecycleStateStopping, "")
 		d.log.Info("shutting down")
 		cancel()
 		_ = listener.Close()
@@ -346,6 +370,8 @@ func (d *Daemon) handleConnection(ctx context.Context, conn net.Conn) {
 
 func (d *Daemon) handleRequest(ctx context.Context, req *Request) *Response {
 	switch req.Method {
+	case "daemon.lifecycle":
+		return d.handleDaemonLifecycle()
 	case "status.full":
 		return d.handleStatusFull(ctx)
 	case "status.agent":
@@ -364,21 +390,102 @@ func (d *Daemon) handleRequest(ctx context.Context, req *Request) *Response {
 		return d.handleSessionEvent(req.Params)
 	case "events.list":
 		return d.handleEventsList(req.Params)
+	case "daemon.stop":
+		return d.handleDaemonStop(req.Params)
 	case "shutdown":
-		return d.handleShutdown()
+		return d.handleLegacyShutdown()
 	default:
 		return &Response{Success: false, Error: fmt.Sprintf("unknown method: %s", req.Method)}
 	}
 }
 
-func (d *Daemon) handleShutdown() *Response {
-	d.log.Info("shutdown requested via RPC")
-	// Signal shutdown in background so we can send response first
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		close(d.shutdown)
-	}()
-	return &Response{Success: true}
+func (d *Daemon) handleDaemonLifecycle() *Response {
+	status := d.lifecycleStatus()
+	status.ActiveSessionCount, status.ActiveSessionIDs = activeSessionSnapshot(d.pool, d.spawns)
+	result, err := json.Marshal(status)
+	if err != nil {
+		return &Response{Success: false, Error: fmt.Sprintf("marshal error: %v", err)}
+	}
+	return &Response{Success: true, Result: result}
+}
+
+func (d *Daemon) handleDaemonStop(rawParams json.RawMessage) *Response {
+	var params StopDaemonParams
+	if len(rawParams) > 0 {
+		if err := json.Unmarshal(rawParams, &params); err != nil {
+			return &Response{Success: false, Error: fmt.Sprintf("invalid params: %v", err)}
+		}
+	}
+
+	status := d.lifecycleStatus()
+	switch status.State {
+	case LifecycleStateStopping, LifecycleStateStopped:
+		result, err := json.Marshal(StopDaemonResult{
+			Outcome: StopOutcomeStopped,
+			Status:  status,
+			Message: "daemon already stopping or stopped",
+		})
+		if err != nil {
+			return &Response{Success: false, Error: fmt.Sprintf("marshal error: %v", err)}
+		}
+		return &Response{Success: true, Result: result}
+	}
+
+	if status.ActiveSessionCount > 0 && !params.Force {
+		result, err := json.Marshal(StopDaemonResult{
+			Outcome: StopOutcomeRefused,
+			Status:  status,
+			Message: fmt.Sprintf("refusing stop with %d active session(s); retry with force after confirmation", status.ActiveSessionCount),
+		})
+		if err != nil {
+			return &Response{Success: false, Error: fmt.Sprintf("marshal error: %v", err)}
+		}
+		return &Response{Success: true, Result: result}
+	}
+
+	d.log.Info("shutdown requested via RPC", "force", params.Force, "active_sessions", status.ActiveSessionCount)
+	d.requestShutdown()
+	stopping := d.lifecycleStatus()
+	result, err := json.Marshal(StopDaemonResult{
+		Outcome: StopOutcomeStopped,
+		Status:  stopping,
+		Message: "daemon stopping",
+	})
+	if err != nil {
+		return &Response{Success: false, Error: fmt.Sprintf("marshal error: %v", err)}
+	}
+	return &Response{Success: true, Result: result}
+}
+
+func (d *Daemon) handleLegacyShutdown() *Response {
+	result := StopDaemonResult{
+		Outcome: StopOutcomeStopped,
+		Status:  d.lifecycleStatus(),
+	}
+	if result.Status.ActiveSessionCount > 0 {
+		result.Outcome = StopOutcomeRefused
+		result.Message = fmt.Sprintf("refusing stop with %d active session(s); use daemon.stop force to confirm", result.Status.ActiveSessionCount)
+	} else {
+		d.log.Info("shutdown requested via legacy RPC")
+		d.requestShutdown()
+		result.Status = d.lifecycleStatus()
+		result.Message = "daemon stopping"
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		return &Response{Success: false, Error: fmt.Sprintf("marshal error: %v", err)}
+	}
+	return &Response{Success: true, Result: data}
+}
+
+func (d *Daemon) requestShutdown() {
+	d.stopOnce.Do(func() {
+		d.setLifecycleState(LifecycleStateStopping, "")
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			close(d.shutdown)
+		}()
+	})
 }
 
 func (d *Daemon) handleStatusAgent(ctx context.Context, rawParams json.RawMessage) *Response {
