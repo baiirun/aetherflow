@@ -1,5 +1,38 @@
 import Foundation
 
+enum LifecycleBannerTone {
+    case info
+    case success
+    case warning
+    case error
+}
+
+enum LifecycleAction: String {
+    case starting = "Start requested"
+    case stopping = "Stop requested"
+}
+
+struct LifecycleBanner: Identifiable, Equatable {
+    let id = UUID()
+    let tone: LifecycleBannerTone
+    let title: String
+    let message: String
+}
+
+struct LifecycleDiagnostic: Identifiable, Equatable {
+    let id = UUID()
+    let timestamp: Date
+    let title: String
+    let detail: String
+    let tone: LifecycleBannerTone
+}
+
+struct StopConfirmationRequest: Identifiable, Equatable {
+    let id = UUID()
+    let activeSessions: Int
+    let message: String
+}
+
 struct ShellCard: Identifiable, Hashable {
     let id: String
     let eyebrow: String
@@ -169,6 +202,7 @@ struct TransportSnapshot {
     let projectName: String
     let workingDirectory: String
     let socketPath: String
+    let cliPath: String
     let note: String
 }
 
@@ -183,6 +217,9 @@ enum DaemonLifecyclePhase: String {
 struct DaemonLifecycleSnapshot {
     let phase: DaemonLifecyclePhase
     let activeSessions: Int
+    let activeSessionIDs: [String]
+    let serverURL: String?
+    let spawnPolicy: String?
     let statusCopy: String
     let lastError: String?
     let updatedAt: Date

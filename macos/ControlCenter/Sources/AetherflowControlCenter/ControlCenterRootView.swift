@@ -34,6 +34,16 @@ struct ControlCenterRootView: View {
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 1280, minHeight: 820)
         .background(AtmosphereBackground())
+        .alert("Stop daemon?", isPresented: stopConfirmationPresented) {
+            Button("Stop Now", role: .destructive) {
+                lifecycleStore.confirmStop()
+            }
+            Button("Cancel", role: .cancel) {
+                lifecycleStore.dismissStopConfirmation()
+            }
+        } message: {
+            Text(lifecycleStore.pendingStopConfirmation?.message ?? "")
+        }
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
                 ToolbarRouteButton(title: "Bridge", shortcut: "1", isActive: navigationStore.selectedSection == .overview) {
@@ -50,6 +60,17 @@ struct ControlCenterRootView: View {
                 }
             }
         }
+    }
+
+    private var stopConfirmationPresented: Binding<Bool> {
+        Binding(
+            get: { lifecycleStore.pendingStopConfirmation != nil },
+            set: { isPresented in
+                if !isPresented {
+                    lifecycleStore.dismissStopConfirmation()
+                }
+            }
+        )
     }
 }
 
@@ -197,6 +218,7 @@ private struct ContentColumn: View {
 }
 
 private struct DetailColumn: View {
+    @EnvironmentObject private var lifecycleStore: DaemonLifecycleStore
     let selectedSection: ShellSection
     let selectedCard: ShellCard
     let transport: TransportSnapshot
@@ -230,6 +252,15 @@ private struct DetailColumn: View {
                             MetricTile(title: "Socket", value: transport.socketPath, tone: ShellPalette.moss)
                             MetricTile(title: "Lifecycle", value: lifecycle.phase.rawValue, tone: ShellPalette.brass)
                         }
+
+                        LifecycleControlPanel(
+                            lifecycle: lifecycle,
+                            banner: lifecycleStore.banner,
+                            diagnostics: lifecycleStore.diagnostics,
+                            actionInFlight: lifecycleStore.actionInFlight,
+                            onStart: lifecycleStore.requestStart,
+                            onStop: lifecycleStore.requestStop
+                        )
                     }
                 }
 
@@ -305,6 +336,7 @@ private struct SectionPreview: View {
                     DiagnosticRow(label: "project", value: transport.projectName)
                     DiagnosticRow(label: "cwd", value: transport.workingDirectory)
                     DiagnosticRow(label: "socket", value: transport.socketPath)
+                    DiagnosticRow(label: "cli", value: transport.cliPath)
                     DiagnosticRow(label: "lifecycle", value: lifecycle.phase.rawValue.lowercased())
                     DiagnosticRow(label: "note", value: transport.note)
                 }
@@ -363,10 +395,189 @@ struct MenuBarControlCenterView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
+
+            HStack(spacing: 10) {
+                Button("Start") {
+                    lifecycleStore.requestStart()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(lifecycleStore.actionInFlight != nil || lifecycleStore.snapshot.phase == .running || lifecycleStore.snapshot.phase == .starting)
+
+                Button("Stop") {
+                    lifecycleStore.requestStop()
+                }
+                .buttonStyle(.bordered)
+                .disabled(lifecycleStore.actionInFlight != nil || lifecycleStore.snapshot.phase == .stopped)
+            }
+
+            if let banner = lifecycleStore.banner {
+                BannerView(banner: banner)
+            }
         }
         .padding(18)
         .frame(width: 340)
         .background(AtmosphereBackground().opacity(0.92))
+        .alert("Stop daemon?", isPresented: stopConfirmationPresented) {
+            Button("Stop Now", role: .destructive) {
+                lifecycleStore.confirmStop()
+            }
+            Button("Cancel", role: .cancel) {
+                lifecycleStore.dismissStopConfirmation()
+            }
+        } message: {
+            Text(lifecycleStore.pendingStopConfirmation?.message ?? "")
+        }
+    }
+
+    private var stopConfirmationPresented: Binding<Bool> {
+        Binding(
+            get: { lifecycleStore.pendingStopConfirmation != nil },
+            set: { isPresented in
+                if !isPresented {
+                    lifecycleStore.dismissStopConfirmation()
+                }
+            }
+        )
+    }
+}
+
+private struct LifecycleControlPanel: View {
+    let lifecycle: DaemonLifecycleSnapshot
+    let banner: LifecycleBanner?
+    let diagnostics: [LifecycleDiagnostic]
+    let actionInFlight: LifecycleAction?
+    let onStart: () -> Void
+    let onStop: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                Button("Start Daemon", action: onStart)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(actionInFlight != nil || lifecycle.phase == .running || lifecycle.phase == .starting)
+
+                Button("Stop Daemon", action: onStop)
+                    .buttonStyle(.bordered)
+                    .disabled(actionInFlight != nil || lifecycle.phase == .stopped)
+
+                if let actionInFlight {
+                    MiniChip(text: actionInFlight.rawValue, tone: ShellPalette.brass)
+                }
+            }
+
+            if let banner {
+                BannerView(banner: banner)
+            }
+
+            HStack(spacing: 12) {
+                MetricTile(title: "Sessions", value: "\(lifecycle.activeSessions)", tone: ShellPalette.ember)
+                MetricTile(title: "Policy", value: lifecycle.spawnPolicy ?? "unknown", tone: ShellPalette.moss)
+                MetricTile(title: "Server", value: lifecycle.serverURL ?? "unavailable", tone: ShellPalette.brass)
+            }
+
+            if !lifecycle.activeSessionIDs.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Attached sessions")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundStyle(ShellPalette.mutedInk)
+                    Text(lifecycle.activeSessionIDs.joined(separator: ", "))
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundStyle(ShellPalette.ink)
+                        .textSelection(.enabled)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Diagnostics")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundStyle(ShellPalette.mutedInk)
+                ForEach(diagnostics) { diagnostic in
+                    DiagnosticEventRow(diagnostic: diagnostic)
+                }
+            }
+        }
+    }
+}
+
+private struct BannerView: View {
+    let banner: LifecycleBanner
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(banner.title)
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(ShellPalette.ink)
+            Text(banner.message)
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(ShellPalette.mutedInk)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(Color.white.opacity(0.34))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18)
+                        .stroke(bannerColor.opacity(0.45), lineWidth: 1)
+                )
+        )
+    }
+
+    private var bannerColor: Color {
+        switch banner.tone {
+        case .info:
+            return ShellPalette.brass
+        case .success:
+            return ShellPalette.moss
+        case .warning:
+            return ShellPalette.ember
+        case .error:
+            return Color.red.opacity(0.8)
+        }
+    }
+}
+
+private struct DiagnosticEventRow: View {
+    let diagnostic: LifecycleDiagnostic
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(diagnostic.title)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(ShellPalette.ink)
+                Spacer()
+                Text(diagnostic.timestamp.formatted(date: .omitted, time: .standard))
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundStyle(ShellPalette.mutedInk)
+            }
+            Text(diagnostic.detail)
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(ShellPalette.mutedInk)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color.white.opacity(0.22))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(diagnosticColor.opacity(0.35), lineWidth: 1)
+                )
+        )
+    }
+
+    private var diagnosticColor: Color {
+        switch diagnostic.tone {
+        case .info:
+            return ShellPalette.brass
+        case .success:
+            return ShellPalette.moss
+        case .warning:
+            return ShellPalette.ember
+        case .error:
+            return Color.red.opacity(0.8)
+        }
     }
 }
 

@@ -12,8 +12,9 @@ struct AetherflowControlCenterApp: App {
 
     init() {
         let bootstrap = ShellBootstrapContext.detect()
-        _transportStore = StateObject(wrappedValue: TransportStore(context: bootstrap))
-        _lifecycleStore = StateObject(wrappedValue: DaemonLifecycleStore())
+        let transportStore = TransportStore(context: bootstrap)
+        _transportStore = StateObject(wrappedValue: transportStore)
+        _lifecycleStore = StateObject(wrappedValue: DaemonLifecycleStore(context: bootstrap, transportStore: transportStore))
         _navigationStore = StateObject(wrappedValue: NavigationStore())
     }
 
