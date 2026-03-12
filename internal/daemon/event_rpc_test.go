@@ -11,7 +11,10 @@ import (
 )
 
 func newTestDaemonForEvents() *Daemon {
+	cfg := Config{ServerURL: "http://127.0.0.1:4096", Project: "testproject"}
+	cfg.ApplyDefaults()
 	return &Daemon{
+		config: cfg,
 		events: NewEventBuffer(DefaultEventBufSize),
 		spawns: NewSpawnRegistry(),
 		log:    slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
@@ -283,6 +286,15 @@ func TestHandleEventsListWithSpawnEvents(t *testing.T) {
 	if result.LastTS != 1500 {
 		t.Errorf("LastTS = %d, want 1500", result.LastTS)
 	}
+	if result.Session.ServerRef != d.config.ServerURL {
+		t.Errorf("Session.ServerRef = %q, want %q", result.Session.ServerRef, d.config.ServerURL)
+	}
+	if result.Session.WorkRef != "agent-x" {
+		t.Errorf("Session.WorkRef = %q, want %q", result.Session.WorkRef, "agent-x")
+	}
+	if !result.Session.Attachable {
+		t.Error("Session.Attachable = false, want true")
+	}
 	if len(result.Lines) != 1 {
 		t.Fatalf("Lines count = %d, want 1", len(result.Lines))
 	}
@@ -340,6 +352,9 @@ func TestHandleEventsListAfterTimestamp(t *testing.T) {
 
 	if len(result.Lines) != 1 {
 		t.Fatalf("Lines count = %d, want 1 (only events after ts=1000)", len(result.Lines))
+	}
+	if result.Session.SessionID != "ses-y" {
+		t.Errorf("Session.SessionID = %q, want %q", result.Session.SessionID, "ses-y")
 	}
 	if result.LastTS != 2000 {
 		t.Errorf("LastTS = %d, want 2000", result.LastTS)

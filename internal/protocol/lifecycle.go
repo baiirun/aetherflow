@@ -35,9 +35,9 @@ type StopDaemonParams struct {
 type StopOutcome string
 
 const (
-	StopOutcomeStopped StopOutcome = "stopped"
-	StopOutcomeRefused StopOutcome = "refused"
-	StopOutcomeFailed  StopOutcome = "failed"
+	StopOutcomeStopping StopOutcome = "stopping"
+	StopOutcomeStopped  StopOutcome = "stopped"
+	StopOutcomeRefused  StopOutcome = "refused"
 )
 
 // StopDaemonResult captures daemon-owned stop outcomes.

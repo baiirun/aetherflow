@@ -463,8 +463,8 @@ func TestBuildFullStatusAddsSessionSummaryFields(t *testing.T) {
 	if got := status.Agents[0].State; got != string(AgentRunning) {
 		t.Fatalf("Agents[0].State = %q, want %q", got, AgentRunning)
 	}
-	if got := status.Agents[0].LifecycleState; got != string(sessions.StatusIdle) {
-		t.Fatalf("Agents[0].LifecycleState = %q, want %q", got, sessions.StatusIdle)
+	if got := status.Agents[0].LifecycleState; got != string(AgentRunning) {
+		t.Fatalf("Agents[0].LifecycleState = %q, want %q", got, AgentRunning)
 	}
 	wantAgentLastActivity := now.Add(-30 * time.Second).UnixMilli()
 	if got := status.Agents[0].LastActivityAt.UnixMilli(); got != wantAgentLastActivity {
@@ -477,8 +477,8 @@ func TestBuildFullStatusAddsSessionSummaryFields(t *testing.T) {
 	if got := status.Spawns[0].State; got != SpawnExited {
 		t.Fatalf("Spawns[0].State = %q, want %q", got, SpawnExited)
 	}
-	if got := status.Spawns[0].LifecycleState; got != string(sessions.StatusTerminated) {
-		t.Fatalf("Spawns[0].LifecycleState = %q, want %q", got, sessions.StatusTerminated)
+	if got := status.Spawns[0].LifecycleState; got != string(SpawnExited) {
+		t.Fatalf("Spawns[0].LifecycleState = %q, want %q", got, SpawnExited)
 	}
 	if !status.Spawns[0].AttentionNeeded {
 		t.Fatal("Spawns[0].AttentionNeeded = false, want true")
@@ -533,11 +533,53 @@ func TestBuildFullStatusUsesServerScopedSessionIdentity(t *testing.T) {
 	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyManual, ServerURL: "http://right-server:4096"}
 	status := BuildFullStatus(context.Background(), pool, nil, store, nil, cfg, nil)
 
-	if got := status.Agents[0].LifecycleState; got != string(sessions.StatusIdle) {
-		t.Fatalf("Agents[0].LifecycleState = %q, want %q", got, sessions.StatusIdle)
+	if got := status.Agents[0].LifecycleState; got != string(AgentRunning) {
+		t.Fatalf("Agents[0].LifecycleState = %q, want %q", got, AgentRunning)
 	}
 	if status.Agents[0].AttentionNeeded {
 		t.Fatal("Agents[0].AttentionNeeded = true, want false")
+	}
+}
+
+func TestBuildFullStatusClearsAttentionForIdleExitedSpawn(t *testing.T) {
+	now := time.Now()
+	sessionDir := t.TempDir()
+	store, err := sessions.Open(sessionDir)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := store.Upsert(sessions.Record{
+		ServerRef:  "http://127.0.0.1:4096",
+		SessionID:  "ses_spawn_idle",
+		Origin:     sessions.OriginSpawn,
+		WorkRef:    "spawn-idle",
+		Status:     sessions.StatusIdle,
+		LastSeenAt: now.Add(-1 * time.Minute),
+	}); err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	spawns := NewSpawnRegistry()
+	if err := spawns.Register(SpawnEntry{
+		SpawnID:   "spawn-idle",
+		PID:       99,
+		SessionID: "ses_spawn_idle",
+		State:     SpawnExited,
+		Prompt:    "completed cleanly",
+		SpawnTime: now.Add(-5 * time.Minute),
+		ExitedAt:  now.Add(-2 * time.Minute),
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	cfg := Config{Project: "testproject", PoolSize: 3, SpawnPolicy: SpawnPolicyManual, ServerURL: "http://127.0.0.1:4096"}
+	status := BuildFullStatus(context.Background(), nil, spawns, store, nil, cfg, nil)
+
+	if got := status.Spawns[0].LifecycleState; got != string(SpawnExited) {
+		t.Fatalf("Spawns[0].LifecycleState = %q, want %q", got, SpawnExited)
+	}
+	if status.Spawns[0].AttentionNeeded {
+		t.Fatal("Spawns[0].AttentionNeeded = true, want false")
 	}
 }
 

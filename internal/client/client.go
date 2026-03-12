@@ -36,28 +36,6 @@ type Response struct {
 	Error   string          `json:"error,omitempty"`
 }
 
-type LifecycleState = protocol.LifecycleState
-
-const (
-	LifecycleStateStarting = protocol.LifecycleStateStarting
-	LifecycleStateRunning  = protocol.LifecycleStateRunning
-	LifecycleStateStopping = protocol.LifecycleStateStopping
-	LifecycleStateStopped  = protocol.LifecycleStateStopped
-	LifecycleStateFailed   = protocol.LifecycleStateFailed
-)
-
-type DaemonLifecycleStatus = protocol.DaemonLifecycleStatus
-type StopDaemonParams = protocol.StopDaemonParams
-type StopOutcome = protocol.StopOutcome
-
-const (
-	StopOutcomeStopped = protocol.StopOutcomeStopped
-	StopOutcomeRefused = protocol.StopOutcomeRefused
-	StopOutcomeFailed  = protocol.StopOutcomeFailed
-)
-
-type StopDaemonResult = protocol.StopDaemonResult
-
 func (c *Client) call(method string, params any, result any) error {
 	conn, err := net.Dial("unix", c.socketPath)
 	if err != nil {
@@ -174,8 +152,25 @@ type ToolCall struct {
 // AgentDetail is the detailed view of a single agent with tool call history.
 type AgentDetail struct {
 	AgentStatus
-	ToolCalls []ToolCall `json:"tool_calls"`
-	Errors    []string   `json:"errors,omitempty"`
+	Session   SessionMetadata `json:"session"`
+	ToolCalls []ToolCall      `json:"tool_calls"`
+	Errors    []string        `json:"errors,omitempty"`
+}
+
+// SessionMetadata is the session routing and handoff metadata exposed by the daemon.
+type SessionMetadata struct {
+	ServerRef  string    `json:"server_ref,omitempty"`
+	SessionID  string    `json:"session_id,omitempty"`
+	Directory  string    `json:"directory,omitempty"`
+	Project    string    `json:"project,omitempty"`
+	OriginType string    `json:"origin_type,omitempty"`
+	WorkRef    string    `json:"work_ref,omitempty"`
+	AgentID    string    `json:"agent_id,omitempty"`
+	Status     string    `json:"status,omitempty"`
+	CreatedAt  time.Time `json:"created_at,omitempty"`
+	LastSeenAt time.Time `json:"last_seen_at,omitempty"`
+	UpdatedAt  time.Time `json:"updated_at,omitempty"`
+	Attachable bool      `json:"attachable"`
 }
 
 // StatusAgentParams are the parameters for the status.agent RPC.
@@ -204,8 +199,8 @@ func (c *Client) StatusFull() (*FullStatus, error) {
 }
 
 // DaemonLifecycle returns daemon lifecycle status over RPC.
-func (c *Client) DaemonLifecycle() (*DaemonLifecycleStatus, error) {
-	var result DaemonLifecycleStatus
+func (c *Client) DaemonLifecycle() (*protocol.DaemonLifecycleStatus, error) {
+	var result protocol.DaemonLifecycleStatus
 	if err := c.call("daemon.lifecycle", nil, &result); err != nil {
 		return nil, err
 	}
@@ -221,9 +216,19 @@ type EventsListParams struct {
 
 // EventsListResult is the response for the events.list RPC.
 type EventsListResult struct {
-	Lines     []string `json:"lines,omitempty"`
-	SessionID string   `json:"session_id,omitempty"`
-	LastTS    int64    `json:"last_ts"`
+	Lines     []string        `json:"lines,omitempty"`
+	Events    []SessionEvent  `json:"events,omitempty"`
+	SessionID string          `json:"session_id,omitempty"`
+	Session   SessionMetadata `json:"session"`
+	LastTS    int64           `json:"last_ts"`
+}
+
+// SessionEvent is a raw event from the daemon event buffer.
+type SessionEvent struct {
+	EventType string          `json:"event_type"`
+	SessionID string          `json:"session_id"`
+	Timestamp int64           `json:"timestamp"`
+	Data      json.RawMessage `json:"data"`
 }
 
 // EventsList returns events for an agent from the daemon's event buffer.
@@ -293,9 +298,9 @@ func (c *Client) SpawnDeregister(spawnID string) error {
 
 // StopDaemon requests daemon shutdown. The daemon may refuse when active
 // sessions exist unless force is true.
-func (c *Client) StopDaemon(force bool) (*StopDaemonResult, error) {
-	params := StopDaemonParams{Force: force}
-	var result StopDaemonResult
+func (c *Client) StopDaemon(force bool) (*protocol.StopDaemonResult, error) {
+	params := protocol.StopDaemonParams{Force: force}
+	var result protocol.StopDaemonResult
 	if err := c.call("daemon.stop", params, &result); err != nil {
 		return nil, err
 	}
@@ -308,7 +313,7 @@ func (c *Client) Shutdown() error {
 	if err != nil {
 		return err
 	}
-	if result.Outcome != StopOutcomeStopped {
+	if result.Outcome != protocol.StopOutcomeStopped && result.Outcome != protocol.StopOutcomeStopping {
 		if result.Message != "" {
 			return fmt.Errorf("%s", result.Message)
 		}

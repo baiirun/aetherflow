@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/baiirun/aetherflow/internal/client"
+	"github.com/baiirun/aetherflow/internal/protocol"
 )
 
 // noopServerStarter skips the real opencode server startup in tests.
@@ -77,16 +80,16 @@ func TestDaemonLifecycleReportsRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DaemonLifecycle() error = %v", err)
 	}
-	if lifecycle.State != client.LifecycleStateRunning {
-		t.Fatalf("DaemonLifecycle().State = %q, want %q", lifecycle.State, client.LifecycleStateRunning)
+	if lifecycle.State != protocol.LifecycleStateRunning {
+		t.Fatalf("DaemonLifecycle().State = %q, want %q", lifecycle.State, protocol.LifecycleStateRunning)
 	}
 
 	stopResult, err := c.StopDaemon(true)
 	if err != nil {
 		t.Fatalf("StopDaemon(force) error = %v", err)
 	}
-	if stopResult.Outcome != client.StopOutcomeStopped {
-		t.Fatalf("StopDaemon(force).Outcome = %q, want %q", stopResult.Outcome, client.StopOutcomeStopped)
+	if stopResult.Outcome != protocol.StopOutcomeStopping {
+		t.Fatalf("StopDaemon(force).Outcome = %q, want %q", stopResult.Outcome, protocol.StopOutcomeStopping)
 	}
 	waitForDaemonExit(t, done, 2*time.Second)
 }
@@ -126,8 +129,8 @@ func TestDaemonStopRefusesActiveSessionsWithoutForce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StopDaemon() error = %v", err)
 	}
-	if result.Outcome != client.StopOutcomeRefused {
-		t.Fatalf("StopDaemon().Outcome = %q, want %q", result.Outcome, client.StopOutcomeRefused)
+	if result.Outcome != protocol.StopOutcomeRefused {
+		t.Fatalf("StopDaemon().Outcome = %q, want %q", result.Outcome, protocol.StopOutcomeRefused)
 	}
 	if result.Status.ActiveSessionCount != 1 {
 		t.Fatalf("StopDaemon().ActiveSessionCount = %d, want 1", result.Status.ActiveSessionCount)
@@ -137,16 +140,16 @@ func TestDaemonStopRefusesActiveSessionsWithoutForce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DaemonLifecycle() error = %v", err)
 	}
-	if lifecycle.State != client.LifecycleStateRunning {
-		t.Fatalf("DaemonLifecycle().State after refusal = %q, want %q", lifecycle.State, client.LifecycleStateRunning)
+	if lifecycle.State != protocol.LifecycleStateRunning {
+		t.Fatalf("DaemonLifecycle().State after refusal = %q, want %q", lifecycle.State, protocol.LifecycleStateRunning)
 	}
 
 	forced, err := c.StopDaemon(true)
 	if err != nil {
 		t.Fatalf("StopDaemon(force) error = %v", err)
 	}
-	if forced.Outcome != client.StopOutcomeStopped {
-		t.Fatalf("StopDaemon(force).Outcome = %q, want %q", forced.Outcome, client.StopOutcomeStopped)
+	if forced.Outcome != protocol.StopOutcomeStopping {
+		t.Fatalf("StopDaemon(force).Outcome = %q, want %q", forced.Outcome, protocol.StopOutcomeStopping)
 	}
 	waitForDaemonExit(t, done, 2*time.Second)
 }
@@ -170,9 +173,122 @@ func TestDaemonRunValidationFailureDoesNotLeaveStartingState(t *testing.T) {
 		t.Fatalf("Run() error = %v, want requires-project error", err)
 	}
 
-	if got := d.lifecycleStatus().State; got == client.LifecycleStateStarting {
+	if got := d.lifecycleStatus().State; got == protocol.LifecycleStateStarting {
 		t.Fatalf("lifecycleStatus().State = %q, do not want stale starting state", got)
 	}
+
+}
+
+func TestDaemonStopRefusesActiveWorkWithoutSessionID(t *testing.T) {
+	socketPath := testSocketPath("aetherd-stop-work")
+	cfg := Config{
+		SocketPath:        socketPath,
+		Project:           "manual-test",
+		PollInterval:      10 * time.Millisecond,
+		PoolSize:          1,
+		SpawnCmd:          "echo test",
+		SpawnPolicy:       SpawnPolicyManual,
+		ReconcileInterval: DefaultReconcileInterval,
+		ServerStarter:     noopServerStarter,
+		SessionDir:        t.TempDir(),
+	}
+
+	d := New(cfg)
+	done := make(chan error, 1)
+	go func() { done <- d.Run() }()
+
+	c := client.New(socketPath)
+	waitForDaemonStatus(t, c, 2*time.Second)
+
+	if err := d.spawns.Register(SpawnEntry{
+		SpawnID:   "spawn-pre-session",
+		PID:       os.Getpid(),
+		State:     SpawnRunning,
+		SpawnTime: time.Now(),
+	}); err != nil {
+		t.Fatalf("spawns.Register() error = %v", err)
+	}
+
+	result, err := c.StopDaemon(false)
+	if err != nil {
+		t.Fatalf("StopDaemon() error = %v", err)
+	}
+	if result.Outcome != protocol.StopOutcomeRefused {
+		t.Fatalf("StopDaemon().Outcome = %q, want %q", result.Outcome, protocol.StopOutcomeRefused)
+	}
+	if result.Status.ActiveSessionCount != 0 {
+		t.Fatalf("StopDaemon().ActiveSessionCount = %d, want 0", result.Status.ActiveSessionCount)
+	}
+
+	forced, err := c.StopDaemon(true)
+	if err != nil {
+		t.Fatalf("StopDaemon(force) error = %v", err)
+	}
+	if forced.Outcome != protocol.StopOutcomeStopping {
+		t.Fatalf("StopDaemon(force).Outcome = %q, want %q", forced.Outcome, protocol.StopOutcomeStopping)
+	}
+	waitForDaemonExit(t, done, 2*time.Second)
+}
+
+func TestLegacyShutdownIgnoresActiveSessionGuard(t *testing.T) {
+	socketPath := testSocketPath("aetherd-legacy-shutdown")
+	cfg := Config{
+		SocketPath:        socketPath,
+		Project:           "manual-test",
+		PollInterval:      10 * time.Millisecond,
+		PoolSize:          1,
+		SpawnCmd:          "echo test",
+		SpawnPolicy:       SpawnPolicyManual,
+		ReconcileInterval: DefaultReconcileInterval,
+		ServerStarter:     noopServerStarter,
+		SessionDir:        t.TempDir(),
+	}
+
+	d := New(cfg)
+	done := make(chan error, 1)
+	go func() { done <- d.Run() }()
+
+	c := client.New(socketPath)
+	waitForDaemonStatus(t, c, 2*time.Second)
+
+	if err := d.spawns.Register(SpawnEntry{
+		SpawnID:   "spawn-legacy",
+		PID:       os.Getpid(),
+		SessionID: "ses-legacy",
+		State:     SpawnRunning,
+		SpawnTime: time.Now(),
+	}); err != nil {
+		t.Fatalf("spawns.Register() error = %v", err)
+	}
+
+	if err := legacyShutdown(socketPath); err != nil {
+		t.Fatalf("legacy shutdown failed: %v", err)
+	}
+	waitForDaemonExit(t, done, 2*time.Second)
+}
+
+func legacyShutdown(socketPath string) error {
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+
+	if err := json.NewEncoder(conn).Encode(map[string]any{"method": "shutdown"}); err != nil {
+		return err
+	}
+
+	var resp struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error,omitempty"`
+	}
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	return nil
 }
 
 func TestDaemonManualPolicySkipsProgRunnerCalls(t *testing.T) {

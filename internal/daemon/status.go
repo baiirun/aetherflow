@@ -185,9 +185,10 @@ func BuildFullStatus(ctx context.Context, pool *Pool, spawns *SpawnRegistry, sst
 }
 
 type sessionSummary struct {
-	lifecycleState string
 	lastActivityAt time.Time
 	attention      bool
+	allowIdleClear bool
+	allowEscalate  bool
 }
 
 func loadSessionIndex(sstore *sessions.Store, serverRef string) (map[string]sessions.Record, error) {
@@ -210,18 +211,19 @@ func loadSessionIndex(sstore *sessions.Store, serverRef string) (map[string]sess
 
 func sessionSummaryForAgent(agent Agent, index map[string]sessions.Record, events *EventBuffer) sessionSummary {
 	summary := sessionSummary{
-		lifecycleState: string(agent.State),
 		lastActivityAt: agent.SpawnTime,
 		attention:      agent.State != AgentRunning,
+		allowEscalate:  agent.State != AgentRunning,
 	}
 	return mergeSessionSummary(summary, agent.SessionID, index, events)
 }
 
 func sessionSummaryForSpawn(entry SpawnEntry, index map[string]sessions.Record, events *EventBuffer) sessionSummary {
 	summary := sessionSummary{
-		lifecycleState: string(entry.State),
 		lastActivityAt: entry.SpawnTime,
 		attention:      entry.State != SpawnRunning,
+		allowIdleClear: entry.State == SpawnExited,
+		allowEscalate:  entry.State != SpawnRunning,
 	}
 	if entry.State == SpawnExited && !entry.ExitedAt.IsZero() {
 		summary.lastActivityAt = entry.ExitedAt
@@ -234,9 +236,11 @@ func mergeSessionSummary(summary sessionSummary, sessionID string, index map[str
 		return summary
 	}
 	if rec, ok := index[sessionID]; ok {
-		summary.lifecycleState = string(rec.Status)
-		if rec.Status == sessions.StatusTerminated || rec.Status == sessions.StatusStale {
+		if summary.allowEscalate && (rec.Status == sessions.StatusTerminated || rec.Status == sessions.StatusStale) {
 			summary.attention = true
+		}
+		if summary.allowIdleClear && rec.Status == sessions.StatusIdle {
+			summary.attention = false
 		}
 		if !rec.LastSeenAt.IsZero() && rec.LastSeenAt.After(summary.lastActivityAt) {
 			summary.lastActivityAt = rec.LastSeenAt
@@ -260,13 +264,11 @@ func latestEventTime(events *EventBuffer, sessionID string) (time.Time, bool) {
 }
 
 func applySessionSummaryToAgent(agent *AgentStatus, summary sessionSummary) {
-	agent.LifecycleState = summary.lifecycleState
 	agent.LastActivityAt = summary.lastActivityAt
 	agent.AttentionNeeded = summary.attention
 }
 
 func applySessionSummaryToSpawn(spawn *SpawnStatus, summary sessionSummary) {
-	spawn.LifecycleState = summary.lifecycleState
 	spawn.LastActivityAt = summary.lastActivityAt
 	spawn.AttentionNeeded = summary.attention
 }
@@ -275,8 +277,9 @@ func applySessionSummaryToSpawn(spawn *SpawnStatus, summary sessionSummary) {
 // It provides a detailed view of a single agent with tool call history.
 type AgentDetail struct {
 	AgentStatus
-	ToolCalls []ToolCall `json:"tool_calls"`
-	Errors    []string   `json:"errors,omitempty"`
+	Session   SessionMetadata `json:"session"`
+	ToolCalls []ToolCall      `json:"tool_calls"`
+	Errors    []string        `json:"errors,omitempty"`
 }
 
 // StatusAgentParams are the parameters for the status.agent RPC method.
@@ -291,7 +294,7 @@ const defaultToolCallLimit = 20
 // It fetches task metadata from prog and reads tool calls from the event buffer.
 // Session ID comes from the agent's state (populated by claimSession on
 // session.created events from the plugin).
-func BuildAgentDetail(ctx context.Context, pool *Pool, spawns *SpawnRegistry, events *EventBuffer, cfg Config, runner CommandRunner, params StatusAgentParams) (*AgentDetail, error) {
+func BuildAgentDetail(ctx context.Context, pool *Pool, spawns *SpawnRegistry, sstore *sessions.Store, events *EventBuffer, cfg Config, runner CommandRunner, params StatusAgentParams) (*AgentDetail, error) {
 	// Find the agent in the pool by name.
 	var agent *Agent
 	if pool != nil {
@@ -307,7 +310,7 @@ func BuildAgentDetail(ctx context.Context, pool *Pool, spawns *SpawnRegistry, ev
 	// Check the spawn registry if not found in pool.
 	if agent == nil && spawns != nil {
 		if entry := spawns.Get(params.AgentName); entry != nil {
-			return buildSpawnDetail(ctx, entry, events, cfg, params)
+			return buildSpawnDetail(ctx, entry, sstore, events, cfg, params)
 		}
 	}
 
@@ -325,6 +328,15 @@ func BuildAgentDetail(ctx context.Context, pool *Pool, spawns *SpawnRegistry, ev
 			SessionID: agent.SessionID,
 		},
 	}
+	detail.Session = buildSessionMetadata(sstore, sessionMetadataFallback{
+		serverRef: cfg.ServerURL,
+		sessionID: agent.SessionID,
+		project:   cfg.Project,
+		origin:    sessions.OriginPool,
+		workRef:   agent.TaskID,
+		agentID:   string(agent.ID),
+		status:    string(agent.State),
+	})
 
 	limit := params.Limit
 	if limit <= 0 {
@@ -360,7 +372,7 @@ const maxTitleDisplayRunes = 80
 // buildSpawnDetail assembles a detail view for a spawned agent.
 // Unlike pool agents, spawned agents don't have a prog task — the prompt is the spec.
 // Session ID comes from the spawn entry (populated by claimSession).
-func buildSpawnDetail(_ context.Context, entry *SpawnEntry, events *EventBuffer, _ Config, params StatusAgentParams) (*AgentDetail, error) {
+func buildSpawnDetail(_ context.Context, entry *SpawnEntry, sstore *sessions.Store, events *EventBuffer, cfg Config, params StatusAgentParams) (*AgentDetail, error) {
 	detail := &AgentDetail{
 		AgentStatus: AgentStatus{
 			ID:        entry.SpawnID,
@@ -372,6 +384,14 @@ func buildSpawnDetail(_ context.Context, entry *SpawnEntry, events *EventBuffer,
 			TaskTitle: truncatePrompt(entry.Prompt, maxTitleDisplayRunes),
 		},
 	}
+	detail.Session = buildSessionMetadata(sstore, sessionMetadataFallback{
+		serverRef: cfg.ServerURL,
+		sessionID: entry.SessionID,
+		project:   cfg.Project,
+		origin:    sessions.OriginSpawn,
+		workRef:   entry.SpawnID,
+		status:    string(entry.State),
+	})
 
 	limit := params.Limit
 	if limit <= 0 {

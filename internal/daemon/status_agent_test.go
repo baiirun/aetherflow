@@ -6,7 +6,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/baiirun/aetherflow/internal/sessions"
 )
 
 func TestBuildAgentDetailHappyPath(t *testing.T) {
@@ -54,6 +58,24 @@ func TestBuildAgentDetailHappyPath(t *testing.T) {
 	// Simulate session claim — set session ID on the agent.
 	pool.SetSessionID(agentName, sessionID)
 
+	store := newTestSessionStore(t)
+	lastSeen := time.Date(2026, 2, 7, 12, 3, 0, 0, time.UTC)
+	if err := store.Upsert(sessions.Record{
+		ServerRef:  cfg.ServerURL,
+		SessionID:  sessionID,
+		Directory:  "/tmp/testproject",
+		Project:    cfg.Project,
+		Origin:     sessions.OriginPool,
+		WorkRef:    "ts-abc",
+		AgentID:    agentName,
+		Status:     sessions.StatusActive,
+		CreatedAt:  time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC),
+		LastSeenAt: lastSeen,
+		UpdatedAt:  lastSeen,
+	}); err != nil {
+		t.Fatalf("store.Upsert: %v", err)
+	}
+
 	// Push tool call events into the event buffer.
 	events := NewEventBuffer(DefaultEventBufSize)
 	events.Push(SessionEvent{
@@ -71,7 +93,7 @@ func TestBuildAgentDetailHappyPath(t *testing.T) {
 
 	// Build the detail.
 	cfg.Runner = runner
-	detail, err := BuildAgentDetail(ctx, pool, nil, events, cfg, runner, StatusAgentParams{
+	detail, err := BuildAgentDetail(ctx, pool, nil, store, events, cfg, runner, StatusAgentParams{
 		AgentName: agentName,
 	})
 	if err != nil {
@@ -93,6 +115,21 @@ func TestBuildAgentDetailHappyPath(t *testing.T) {
 	}
 	if detail.SessionID != sessionID {
 		t.Errorf("SessionID = %q, want %q", detail.SessionID, sessionID)
+	}
+	if detail.Session.ServerRef != cfg.ServerURL {
+		t.Errorf("Session.ServerRef = %q, want %q", detail.Session.ServerRef, cfg.ServerURL)
+	}
+	if detail.Session.Directory != "/tmp/testproject" {
+		t.Errorf("Session.Directory = %q, want %q", detail.Session.Directory, "/tmp/testproject")
+	}
+	if detail.Session.WorkRef != "ts-abc" {
+		t.Errorf("Session.WorkRef = %q, want %q", detail.Session.WorkRef, "ts-abc")
+	}
+	if detail.Session.AgentID != agentName {
+		t.Errorf("Session.AgentID = %q, want %q", detail.Session.AgentID, agentName)
+	}
+	if !detail.Session.Attachable {
+		t.Error("Session.Attachable = false, want true")
 	}
 
 	// Verify tool calls from event buffer.
@@ -126,7 +163,7 @@ func TestBuildAgentDetailAgentNotFound(t *testing.T) {
 	pool := NewPool(cfg, nil, nil, testLogger())
 	pool.ctx = context.Background()
 
-	_, err := BuildAgentDetail(context.Background(), pool, nil, nil, cfg, nil, StatusAgentParams{
+	_, err := BuildAgentDetail(context.Background(), pool, nil, nil, nil, cfg, nil, StatusAgentParams{
 		AgentName: "nonexistent_agent",
 	})
 	if err == nil {
@@ -135,7 +172,7 @@ func TestBuildAgentDetailAgentNotFound(t *testing.T) {
 }
 
 func TestBuildAgentDetailNilPool(t *testing.T) {
-	_, err := BuildAgentDetail(context.Background(), nil, nil, nil, Config{}, nil, StatusAgentParams{
+	_, err := BuildAgentDetail(context.Background(), nil, nil, nil, nil, Config{}, nil, StatusAgentParams{
 		AgentName: "some_agent",
 	})
 	if err == nil {
@@ -182,7 +219,7 @@ func TestBuildAgentDetailNoSessionID(t *testing.T) {
 	// Event buffer exists but agent has no session ID — no events to extract.
 	events := NewEventBuffer(DefaultEventBufSize)
 
-	detail, err := BuildAgentDetail(ctx, pool, nil, events, cfg, runner, StatusAgentParams{
+	detail, err := BuildAgentDetail(ctx, pool, nil, nil, events, cfg, runner, StatusAgentParams{
 		AgentName: agentName,
 	})
 	if err != nil {
@@ -243,7 +280,7 @@ func TestBuildAgentDetailProgShowFails(t *testing.T) {
 		Data:      json.RawMessage(`{"part":{"id":"prt_1","type":"tool","tool":"read","state":{"status":"completed","input":{"filePath":"/foo"},"time":{"start":1,"end":2}}}}`),
 	})
 
-	detail, err := BuildAgentDetail(ctx, pool, nil, events, cfg, runner, StatusAgentParams{
+	detail, err := BuildAgentDetail(ctx, pool, nil, nil, events, cfg, runner, StatusAgentParams{
 		AgentName: agentName,
 	})
 	if err != nil {
@@ -288,7 +325,24 @@ func TestBuildAgentDetailSpawnWithEvents(t *testing.T) {
 		Data:      json.RawMessage(`{"part":{"id":"prt_2","type":"tool","tool":"edit","state":{"status":"completed","input":{"filePath":"/src/auth.go"},"title":"auth.go","time":{"start":1500,"end":2000}}}}`),
 	})
 
-	detail, err := BuildAgentDetail(context.Background(), nil, spawns, events, Config{}, nil, StatusAgentParams{
+	cfg := Config{ServerURL: "http://127.0.0.1:4096"}
+	cfg.ApplyDefaults()
+	store := newTestSessionStore(t)
+	if err := store.Upsert(sessions.Record{
+		ServerRef:  cfg.ServerURL,
+		SessionID:  sessionID,
+		Project:    "manual",
+		Origin:     sessions.OriginSpawn,
+		WorkRef:    "spawn-abc",
+		Status:     sessions.StatusIdle,
+		CreatedAt:  time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC),
+		LastSeenAt: time.Date(2026, 2, 7, 12, 4, 0, 0, time.UTC),
+		UpdatedAt:  time.Date(2026, 2, 7, 12, 4, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("store.Upsert: %v", err)
+	}
+
+	detail, err := BuildAgentDetail(context.Background(), nil, spawns, store, events, cfg, nil, StatusAgentParams{
 		AgentName: "spawn-abc",
 	})
 	if err != nil {
@@ -306,6 +360,15 @@ func TestBuildAgentDetailSpawnWithEvents(t *testing.T) {
 	}
 	if detail.TaskTitle != "fix the authentication bug in the login flow" {
 		t.Errorf("TaskTitle = %q, want prompt text", detail.TaskTitle)
+	}
+	if detail.Session.OriginType != string(sessions.OriginSpawn) {
+		t.Errorf("Session.OriginType = %q, want %q", detail.Session.OriginType, sessions.OriginSpawn)
+	}
+	if detail.Session.Status != string(sessions.StatusIdle) {
+		t.Errorf("Session.Status = %q, want %q", detail.Session.Status, sessions.StatusIdle)
+	}
+	if !detail.Session.Attachable {
+		t.Error("Session.Attachable = false, want true")
 	}
 
 	if len(detail.ToolCalls) != 2 {
@@ -335,7 +398,7 @@ func TestBuildAgentDetailSpawnNoSessionID(t *testing.T) {
 
 	events := NewEventBuffer(DefaultEventBufSize)
 
-	detail, err := BuildAgentDetail(context.Background(), nil, spawns, events, Config{}, nil, StatusAgentParams{
+	detail, err := BuildAgentDetail(context.Background(), nil, spawns, nil, events, Config{}, nil, StatusAgentParams{
 		AgentName: "spawn-nostream",
 	})
 	if err != nil {
@@ -348,6 +411,16 @@ func TestBuildAgentDetailSpawnNoSessionID(t *testing.T) {
 	if len(detail.ToolCalls) != 0 {
 		t.Errorf("expected 0 tool calls, got %d", len(detail.ToolCalls))
 	}
+}
+
+func newTestSessionStore(t *testing.T) *sessions.Store {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "sessions")
+	store, err := sessions.Open(dir)
+	if err != nil {
+		t.Fatalf("sessions.Open: %v", err)
+	}
+	return store
 }
 
 // --- test helpers ---
