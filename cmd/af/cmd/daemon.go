@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"syscall"
 
 	"github.com/baiirun/aetherflow/internal/client"
 	"github.com/baiirun/aetherflow/internal/daemon"
+	"github.com/baiirun/aetherflow/internal/protocol"
 	"github.com/spf13/cobra"
 )
 
@@ -20,17 +22,16 @@ var daemonCmd = &cobra.Command{
 		c := client.New(resolveSocketPath(cmd))
 		lifecycle, err := c.DaemonLifecycle()
 		if err != nil {
-			Fatal("%v", err)
+			printDaemonNotRunning(os.Stdout)
+			return
 		}
 
-		if lifecycle.State != client.LifecycleStateRunning {
-			fmt.Printf("%s\n", lifecycle.State)
+		if lifecycle.State != protocol.LifecycleStateRunning {
+			_, _ = fmt.Fprintf(os.Stdout, "%s\n", lifecycle.State)
 			if lifecycle.LastError != "" {
-				fmt.Printf("detail: %s\n", lifecycle.LastError)
+				_, _ = fmt.Fprintf(os.Stdout, "detail: %s\n", lifecycle.LastError)
 			}
-			fmt.Println("\nTo start:")
-			fmt.Println("  af daemon start --project <name>                 # auto mode")
-			fmt.Println("  af daemon start --spawn-policy manual            # manual mode")
+			printDaemonStartHint(os.Stdout)
 			return
 		}
 
@@ -162,9 +163,13 @@ var daemonStopCmd = &cobra.Command{
 			Fatal("%v", err)
 		}
 		switch result.Outcome {
-		case client.StopOutcomeStopped:
-			fmt.Println("daemon stopped")
-		case client.StopOutcomeRefused:
+		case protocol.StopOutcomeStopping, protocol.StopOutcomeStopped:
+			if result.Message != "" {
+				fmt.Println(result.Message)
+			} else {
+				fmt.Println("daemon stopping")
+			}
+		case protocol.StopOutcomeRefused:
 			fmt.Printf("daemon stop refused: %s\n", result.Message)
 			if result.Status.ActiveSessionCount > 0 {
 				fmt.Printf("active sessions: %d\n", result.Status.ActiveSessionCount)
@@ -194,4 +199,15 @@ func init() {
 	f.String("config", "", "Config file path (default: .aetherflow.yaml)")
 
 	daemonStopCmd.Flags().Bool("force", false, "Stop even when the daemon reports active sessions")
+}
+
+func printDaemonNotRunning(w io.Writer) {
+	_, _ = fmt.Fprintln(w, "not running")
+	printDaemonStartHint(w)
+}
+
+func printDaemonStartHint(w io.Writer) {
+	_, _ = fmt.Fprintln(w, "\nTo start:")
+	_, _ = fmt.Fprintln(w, "  af daemon start --project <name>                 # auto mode")
+	_, _ = fmt.Fprintln(w, "  af daemon start --spawn-policy manual            # manual mode")
 }

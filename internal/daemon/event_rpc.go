@@ -70,10 +70,11 @@ type EventsListParams struct {
 
 // EventsListResult is the response for the events.list RPC method.
 type EventsListResult struct {
-	Lines     []string       `json:"lines,omitempty"`  // formatted human-readable lines (when raw=false)
-	Events    []SessionEvent `json:"events,omitempty"` // raw events (when raw=true)
-	SessionID string         `json:"session_id,omitempty"`
-	LastTS    int64          `json:"last_ts"` // timestamp of last event (for follow pagination)
+	Lines     []string        `json:"lines,omitempty"`  // formatted human-readable lines (when raw=false)
+	Events    []SessionEvent  `json:"events,omitempty"` // raw events (when raw=true)
+	SessionID string          `json:"session_id,omitempty"`
+	Session   SessionMetadata `json:"session"`
+	LastTS    int64           `json:"last_ts"` // timestamp of last event (for follow pagination)
 }
 
 // handleEventsList returns events for an agent from the in-memory event buffer.
@@ -91,8 +92,8 @@ func (d *Daemon) handleEventsList(rawParams json.RawMessage) *Response {
 	}
 
 	// Resolve agent name → session ID.
-	sessionID := d.resolveSessionID(params.AgentName)
-	if sessionID == "" {
+	session := d.resolveSessionMetadata(params.AgentName)
+	if session.SessionID == "" {
 		result, _ := json.Marshal(EventsListResult{})
 		return &Response{Success: true, Result: result}
 	}
@@ -100,9 +101,9 @@ func (d *Daemon) handleEventsList(rawParams json.RawMessage) *Response {
 	// Read events from buffer.
 	var evs []SessionEvent
 	if params.AfterTimestamp > 0 {
-		evs = d.events.EventsSince(sessionID, params.AfterTimestamp)
+		evs = d.events.EventsSince(session.SessionID, params.AfterTimestamp)
 	} else {
-		evs = d.events.Events(sessionID)
+		evs = d.events.Events(session.SessionID)
 	}
 
 	var lastTS int64
@@ -113,7 +114,8 @@ func (d *Daemon) handleEventsList(rawParams json.RawMessage) *Response {
 	if params.Raw {
 		result, err := json.Marshal(EventsListResult{
 			Events:    evs,
-			SessionID: sessionID,
+			SessionID: session.SessionID,
+			Session:   session,
 			LastTS:    lastTS,
 		})
 		if err != nil {
@@ -133,7 +135,8 @@ func (d *Daemon) handleEventsList(rawParams json.RawMessage) *Response {
 
 	result, err := json.Marshal(EventsListResult{
 		Lines:     lines,
-		SessionID: sessionID,
+		SessionID: session.SessionID,
+		Session:   session,
 		LastTS:    lastTS,
 	})
 	if err != nil {
@@ -142,25 +145,41 @@ func (d *Daemon) handleEventsList(rawParams json.RawMessage) *Response {
 	return &Response{Success: true, Result: result}
 }
 
-// resolveSessionID looks up an agent by name in the pool and spawn registry
-// and returns its opencode session ID. Returns empty string if the agent
-// is not found or has no session ID yet.
-func (d *Daemon) resolveSessionID(agentName string) string {
+// resolveSessionMetadata looks up an agent by name in the pool and spawn
+// registry and returns the session routing metadata needed by clients.
+// Returns a zero value when the agent is not found or has no session ID yet.
+func (d *Daemon) resolveSessionMetadata(agentName string) SessionMetadata {
 	// Check pool first.
 	if d.pool != nil {
 		for _, a := range d.pool.Status() {
-			if string(a.ID) == agentName && a.SessionID != "" {
-				return a.SessionID
+			if string(a.ID) != agentName || a.SessionID == "" {
+				continue
 			}
+			return buildSessionMetadata(d.sstore, sessionMetadataFallback{
+				serverRef: d.config.ServerURL,
+				sessionID: a.SessionID,
+				project:   d.config.Project,
+				origin:    sessions.OriginPool,
+				workRef:   a.TaskID,
+				agentID:   string(a.ID),
+				status:    string(a.State),
+			})
 		}
 	}
 	// Check spawn registry.
 	if d.spawns != nil {
 		if entry := d.spawns.Get(agentName); entry != nil && entry.SessionID != "" {
-			return entry.SessionID
+			return buildSessionMetadata(d.sstore, sessionMetadataFallback{
+				serverRef: d.config.ServerURL,
+				sessionID: entry.SessionID,
+				project:   d.config.Project,
+				origin:    sessions.OriginSpawn,
+				workRef:   entry.SpawnID,
+				status:    string(entry.State),
+			})
 		}
 	}
-	return ""
+	return SessionMetadata{}
 }
 
 // claimSession correlates a newly-created session ID to a pool agent or
