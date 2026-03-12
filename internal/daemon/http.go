@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 )
 
 // newHTTPHandler builds the HTTP handler (mux) for the daemon API.
@@ -171,19 +170,4 @@ func (d *Daemon) httpLifecycle(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, &Response{Success: true, Result: result})
-}
-
-// daemonURLToListenAddr extracts the host:port from a daemon URL string.
-// For example, "http://127.0.0.1:7070" returns "127.0.0.1:7070".
-// This is exported for use by tests that need to construct listener addresses.
-func daemonURLToListenAddr(daemonURL string) string {
-	// Strip scheme prefix for simpler parsing.
-	addr := daemonURL
-	addr = strings.TrimPrefix(addr, "http://")
-	addr = strings.TrimPrefix(addr, "https://")
-	// Remove any trailing path.
-	if i := strings.Index(addr, "/"); i != -1 {
-		addr = addr[:i]
-	}
-	return addr
 }
