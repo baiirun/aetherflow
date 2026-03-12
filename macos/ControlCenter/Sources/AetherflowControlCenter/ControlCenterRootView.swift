@@ -249,7 +249,7 @@ private struct DetailColumn: View {
 
                         HStack(spacing: 12) {
                             MetricTile(title: "Project", value: transport.projectName, tone: ShellPalette.ember)
-                            MetricTile(title: "Socket", value: transport.socketPath, tone: ShellPalette.moss)
+                            MetricTile(title: "Daemon URL", value: transport.daemonURL, tone: ShellPalette.moss)
                             MetricTile(title: "Lifecycle", value: lifecycle.phase.rawValue, tone: ShellPalette.brass)
                         }
 
@@ -335,7 +335,7 @@ private struct SectionPreview: View {
                 VStack(alignment: .leading, spacing: 10) {
                     DiagnosticRow(label: "project", value: transport.projectName)
                     DiagnosticRow(label: "cwd", value: transport.workingDirectory)
-                    DiagnosticRow(label: "socket", value: transport.socketPath)
+                    DiagnosticRow(label: "daemon_url", value: transport.daemonURL)
                     DiagnosticRow(label: "cli", value: transport.cliPath)
                     DiagnosticRow(label: "lifecycle", value: lifecycle.phase.rawValue.lowercased())
                     DiagnosticRow(label: "note", value: transport.note)
@@ -369,7 +369,7 @@ struct MenuBarControlCenterView: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Project: \(transportStore.snapshot.projectName)")
-                Text("Socket: \(transportStore.snapshot.socketPath)")
+                Text("Daemon URL: \(transportStore.snapshot.daemonURL)")
                 Text("Lane: \(navigationStore.selectedSection.title)")
             }
             .font(.system(size: 12, weight: .medium, design: .rounded))

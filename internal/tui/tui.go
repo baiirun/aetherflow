@@ -2,8 +2,8 @@
 // the aetherflow daemon. It provides a k9s/btop-style interface with a
 // dashboard overview, agent detail panels, and log streaming.
 //
-// The TUI communicates with the daemon via the existing Unix socket RPC
-// protocol and polls for updates on a configurable interval.
+// The TUI communicates with the daemon via its HTTP API
+// and polls for updates on a configurable interval.
 package tui
 
 import (
@@ -64,8 +64,8 @@ var (
 
 // Config holds the configuration needed to run the TUI.
 type Config struct {
-	// SocketPath is the Unix socket path for the daemon RPC.
-	SocketPath string
+	// DaemonURL is the HTTP URL for the daemon API.
+	DaemonURL string
 }
 
 // statusMsg carries the result of a daemon status poll.
@@ -110,7 +110,7 @@ type Model struct {
 func New(cfg Config) Model {
 	return Model{
 		config: cfg,
-		client: client.New(cfg.SocketPath),
+		client: client.New(cfg.DaemonURL),
 	}
 }
 

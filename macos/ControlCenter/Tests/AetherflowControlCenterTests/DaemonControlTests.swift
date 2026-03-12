@@ -1,179 +1,188 @@
-import Darwin
 import Foundation
 import XCTest
 @testable import AetherflowControlCenter
 
 final class DaemonControlTests: XCTestCase {
-    func testFetchLifecycleConnectsToLiveUnixSocket() async throws {
-        let capturedRequest = LockedValue<String?>(nil)
+    func testFetchLifecycleConnectsToHTTPEndpoint() async throws {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        let server = try TestUnixSocketServer(
-            responseData: try encoder.encode(
-                RPCSuccessEnvelope(
-                    result: DaemonLifecyclePayload(
-                        state: "running",
-                        socketPath: "/tmp/aetherd-control-room.sock",
-                        project: "control-room",
-                        serverURL: "http://127.0.0.1:4096",
-                        spawnPolicy: "manual",
-                        activeSessionCount: 1,
-                        activeSessionIDs: ["sess-1"],
-                        lastError: "",
-                        updatedAt: Date.now
-                    )
-                )
-            ) + Data([0x0A]),
-            onRequest: { request in
-                let envelope = try JSONDecoder().decode(TestRPCRequest.self, from: request)
-                capturedRequest.set(envelope.method)
-            }
+        let responseEnvelope = RPCSuccessEnvelope(
+            result: DaemonLifecyclePayload(
+                state: "running",
+                daemonURL: "http://127.0.0.1:7070",
+                project: "control-room",
+                serverURL: "http://127.0.0.1:4096",
+                spawnPolicy: "manual",
+                activeSessionCount: 1,
+                activeSessionIDs: ["sess-1"],
+                lastError: "",
+                updatedAt: Date.now
+            )
         )
-        defer { server.stop() }
+        let responseData = try encoder.encode(responseEnvelope)
 
-        let response = try await DefaultDaemonController().fetchLifecycle(socketPath: server.socketPath)
+        var capturedRequest: URLRequest?
+        MockHTTPProtocol.handler = { request in
+            capturedRequest = request
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, responseData)
+        }
+        defer { MockHTTPProtocol.handler = nil }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockHTTPProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let response = try await DefaultDaemonController(session: session)
+            .fetchLifecycle(daemonURL: "http://127.0.0.1:7070")
 
         XCTAssertEqual(response.state, "running")
         XCTAssertEqual(response.project, "control-room")
-        XCTAssertEqual(capturedRequest.get(), "daemon.lifecycle")
+        XCTAssertEqual(capturedRequest?.url?.path, "/api/v1/lifecycle")
+        XCTAssertEqual(capturedRequest?.httpMethod, "GET")
+    }
+
+    func testRequestStopSendsPostToShutdownEndpoint() async throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let stopResult = StopResultEnvelope(
+            result: StopResponsePayload(
+                outcome: "stopping",
+                status: DaemonLifecyclePayload(
+                    state: "stopping",
+                    daemonURL: "http://127.0.0.1:7070",
+                    project: "control-room",
+                    serverURL: "http://127.0.0.1:4096",
+                    spawnPolicy: "manual",
+                    activeSessionCount: 0,
+                    activeSessionIDs: [],
+                    lastError: "",
+                    updatedAt: Date.now
+                ),
+                message: "daemon stopping"
+            )
+        )
+        let responseData = try encoder.encode(stopResult)
+
+        var capturedRequest: URLRequest?
+        MockHTTPProtocol.handler = { request in
+            capturedRequest = request
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, responseData)
+        }
+        defer { MockHTTPProtocol.handler = nil }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockHTTPProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let response = try await DefaultDaemonController(session: session)
+            .requestStop(daemonURL: "http://127.0.0.1:7070", force: false)
+
+        XCTAssertEqual(response.outcome, "stopping")
+        XCTAssertEqual(capturedRequest?.url?.path, "/api/v1/shutdown")
+        XCTAssertEqual(capturedRequest?.httpMethod, "POST")
+        XCTAssertNil(capturedRequest?.url?.query)
+    }
+
+    func testRequestStopWithForceAddsQueryParameter() async throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let stopResult = StopResultEnvelope(
+            result: StopResponsePayload(
+                outcome: "stopping",
+                status: DaemonLifecyclePayload(
+                    state: "stopping",
+                    daemonURL: "http://127.0.0.1:7070",
+                    project: "control-room",
+                    serverURL: "http://127.0.0.1:4096",
+                    spawnPolicy: "manual",
+                    activeSessionCount: 0,
+                    activeSessionIDs: [],
+                    lastError: "",
+                    updatedAt: Date.now
+                ),
+                message: "daemon stopping (forced)"
+            )
+        )
+        let responseData = try encoder.encode(stopResult)
+
+        var capturedRequest: URLRequest?
+        MockHTTPProtocol.handler = { request in
+            capturedRequest = request
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, responseData)
+        }
+        defer { MockHTTPProtocol.handler = nil }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockHTTPProtocol.self]
+        let session = URLSession(configuration: config)
+
+        _ = try await DefaultDaemonController(session: session)
+            .requestStop(daemonURL: "http://127.0.0.1:7070", force: true)
+
+        XCTAssertEqual(capturedRequest?.url?.query, "force=true")
     }
 }
+
+// MARK: - Helpers
 
 private struct RPCSuccessEnvelope<Result: Encodable>: Encodable {
     let success = true
     let result: Result
 }
 
-private struct TestRPCRequest: Decodable {
-    let method: String
+private typealias StopResultEnvelope = RPCSuccessEnvelope<StopResponsePayload>
+
+private struct StopResponsePayload: Encodable {
+    let outcome: String
+    let status: DaemonLifecyclePayload
+    let message: String
 }
 
-private final class LockedValue<T>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: T
+// MARK: - Mock URLProtocol
 
-    init(_ value: T) {
-        self.value = value
+final class MockHTTPProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        handler != nil
     }
 
-    func set(_ newValue: T) {
-        lock.lock()
-        value = newValue
-        lock.unlock()
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
     }
 
-    func get() -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        return value
-    }
-}
-
-private final class TestUnixSocketServer {
-    let socketPath: String
-
-    private let listenFD: Int32
-    private let onRequest: @Sendable (Data) throws -> Void
-    private let responseData: Data
-    private let completion = DispatchSemaphore(value: 0)
-
-    init(
-        responseData: Data,
-        onRequest: @escaping @Sendable (Data) throws -> Void
-    ) throws {
-        self.responseData = responseData
-        self.onRequest = onRequest
-
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        self.socketPath = directory.appendingPathComponent("daemon.sock").path
-
-        unlink(socketPath)
-        listenFD = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard listenFD >= 0 else {
-            throw POSIXError(.EIO)
+    override func startLoading() {
+        guard let handler = Self.handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.unknown))
+            return
         }
-
-        var address = try Self.socketAddress(for: socketPath)
-        let bindResult = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(listenFD, $0, Self.socketAddressLength(for: socketPath))
-            }
-        }
-        guard bindResult == 0 else {
-            close(listenFD)
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-        guard listen(listenFD, 1) == 0 else {
-            close(listenFD)
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-
-        DispatchQueue.global(qos: .userInitiated).async { [listenFD, responseData, onRequest, completion] in
-            defer { completion.signal() }
-            let clientFD = accept(listenFD, nil, nil)
-            guard clientFD >= 0 else {
-                return
-            }
-            defer { close(clientFD) }
-
-            var requestData = Data()
-            var buffer = [UInt8](repeating: 0, count: 1024)
-            while true {
-                let readCount = read(clientFD, &buffer, buffer.count)
-                if readCount <= 0 {
-                    return
-                }
-                requestData.append(buffer, count: readCount)
-                if requestData.contains(0x0A) {
-                    break
-                }
-            }
-
-            let trimmedRequest = Data(requestData.prefix { $0 != 0x0A })
-            try? onRequest(trimmedRequest)
-            responseData.withUnsafeBytes { rawBuffer in
-                _ = write(clientFD, rawBuffer.baseAddress!, rawBuffer.count)
-            }
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
         }
     }
 
-    func stop() {
-        shutdown(listenFD, SHUT_RDWR)
-        close(listenFD)
-        _ = completion.wait(timeout: .now() + 1)
-        unlink(socketPath)
-        try? FileManager.default.removeItem(at: URL(fileURLWithPath: socketPath).deletingLastPathComponent())
-    }
-
-    private static func socketAddress(for path: String) throws -> sockaddr_un {
-        var address = sockaddr_un()
-#if os(macOS)
-        address.sun_len = 0
-#endif
-        address.sun_family = sa_family_t(AF_UNIX)
-
-        let pathBytes = Array(path.utf8CString)
-        let pathOffset = MemoryLayout.offset(of: \sockaddr_un.sun_path) ?? 0
-        let addressLength = pathOffset + pathBytes.count
-        guard pathBytes.count <= MemoryLayout.size(ofValue: address.sun_path) else {
-            throw POSIXError(.ENAMETOOLONG)
-        }
-
-#if os(macOS)
-        address.sun_len = __uint8_t(addressLength)
-#endif
-        withUnsafeMutablePointer(to: &address) { pointer in
-            let rawPointer = UnsafeMutableRawPointer(pointer).advanced(by: pathOffset)
-            pathBytes.withUnsafeBytes { sourceBytes in
-                rawPointer.copyMemory(from: sourceBytes.baseAddress!, byteCount: pathBytes.count)
-            }
-        }
-        return address
-    }
-
-    private static func socketAddressLength(for path: String) -> socklen_t {
-        let pathOffset = MemoryLayout.offset(of: \sockaddr_un.sun_path) ?? 0
-        return socklen_t(pathOffset + path.utf8CString.count)
-    }
+    override func stopLoading() {}
 }

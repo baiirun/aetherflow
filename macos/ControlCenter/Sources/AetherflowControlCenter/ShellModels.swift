@@ -166,7 +166,7 @@ enum ShellSection: String, CaseIterable, Hashable, Identifiable {
                     id: "diagnostics-transport",
                     eyebrow: "Bootstrap",
                     title: "Transport context is visible",
-                    summary: "Project, working directory, and socket path are visible before live connectivity work lands.",
+                    summary: "Project, working directory, and daemon URL are visible before live connectivity work lands.",
                     statusLabel: "Visible",
                     highlights: [
                         "Bootstrap assumptions are operator-readable.",
@@ -192,7 +192,7 @@ enum ShellSection: String, CaseIterable, Hashable, Identifiable {
 }
 
 enum TransportPhase: String {
-    case primed = "Socket primed"
+    case primed = "Daemon URL resolved"
     case unreachable = "Daemon unreachable"
     case connected = "Connected"
 }
@@ -201,7 +201,7 @@ struct TransportSnapshot {
     let phase: TransportPhase
     let projectName: String
     let workingDirectory: String
-    let socketPath: String
+    let daemonURL: String
     let cliPath: String
     let note: String
 }

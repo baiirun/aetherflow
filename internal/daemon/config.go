@@ -4,15 +4,28 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/baiirun/aetherflow/internal/protocol"
 	"gopkg.in/yaml.v3"
 )
+
+// listenAddrFromURL extracts the host:port from a daemon URL string.
+// For example, "http://127.0.0.1:7070" returns "127.0.0.1:7070".
+func listenAddrFromURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "127.0.0.1:7070"
+	}
+	return u.Host
+}
 
 const (
 	DefaultPoolSize          = 3
@@ -68,9 +81,10 @@ var validTaskID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 //  2. Config file (.aetherflow.yaml)
 //  3. Defaults (lowest priority)
 type Config struct {
-	// SocketPath is the Unix socket path for the RPC server.
-	// It is derived from project/default and not user-configurable.
-	SocketPath string `yaml:"-"`
+	// ListenAddr is the HTTP listen address for the daemon API.
+	// Format: ":port" or "host:port". Derived from project/default
+	// when not explicitly set.
+	ListenAddr string `yaml:"listen_addr"`
 
 	// Project is the prog project to watch for tasks.
 	// Required in auto mode; optional in manual mode.
@@ -133,8 +147,8 @@ type Config struct {
 
 // ApplyDefaults fills in zero-valued fields with sensible defaults.
 func (c *Config) ApplyDefaults() {
-	if c.SocketPath == "" {
-		c.SocketPath = protocol.SocketPathFor(c.Project)
+	if c.ListenAddr == "" {
+		c.ListenAddr = listenAddrFromURL(protocol.DaemonURLFor(c.Project))
 	}
 	if c.PollInterval == 0 {
 		c.PollInterval = DefaultPollInterval
@@ -166,6 +180,19 @@ func (c *Config) ApplyDefaults() {
 // Validate checks that configuration values are valid.
 // Call after ApplyDefaults.
 func (c *Config) Validate() error {
+	// Reject whitespace in ListenAddr and non-loopback hosts to prevent
+	// remote exposure: binding to 0.0.0.0 would expose POST /api/v1/shutdown
+	// to any host on the local network with no authentication.
+	if strings.TrimSpace(c.ListenAddr) != c.ListenAddr {
+		return fmt.Errorf("listen_addr must not contain leading or trailing whitespace")
+	}
+	if c.ListenAddr != "" {
+		host, _, err := net.SplitHostPort(c.ListenAddr)
+		if err == nil && host != "" && host != "127.0.0.1" && host != "::1" && host != "localhost" {
+			return fmt.Errorf("listen_addr host %q is not a loopback address (only 127.0.0.1, ::1, or localhost are permitted)", host)
+		}
+	}
+
 	if c.PollInterval <= 0 {
 		return fmt.Errorf("poll-interval must be positive, got %v", c.PollInterval)
 	}

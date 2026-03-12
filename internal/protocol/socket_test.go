@@ -1,32 +1,35 @@
 package protocol
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
-func TestSocketPathFor(t *testing.T) {
-	tests := []struct {
-		project string
-		want    string
-	}{
-		// Normal cases
-		{"", DefaultSocketPath},
-		{"myproject", "/tmp/aetherd-myproject.sock"},
-		{"eldspire-hexmap", "/tmp/aetherd-eldspire-hexmap.sock"},
-		{"my.project", "/tmp/aetherd-my.project.sock"},
-
-		// Path traversal — filepath.Base strips directory components.
-		{"../etc", "/tmp/aetherd-etc.sock"},
-		{"../../run/systemd", "/tmp/aetherd-systemd.sock"},
-		{"/absolute/path", "/tmp/aetherd-path.sock"},
-		{"a/b/c", "/tmp/aetherd-c.sock"},
-
-		// Degenerate inputs that filepath.Base collapses.
-		{".", DefaultSocketPath},
-		{"/", DefaultSocketPath},
+func TestDaemonURLFor(t *testing.T) {
+	// Empty project returns the default URL.
+	got := DaemonURLFor("")
+	if got != DefaultDaemonURL {
+		t.Errorf("DaemonURLFor(%q) = %q, want %q", "", got, DefaultDaemonURL)
 	}
-	for _, tt := range tests {
-		got := SocketPathFor(tt.project)
-		if got != tt.want {
-			t.Errorf("SocketPathFor(%q) = %q, want %q", tt.project, got, tt.want)
-		}
+
+	// Non-empty project returns a URL with a port in the hashed range [7071, 7170].
+	got = DaemonURLFor("myproject")
+	if !strings.HasPrefix(got, "http://127.0.0.1:") {
+		t.Errorf("DaemonURLFor(%q) = %q, expected http://127.0.0.1:PORT prefix", "myproject", got)
+	}
+	if got == DefaultDaemonURL {
+		t.Errorf("DaemonURLFor(%q) should differ from default URL", "myproject")
+	}
+
+	// Same project always produces the same URL (deterministic).
+	got2 := DaemonURLFor("myproject")
+	if got != got2 {
+		t.Errorf("DaemonURLFor is non-deterministic: %q vs %q", got, got2)
+	}
+
+	// Different projects produce different URLs (inputs are fixed; no collision expected).
+	other := DaemonURLFor("other-project")
+	if got == other {
+		t.Errorf("unexpected hash collision between %q and %q", "myproject", "other-project")
 	}
 }

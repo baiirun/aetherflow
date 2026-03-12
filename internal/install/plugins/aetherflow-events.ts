@@ -3,33 +3,32 @@ import type { Plugin } from "@opencode-ai/plugin"
 // Aetherflow event pipeline plugin.
 //
 // Forwards all opencode server events to the aetherflow daemon via its
-// Unix socket RPC. Configured via environment variable set by the daemon
+// HTTP API. Configured via environment variable set by the daemon
 // on the opencode serve process:
 //
-//   AETHERFLOW_SOCKET  - daemon Unix socket path (absent = plugin is inert)
+//   AETHERFLOW_URL  - daemon HTTP URL (absent = plugin is inert)
 //
 // The plugin is a dumb pipe: it forwards every event without filtering.
 // The daemon decides what to keep, index, and expose. Events are keyed
 // by session ID — the daemon correlates sessions to agents internally.
 
-// Send a fire-and-forget RPC call to the daemon's Unix socket.
+// Send a fire-and-forget POST to the daemon's HTTP API.
 // Does not wait for the response — we don't want to block agent execution
 // if the daemon is slow or unreachable.
-function sendEvent(socketPath: string, method: string, params: unknown): void {
+function sendEvent(daemonURL: string, params: unknown): void {
   try {
-    const net = require("net")
-    const socket = net.createConnection(socketPath, () => {
-      socket.write(JSON.stringify({ method, params }) + "\n")
-      // Don't call socket.end() immediately — let the server read first.
-      // Set a short timeout to auto-close after the write drains.
-      setTimeout(() => socket.destroy(), 500)
-    })
-    socket.on("error", () => {
+    const url = `${daemonURL}/api/v1/events`
+    fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+      signal: AbortSignal.timeout(5000),
+    }).catch(() => {
       // Silently ignore — daemon may be restarting or unreachable.
       // Events are best-effort; the daemon can backfill from the REST API.
     })
   } catch {
-    // Don't crash the agent if socket operations fail.
+    // Don't crash the agent if the request fails.
   }
 }
 
@@ -47,17 +46,17 @@ function extractSessionID(properties: any): string | undefined {
 }
 
 export const AetherflowEvents: Plugin = async () => {
-  const socketPath = process.env.AETHERFLOW_SOCKET
+  const daemonURL = process.env.AETHERFLOW_URL
 
   // If not running under aetherflow, return no hooks — completely inert.
-  if (!socketPath) return {}
+  if (!daemonURL) return {}
 
   return {
     event: async ({ event }) => {
       const sessionId = extractSessionID(event.properties)
       if (!sessionId) return // Skip events without a session ID
 
-      sendEvent(socketPath, "session.event", {
+      sendEvent(daemonURL, {
         event_type: event.type,
         session_id: sessionId,
         timestamp: Date.now(),

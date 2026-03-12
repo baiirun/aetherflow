@@ -45,6 +45,13 @@
 			<key>fileRef</key>
 			<string>B00000000000000000000005</string>
 		</dict>
+		<key>A00000000000000000000006</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXBuildFile</string>
+			<key>fileRef</key>
+			<string>B00000000000000000000007</string>
+		</dict>
 		<key>B00000000000000000000001</key>
 		<dict>
 			<key>isa</key>
@@ -100,6 +107,17 @@
 			<key>sourceTree</key>
 			<string>&lt;group&gt;</string>
 		</dict>
+		<key>B00000000000000000000007</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXFileReference</string>
+			<key>lastKnownFileType</key>
+			<string>sourcecode.swift</string>
+			<key>path</key>
+			<string>DaemonControl.swift</string>
+			<key>sourceTree</key>
+			<string>&lt;group&gt;</string>
+		</dict>
 		<key>B00000000000000000000006</key>
 		<dict>
 			<key>isa</key>
@@ -137,6 +155,7 @@
 				<string>A00000000000000000000003</string>
 				<string>A00000000000000000000004</string>
 				<string>A00000000000000000000005</string>
+				<string>A00000000000000000000006</string>
 			</array>
 			<key>runOnlyForDeploymentPostprocessing</key>
 			<string>0</string>
@@ -201,6 +220,7 @@
 				<string>B00000000000000000000003</string>
 				<string>B00000000000000000000004</string>
 				<string>B00000000000000000000005</string>
+				<string>B00000000000000000000007</string>
 			</array>
 			<key>path</key>
 			<string>AetherflowControlCenter</string>

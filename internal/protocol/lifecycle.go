@@ -16,7 +16,7 @@ const (
 // DaemonLifecycleStatus is the daemon lifecycle contract.
 type DaemonLifecycleStatus struct {
 	State              LifecycleState `json:"state"`
-	SocketPath         string         `json:"socket_path,omitempty"`
+	DaemonURL          string         `json:"daemon_url,omitempty"`
 	Project            string         `json:"project,omitempty"`
 	ServerURL          string         `json:"server_url,omitempty"`
 	SpawnPolicy        string         `json:"spawn_policy,omitempty"`

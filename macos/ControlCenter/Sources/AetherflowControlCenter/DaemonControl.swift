@@ -1,22 +1,15 @@
-import Darwin
 import Foundation
-
-private let daemonControlQueue = DispatchQueue(label: "com.baiirun.aetherflow.control-center.daemon-control", qos: .userInitiated)
 
 enum DaemonControlError: LocalizedError {
     case executableNotFound(String)
-    case socketPathTooLong(String)
     case connectionFailed(String)
-    case writeFailed(String)
     case invalidResponse(String)
     case commandFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .executableNotFound(let detail),
-             .socketPathTooLong(let detail),
              .connectionFailed(let detail),
-             .writeFailed(let detail),
              .invalidResponse(let detail),
              .commandFailed(let detail):
             return detail
@@ -25,14 +18,14 @@ enum DaemonControlError: LocalizedError {
 }
 
 protocol DaemonControlling: Sendable {
-    func fetchLifecycle(socketPath: String) async throws -> DaemonLifecyclePayload
-    func requestStop(socketPath: String, force: Bool) async throws -> DaemonStopResponse
+    func fetchLifecycle(daemonURL: String) async throws -> DaemonLifecyclePayload
+    func requestStop(daemonURL: String, force: Bool) async throws -> DaemonStopResponse
     func requestStart(context: ShellBootstrapContext) async throws -> DaemonStartReceipt
 }
 
 struct DaemonLifecyclePayload: Codable, Equatable, Sendable {
     let state: String
-    let socketPath: String
+    let daemonURL: String
     let project: String
     let serverURL: String
     let spawnPolicy: String
@@ -43,7 +36,7 @@ struct DaemonLifecyclePayload: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case state
-        case socketPath = "socket_path"
+        case daemonURL = "daemon_url"
         case project
         case serverURL = "server_url"
         case spawnPolicy = "spawn_policy"
@@ -56,7 +49,7 @@ struct DaemonLifecyclePayload: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         state = try container.decode(String.self, forKey: .state)
-        socketPath = try container.decodeIfPresent(String.self, forKey: .socketPath) ?? ""
+        daemonURL = try container.decodeIfPresent(String.self, forKey: .daemonURL) ?? ""
         project = try container.decodeIfPresent(String.self, forKey: .project) ?? ""
         serverURL = try container.decodeIfPresent(String.self, forKey: .serverURL) ?? ""
         spawnPolicy = try container.decodeIfPresent(String.self, forKey: .spawnPolicy) ?? ""
@@ -68,7 +61,7 @@ struct DaemonLifecyclePayload: Codable, Equatable, Sendable {
 
     init(
         state: String,
-        socketPath: String,
+        daemonURL: String,
         project: String,
         serverURL: String,
         spawnPolicy: String,
@@ -78,7 +71,7 @@ struct DaemonLifecyclePayload: Codable, Equatable, Sendable {
         updatedAt: Date
     ) {
         self.state = state
-        self.socketPath = socketPath
+        self.daemonURL = daemonURL
         self.project = project
         self.serverURL = serverURL
         self.spawnPolicy = spawnPolicy
@@ -136,17 +129,6 @@ private struct RPCEnvelope<Result: Decodable>: Decodable {
     let error: String?
 }
 
-private struct RPCRequest<Params: Encodable>: Encodable {
-    let method: String
-    let params: Params
-}
-
-private struct EmptyParams: Encodable {}
-
-private struct StopParams: Encodable {
-    let force: Bool
-}
-
 private struct CommandOutput: Sendable {
     let status: Int32
     let stdout: String
@@ -154,16 +136,29 @@ private struct CommandOutput: Sendable {
 }
 
 struct DefaultDaemonController: DaemonControlling, Sendable {
-    func fetchLifecycle(socketPath: String) async throws -> DaemonLifecyclePayload {
-        try await Self.runBlocking {
-            try Self.rpc(socketPath: socketPath, method: "daemon.lifecycle", params: EmptyParams())
-        }
+    private let session: URLSession
+
+    init(session: URLSession = .shared) {
+        self.session = session
     }
 
-    func requestStop(socketPath: String, force: Bool) async throws -> DaemonStopResponse {
-        try await Self.runBlocking {
-            try Self.rpc(socketPath: socketPath, method: "daemon.stop", params: StopParams(force: force))
+    func fetchLifecycle(daemonURL: String) async throws -> DaemonLifecyclePayload {
+        guard let url = URL(string: daemonURL + "/api/v1/lifecycle") else {
+            throw DaemonControlError.connectionFailed("invalid daemon URL: \(daemonURL)")
         }
+        let (data, response) = try await session.data(from: url)
+        return try decodeEnvelope(data, response: response)
+    }
+
+    func requestStop(daemonURL: String, force: Bool) async throws -> DaemonStopResponse {
+        let urlString = force ? daemonURL + "/api/v1/shutdown?force=true" : daemonURL + "/api/v1/shutdown"
+        guard let url = URL(string: urlString) else {
+            throw DaemonControlError.connectionFailed("invalid daemon URL: \(daemonURL)")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        let (data, response) = try await session.data(for: request)
+        return try decodeEnvelope(data, response: response)
     }
 
     func requestStart(context: ShellBootstrapContext) async throws -> DaemonStartReceipt {
@@ -181,11 +176,25 @@ struct DefaultDaemonController: DaemonControlling, Sendable {
         return DaemonStartReceipt(message: message)
     }
 
+    private func decodeEnvelope<T: Decodable>(_ data: Data, response: URLResponse) throws -> T {
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw DaemonControlError.invalidResponse("unexpected non-HTTP response")
+        }
+        if httpResponse.statusCode >= 500 {
+            throw DaemonControlError.connectionFailed("daemon returned server error \(httpResponse.statusCode)")
+        }
+        let envelope = try JSONDecoder().decode(RPCEnvelope<T>.self, from: data)
+        guard envelope.success, let result = envelope.result else {
+            throw DaemonControlError.invalidResponse(envelope.error?.nonEmptyTrimmed ?? "request failed without error message")
+        }
+        return result
+    }
+
     private static func runBlocking<T: Sendable>(
         _ work: @escaping @Sendable () throws -> T
     ) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
-            daemonControlQueue.async {
+            DispatchQueue.global(qos: .userInitiated).async {
                 do {
                     continuation.resume(returning: try work())
                 } catch {
@@ -193,81 +202,6 @@ struct DefaultDaemonController: DaemonControlling, Sendable {
                 }
             }
         }
-    }
-
-    private static func rpc<Params: Encodable & Sendable, Result: Decodable & Sendable>(
-        socketPath: String,
-        method: String,
-        params: Params
-    ) throws -> Result {
-        var socketAddress = sockaddr_un()
-        socketAddress.sun_family = sa_family_t(AF_UNIX)
-
-        let socketBytes = Array(socketPath.utf8CString)
-        guard socketBytes.count <= MemoryLayout.size(ofValue: socketAddress.sun_path) else {
-            throw DaemonControlError.socketPathTooLong("socket path is too long: \(socketPath)")
-        }
-
-        let pathOffset = MemoryLayout.offset(of: \sockaddr_un.sun_path) ?? 0
-        let addressLength = socklen_t(pathOffset + socketBytes.count)
-#if os(macOS)
-        socketAddress.sun_len = __uint8_t(addressLength)
-#endif
-        withUnsafeMutablePointer(to: &socketAddress) { pointer in
-            let rawPointer = UnsafeMutableRawPointer(pointer).advanced(by: pathOffset)
-            socketBytes.withUnsafeBytes { sourceBytes in
-                rawPointer.copyMemory(from: sourceBytes.baseAddress!, byteCount: socketBytes.count)
-            }
-        }
-
-        let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard descriptor >= 0 else {
-            throw DaemonControlError.connectionFailed(Self.posixMessage(prefix: "failed to open unix socket"))
-        }
-        defer { close(descriptor) }
-
-        let connectResult = withUnsafePointer(to: &socketAddress) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                connect(descriptor, $0, addressLength)
-            }
-        }
-        guard connectResult == 0 else {
-            throw DaemonControlError.connectionFailed(Self.posixMessage(prefix: "failed to connect to daemon at \(socketPath)"))
-        }
-
-        var requestData = try JSONEncoder().encode(RPCRequest(method: method, params: params))
-        requestData.append(0x0A)
-        let writeStatus = try requestData.withUnsafeBytes { rawBuffer in
-            guard let baseAddress = rawBuffer.baseAddress else {
-                throw DaemonControlError.writeFailed("failed to encode daemon RPC request")
-            }
-            return write(descriptor, baseAddress, rawBuffer.count)
-        }
-        guard writeStatus >= 0 else {
-            throw DaemonControlError.writeFailed(Self.posixMessage(prefix: "failed to write daemon RPC request"))
-        }
-
-        var response = Data()
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        while true {
-            let readCount = read(descriptor, &buffer, buffer.count)
-            if readCount < 0 {
-                throw DaemonControlError.connectionFailed(Self.posixMessage(prefix: "failed to read daemon RPC response"))
-            }
-            if readCount == 0 {
-                break
-            }
-            response.append(buffer, count: readCount)
-        }
-
-        let envelope = try JSONDecoder().decode(RPCEnvelope<Result>.self, from: response)
-        guard envelope.success else {
-            throw DaemonControlError.invalidResponse(envelope.error?.nonEmptyTrimmed ?? "daemon RPC failed without an error message")
-        }
-        guard let result = envelope.result else {
-            throw DaemonControlError.invalidResponse("daemon RPC returned no result payload")
-        }
-        return result
     }
 
     private static func runCommand(
@@ -319,11 +253,6 @@ struct DefaultDaemonController: DaemonControlling, Sendable {
             return stdout
         }
         return "daemon command failed with exit code \(output.status)"
-    }
-
-    private static func posixMessage(prefix: String) -> String {
-        let message = String(cString: strerror(errno))
-        return "\(prefix): \(message)"
     }
 }
 

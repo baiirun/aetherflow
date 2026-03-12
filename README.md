@@ -327,11 +327,11 @@ Two persistent processes: the aetherflow daemon and a shared opencode server. Ev
 
 All agents connect to a shared opencode server via `opencode run --attach <url>`. The daemon starts this server automatically on startup and supervises it (restarting if it crashes). The server URL defaults to `http://127.0.0.1:4096` and is configurable via `--server-url` or `server_url` in the config file.
 
-The `AETHERFLOW_SOCKET` env var is set on the server process so the aetherflow plugin knows where to send events. Each agent process gets `AETHERFLOW_AGENT_ID` set to its unique name for session correlation.
+The `AETHERFLOW_URL` env var is set on the server process so the aetherflow plugin knows where to send events. Each agent process gets `AETHERFLOW_AGENT_ID` set to its unique name for session correlation.
 
 ### Plugin Event Pipeline
 
-Observability flows through a plugin on the opencode server, not through log files. The aetherflow plugin (`~/.config/opencode/plugins/aetherflow-events.ts`) intercepts session lifecycle events and forwards them to the daemon over its Unix socket via the `session.event` RPC.
+Observability flows through a plugin on the opencode server, not through log files. The aetherflow plugin (`~/.config/opencode/plugins/aetherflow-events.ts`) intercepts session lifecycle events and forwards them to the daemon's HTTP API via `POST /api/v1/events`.
 
 **Event buffer** (`eventbuf.go`) -- a session-keyed ring buffer storing up to 10K events per session. Idle sessions are evicted after 48 hours so overnight runs are reviewable the next day. The buffer is the single source of truth for `af logs`, `af status <agent>`, and the TUI.
 
@@ -493,13 +493,13 @@ Full-screen event log viewer that reads from the daemon's event buffer. Auto-scr
 
 Installed to `~/.config/opencode/plugins/aetherflow-events.ts`. This is the event pipeline plugin that streams opencode session events to the aetherflow daemon.
 
-**How it works**: The plugin hooks into opencode's event system and forwards every event (tool calls, messages, session lifecycle) to the daemon's Unix socket via the `session.event` RPC. Events are keyed by opencode session ID; the daemon correlates sessions to agents internally.
+**How it works**: The plugin hooks into opencode's event system and forwards every event (tool calls, messages, session lifecycle) to the daemon's HTTP API via `POST /api/v1/events`. Events are keyed by opencode session ID; the daemon correlates sessions to agents internally.
 
 **Configuration**: The plugin is controlled entirely by environment variables set automatically by the daemon:
 
 | Variable | Set on | Purpose |
 |----------|--------|---------|
-| `AETHERFLOW_SOCKET` | opencode server process | Unix socket path for event delivery. When absent, the plugin is completely inert. |
+| `AETHERFLOW_URL` | opencode server process | Daemon HTTP URL for event delivery (e.g. `http://127.0.0.1:7070`). When absent, the plugin is completely inert. |
 | `AETHERFLOW_AGENT_ID` | agent processes | Agent name for session correlation (used by daemon, not the plugin). |
 
 No manual configuration is needed. `af install` places the file, and the daemon sets the env vars when it starts the opencode server. If the daemon isn't running, the plugin does nothing.
