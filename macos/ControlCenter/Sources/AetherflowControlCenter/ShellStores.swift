@@ -11,7 +11,19 @@ final class TransportStore: ObservableObject {
             projectName: context.projectName,
             workingDirectory: context.workingDirectory,
             socketPath: context.socketPath,
-            note: "Shell bootstrap is resolved. Live probing and reconnect behavior land in the follow-up connectivity task."
+            cliPath: context.cliPath,
+            note: "Shell bootstrap is resolved. Waiting for the first lifecycle probe."
+        )
+    }
+
+    func updatePhase(_ phase: TransportPhase, note: String) {
+        snapshot = TransportSnapshot(
+            phase: phase,
+            projectName: snapshot.projectName,
+            workingDirectory: snapshot.workingDirectory,
+            socketPath: snapshot.socketPath,
+            cliPath: snapshot.cliPath,
+            note: note
         )
     }
 }
@@ -21,10 +33,389 @@ final class DaemonLifecycleStore: ObservableObject {
     @Published private(set) var snapshot = DaemonLifecycleSnapshot(
         phase: .stopped,
         activeSessions: 0,
-        statusCopy: "Shell is ready. Live daemon polling and lifecycle actions layer into this lane next.",
+        activeSessionIDs: [],
+        serverURL: nil,
+        spawnPolicy: nil,
+        statusCopy: "Shell is ready. Start the daemon to begin native monitoring.",
         lastError: nil,
         updatedAt: .now
     )
+    @Published private(set) var diagnostics: [LifecycleDiagnostic] = []
+    @Published private(set) var banner: LifecycleBanner?
+    @Published private(set) var actionInFlight: LifecycleAction?
+    @Published var pendingStopConfirmation: StopConfirmationRequest?
+
+    private let context: ShellBootstrapContext
+    private let transportStore: TransportStore
+    private let controller: DaemonControlling
+    private let socketExists: (String) -> Bool
+    private let pollIntervalNanoseconds: UInt64
+    private let startupTimeout: TimeInterval
+    private var monitorTask: Task<Void, Never>?
+    private var pendingAction: LifecycleAction?
+    private var startupDeadline: Date?
+    private var lastTransportPhase: TransportPhase?
+
+    init(
+        context: ShellBootstrapContext,
+        transportStore: TransportStore,
+        controller: DaemonControlling = DefaultDaemonController(),
+        socketExists: @escaping (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+        pollIntervalNanoseconds: UInt64 = 2_000_000_000,
+        startupTimeout: TimeInterval = 10,
+        autoStartMonitoring: Bool = true
+    ) {
+        self.context = context
+        self.transportStore = transportStore
+        self.controller = controller
+        self.socketExists = socketExists
+        self.pollIntervalNanoseconds = pollIntervalNanoseconds
+        self.startupTimeout = startupTimeout
+        if autoStartMonitoring {
+            beginMonitoring()
+        }
+    }
+
+    deinit {
+        monitorTask?.cancel()
+    }
+
+    func beginMonitoring() {
+        guard monitorTask == nil else {
+            return
+        }
+        monitorTask = Task { [weak self] in
+            guard let self else {
+                return
+            }
+            await self.refresh()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: self.pollIntervalNanoseconds)
+                await self.refresh()
+            }
+        }
+    }
+
+    func requestStart() {
+        guard actionInFlight == nil else {
+            return
+        }
+        let controller = self.controller
+        let context = self.context
+        actionInFlight = .starting
+        banner = nil
+        appendDiagnostic(
+            title: "Start requested",
+            detail: "Launching daemon from \(context.cliPath) in \(context.workingDirectory).",
+            tone: .info
+        )
+
+        Task {
+            do {
+                let receipt = try await controller.requestStart(context: context)
+                applyStartReceipt(receipt)
+                await refresh()
+            } catch {
+                applyActionFailure(
+                    action: .starting,
+                    title: "Start failed",
+                    detail: error.localizedDescription
+                )
+            }
+        }
+    }
+
+    func requestStop() {
+        pendingStopConfirmation = nil
+        sendStop(force: false)
+    }
+
+    func confirmStop() {
+        pendingStopConfirmation = nil
+        sendStop(force: true)
+    }
+
+    func dismissStopConfirmation() {
+        pendingStopConfirmation = nil
+    }
+
+    func refresh() async {
+        let controller = self.controller
+        let socketPath = context.socketPath
+        do {
+            let lifecycle = try await controller.fetchLifecycle(socketPath: socketPath)
+            applyLifecycle(lifecycle)
+        } catch {
+            applyUnavailableState(error: error)
+        }
+    }
+
+    private func sendStop(force: Bool) {
+        guard actionInFlight == nil else {
+            return
+        }
+        let controller = self.controller
+        let socketPath = context.socketPath
+        actionInFlight = .stopping
+        banner = nil
+        appendDiagnostic(
+            title: force ? "Forced stop requested" : "Stop requested",
+            detail: "Requesting daemon shutdown over \(context.socketPath).",
+            tone: .info
+        )
+
+        Task {
+            do {
+                let response = try await controller.requestStop(socketPath: socketPath, force: force)
+                applyStopResponse(response)
+                await refresh()
+            } catch {
+                applyActionFailure(
+                    action: .stopping,
+                    title: "Stop failed",
+                    detail: error.localizedDescription
+                )
+            }
+        }
+    }
+
+    private func applyStartReceipt(_ receipt: DaemonStartReceipt) {
+        pendingAction = .starting
+        startupDeadline = .now.addingTimeInterval(startupTimeout)
+        actionInFlight = nil
+        snapshot = DaemonLifecycleSnapshot(
+            phase: .starting,
+            activeSessions: 0,
+            activeSessionIDs: [],
+            serverURL: snapshot.serverURL,
+            spawnPolicy: snapshot.spawnPolicy,
+            statusCopy: "Daemon start requested. Waiting for the socket handshake.",
+            lastError: nil,
+            updatedAt: .now
+        )
+        banner = LifecycleBanner(tone: .info, title: "Start requested", message: receipt.message)
+        transportStore.updatePhase(.unreachable, note: "Start requested. Waiting for the daemon socket to become reachable.")
+    }
+
+    private func applyStopResponse(_ response: DaemonStopResponse) {
+        actionInFlight = nil
+        applyLifecyclePayload(response.status, overrideMessage: response.message)
+
+        switch response.outcome {
+        case "stopping", "stopped":
+            pendingAction = .stopping
+            startupDeadline = nil
+            banner = LifecycleBanner(tone: .info, title: "Stop acknowledged", message: response.message)
+            appendDiagnostic(title: "Stop acknowledged", detail: response.message, tone: .info)
+        case "refused":
+            pendingAction = nil
+            banner = LifecycleBanner(tone: .warning, title: "Stop refused", message: response.message)
+            appendDiagnostic(title: "Stop refused", detail: response.message, tone: .warning)
+            if response.status.activeSessionCount > 0 {
+                pendingStopConfirmation = StopConfirmationRequest(
+                    activeSessions: response.status.activeSessionCount,
+                    message: response.message
+                )
+            }
+        default:
+            pendingAction = nil
+            banner = LifecycleBanner(tone: .error, title: "Stop failed", message: response.message)
+            appendDiagnostic(title: "Stop failed", detail: response.message, tone: .error)
+        }
+    }
+
+    private func applyLifecycle(_ lifecycle: DaemonLifecyclePayload) {
+        applyLifecyclePayload(lifecycle, overrideMessage: nil)
+
+        let transportNote = transportNote(for: lifecycle)
+        transportStore.updatePhase(.connected, note: transportNote)
+        if lastTransportPhase != .connected {
+            appendDiagnostic(title: "Daemon reachable", detail: transportNote, tone: .success)
+        }
+        lastTransportPhase = .connected
+
+        if pendingAction == .starting && snapshot.phase == .running {
+            pendingAction = nil
+            startupDeadline = nil
+            banner = LifecycleBanner(tone: .success, title: "Daemon running", message: "Lifecycle probe connected after start.")
+            appendDiagnostic(title: "Daemon running", detail: "The daemon accepted connections and reported a running state.", tone: .success)
+        }
+        if pendingAction == .stopping && (snapshot.phase == .stopping || snapshot.phase == .stopped) {
+            startupDeadline = nil
+            banner = LifecycleBanner(tone: .info, title: "Daemon stopping", message: "The daemon accepted the stop request and is winding down.")
+        }
+    }
+
+    private func applyUnavailableState(error: Error) {
+        let socketPresent = socketExists(context.socketPath)
+        let detail = error.localizedDescription
+        if pendingAction == .starting, startupTimedOut() {
+            pendingAction = nil
+            startupDeadline = nil
+            banner = LifecycleBanner(tone: .error, title: "Start timed out", message: "The daemon never became reachable after the start request.")
+            appendDiagnostic(title: "Start timed out", detail: "No daemon socket became reachable within \(Int(startupTimeout)) seconds.", tone: .error)
+            snapshot = DaemonLifecycleSnapshot(
+                phase: .failed,
+                activeSessions: 0,
+                activeSessionIDs: [],
+                serverURL: snapshot.serverURL,
+                spawnPolicy: snapshot.spawnPolicy,
+                statusCopy: "Start requested, but the daemon never became reachable.",
+                lastError: detail,
+                updatedAt: .now
+            )
+            transportStore.updatePhase(.unreachable, note: "The daemon start request timed out before a socket became reachable.")
+            lastTransportPhase = .unreachable
+            return
+        }
+
+        if socketPresent {
+            let note = "Socket is present, but the lifecycle probe failed. \(detail)"
+            transportStore.updatePhase(.unreachable, note: note)
+            lastTransportPhase = .unreachable
+
+            let phase: DaemonLifecyclePhase = pendingAction == .starting ? .starting : (pendingAction == .stopping ? .stopping : .failed)
+            snapshot = DaemonLifecycleSnapshot(
+                phase: phase,
+                activeSessions: snapshot.activeSessions,
+                activeSessionIDs: snapshot.activeSessionIDs,
+                serverURL: snapshot.serverURL,
+                spawnPolicy: snapshot.spawnPolicy,
+                statusCopy: phase == .starting ? "Daemon start requested. Waiting for the process to accept RPCs." : "Transport failed while the daemon socket still exists.",
+                lastError: detail,
+                updatedAt: .now
+            )
+            banner = LifecycleBanner(tone: .error, title: "Lifecycle probe failed", message: detail)
+            return
+        }
+
+        let phase: DaemonLifecyclePhase = pendingAction == .starting ? .starting : .stopped
+        let note = pendingAction == .starting
+            ? "Start requested. Waiting for the daemon socket to appear."
+            : "Daemon socket is absent. Start the daemon to begin monitoring."
+        transportStore.updatePhase(.unreachable, note: note)
+        if lastTransportPhase == .connected && pendingAction == .stopping {
+            appendDiagnostic(title: "Daemon disconnected", detail: "The daemon socket is gone after the stop request.", tone: .success)
+            banner = LifecycleBanner(tone: .success, title: "Daemon stopped", message: "The daemon stopped responding and the socket disappeared.")
+            pendingAction = nil
+            startupDeadline = nil
+        }
+        lastTransportPhase = .unreachable
+
+        snapshot = DaemonLifecycleSnapshot(
+            phase: phase,
+            activeSessions: 0,
+            activeSessionIDs: [],
+            serverURL: snapshot.serverURL,
+            spawnPolicy: snapshot.spawnPolicy,
+            statusCopy: phase == .starting ? "Daemon start requested. Waiting for the daemon to finish booting." : "Daemon is not running.",
+            lastError: phase == .starting ? nil : nil,
+            updatedAt: .now
+        )
+    }
+
+    private func applyActionFailure(action: LifecycleAction, title: String, detail: String) {
+        pendingAction = nil
+        startupDeadline = nil
+        actionInFlight = nil
+        banner = LifecycleBanner(tone: .error, title: title, message: detail)
+        appendDiagnostic(title: title, detail: detail, tone: .error)
+        snapshot = DaemonLifecycleSnapshot(
+            phase: .failed,
+            activeSessions: snapshot.activeSessions,
+            activeSessionIDs: snapshot.activeSessionIDs,
+            serverURL: snapshot.serverURL,
+            spawnPolicy: snapshot.spawnPolicy,
+            statusCopy: "\(action.rawValue) failed.",
+            lastError: detail,
+            updatedAt: .now
+        )
+    }
+
+    private func applyLifecyclePayload(_ lifecycle: DaemonLifecyclePayload, overrideMessage: String?) {
+        snapshot = DaemonLifecycleSnapshot(
+            phase: mapLifecyclePhase(lifecycle.state),
+            activeSessions: lifecycle.activeSessionCount,
+            activeSessionIDs: lifecycle.activeSessionIDs,
+            serverURL: lifecycle.serverURL.nonEmptyValue,
+            spawnPolicy: lifecycle.spawnPolicy.nonEmptyValue,
+            statusCopy: lifecycleSummary(for: lifecycle, overrideMessage: overrideMessage),
+            lastError: lifecycle.lastError.nonEmptyValue,
+            updatedAt: lifecycle.updatedAt
+        )
+    }
+
+    private func lifecycleSummary(for lifecycle: DaemonLifecyclePayload, overrideMessage: String?) -> String {
+        if let overrideMessage, !overrideMessage.isEmpty {
+            return overrideMessage
+        }
+
+        switch mapLifecyclePhase(lifecycle.state) {
+        case .starting:
+            return "Daemon is starting. Waiting for the control plane to finish booting."
+        case .running:
+            if lifecycle.activeSessionCount > 0 {
+                return "Daemon is running with \(lifecycle.activeSessionCount) attached session(s)."
+            }
+            return "Daemon is running and ready for new work."
+        case .stopping:
+            return "Daemon is stopping. Reconnect behavior will settle once the socket disappears."
+        case .stopped:
+            return "Daemon is stopped."
+        case .failed:
+            return lifecycle.lastError.nonEmptyValue ?? "Daemon reported a failed lifecycle state."
+        }
+    }
+
+    private func transportNote(for lifecycle: DaemonLifecyclePayload) -> String {
+        var parts = ["Lifecycle probe succeeded for \(lifecycle.project.nonEmptyValue ?? context.projectName)."]
+        if let spawnPolicy = lifecycle.spawnPolicy.nonEmptyValue {
+            parts.append("Spawn policy: \(spawnPolicy).")
+        }
+        if lifecycle.activeSessionCount > 0 {
+            parts.append("Attached sessions: \(lifecycle.activeSessionCount).")
+        }
+        return parts.joined(separator: " ")
+    }
+
+    private func appendDiagnostic(title: String, detail: String, tone: LifecycleBannerTone) {
+        diagnostics.insert(
+            LifecycleDiagnostic(timestamp: .now, title: title, detail: detail, tone: tone),
+            at: 0
+        )
+        if diagnostics.count > 8 {
+            diagnostics.removeLast(diagnostics.count - 8)
+        }
+    }
+
+    private func mapLifecyclePhase(_ state: String) -> DaemonLifecyclePhase {
+        switch state {
+        case "starting":
+            return .starting
+        case "running":
+            return .running
+        case "stopping":
+            return .stopping
+        case "failed":
+            return .failed
+        default:
+            return .stopped
+        }
+    }
+
+    private func startupTimedOut(now: Date = .now) -> Bool {
+        guard let startupDeadline else {
+            return false
+        }
+        return now >= startupDeadline
+    }
+}
+
+private extension String {
+    var nonEmptyValue: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 }
 
 @MainActor
