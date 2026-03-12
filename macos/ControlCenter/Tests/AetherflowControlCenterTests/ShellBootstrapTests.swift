@@ -31,6 +31,26 @@ final class ShellBootstrapTests: XCTestCase {
         )
     }
 
+    func testDetectUsesConfiguredProjectNameFromAetherflowConfig() throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let configURL = tempDirectory.appendingPathComponent(".aetherflow.yaml")
+        try """
+        project: control-room
+        """.write(to: configURL, atomically: true, encoding: .utf8)
+
+        let context = ShellBootstrapContext.detect(
+            environment: [:],
+            currentDirectoryPath: tempDirectory.path
+        )
+
+        XCTAssertEqual(context.projectName, "control-room")
+        XCTAssertEqual(context.socketPath, "/tmp/aetherd-control-room.sock")
+    }
+
     @MainActor
     func testNavigationStoreResetsSelectionWhenSectionChanges() {
         let store = NavigationStore()
