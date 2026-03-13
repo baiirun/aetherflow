@@ -182,7 +182,7 @@ func TestHandleSessionEventIsolatesSessions(t *testing.T) {
 	}
 }
 
-// --- events.list tests ---
+// --- session event listing tests ---
 
 func TestHandleEventsListMissingAgentName(t *testing.T) {
 	d := newTestDaemonForEvents()

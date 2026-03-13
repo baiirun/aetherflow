@@ -1,6 +1,9 @@
 package protocol
 
-import "fmt"
+import (
+	"fmt"
+	"net"
+)
 
 const (
 	// DefaultDaemonPort is the default HTTP port for the daemon API.
@@ -23,6 +26,31 @@ func DaemonURLFor(project string) string {
 	}
 	port := DefaultDaemonPort + 1 + int(simpleHash(project)%100)
 	return fmt.Sprintf("http://127.0.0.1:%d", port)
+}
+
+// NormalizeListenAddr canonicalizes daemon listen addresses into explicit
+// host:port pairs suitable for binding and later publishing as client URLs.
+// Empty hosts are normalized to 127.0.0.1 so ":7070" never escapes as
+// "http://:7070".
+func NormalizeListenAddr(listenAddr string) (string, error) {
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return "", err
+	}
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
+// DaemonURLFromListenAddr converts a daemon listen address into the published
+// loopback URL clients should use.
+func DaemonURLFromListenAddr(listenAddr string) (string, error) {
+	addr, err := NormalizeListenAddr(listenAddr)
+	if err != nil {
+		return "", err
+	}
+	return "http://" + addr, nil
 }
 
 // simpleHash is a basic FNV-1a-style hash for port allocation.

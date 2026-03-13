@@ -15,8 +15,8 @@ import (
 // session sweep TTL, this bounds total memory usage.
 const maxEventDataBytes = 256 * 1024
 
-// SessionEventParams are the parameters for the session.event RPC method.
-// These arrive from the opencode plugin via the daemon's Unix socket.
+// SessionEventParams is the HTTP payload shape for daemon event ingestion.
+// These arrive from the opencode plugin via the daemon's local HTTP API.
 type SessionEventParams struct {
 	EventType string          `json:"event_type"`
 	SessionID string          `json:"session_id"`
@@ -55,14 +55,14 @@ func (d *Daemon) handleSessionEvent(params SessionEventParams) *Response {
 	return &Response{Success: true}
 }
 
-// EventsListParams are the parameters for the events.list RPC method.
+// EventsListParams is the query shape for listing session events over HTTP.
 type EventsListParams struct {
 	AgentName      string `json:"agent_name"`
 	AfterTimestamp int64  `json:"after_timestamp,omitempty"` // for incremental reads
 	Raw            bool   `json:"raw,omitempty"`             // return raw JSON events instead of formatted lines
 }
 
-// EventsListResult is the response for the events.list RPC method.
+// EventsListResult is the HTTP response payload for listing session events.
 type EventsListResult struct {
 	Lines     []string        `json:"lines,omitempty"`  // formatted human-readable lines (when raw=false)
 	Events    []SessionEvent  `json:"events,omitempty"` // raw events (when raw=true)

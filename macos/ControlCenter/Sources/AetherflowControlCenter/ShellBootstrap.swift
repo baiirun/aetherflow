@@ -12,11 +12,14 @@ struct ShellBootstrapContext: Equatable, Sendable {
     ) -> Self {
         let workingDirectory = environment["AETHERFLOW_WORKING_DIRECTORY"]?.trimmedNonEmpty ?? currentDirectoryPath
         let fallbackProjectName = defaultProjectName(for: workingDirectory)
-        let configuredProjectName = configuredProjectName(for: workingDirectory)
+        let configuredValues = configuredValues(for: workingDirectory)
+        let configuredProjectName = configuredValues.projectName
         let projectName = environment["AETHERFLOW_PROJECT"]?.trimmedNonEmpty
             ?? configuredProjectName
             ?? fallbackProjectName
-        let daemonURL = environment["AETHERFLOW_DAEMON_URL"]?.trimmedNonEmpty ?? defaultDaemonURL(for: projectName)
+        let daemonURL = validatedLoopbackDaemonURL(environment["AETHERFLOW_DAEMON_URL"])
+            ?? configuredValues.daemonURL
+            ?? defaultDaemonURL(for: projectName)
         let cliPath = environment["AETHERFLOW_CLI_PATH"]?.trimmedNonEmpty
             ?? defaultCLIPath(for: workingDirectory, pathEnvironment: environment["PATH"])
             ?? "af"
@@ -62,26 +65,53 @@ struct ShellBootstrapContext: Equatable, Sendable {
         return nil
     }
 
-    static func configuredProjectName(for workingDirectory: String) -> String? {
+    static func configuredValues(for workingDirectory: String) -> (projectName: String?, daemonURL: String?) {
         let configPath = URL(fileURLWithPath: workingDirectory).appendingPathComponent(".aetherflow.yaml").path
         guard let data = FileManager.default.contents(atPath: configPath),
               let contents = String(data: data, encoding: .utf8) else {
-            return nil
+            return (nil, nil)
         }
 
+        var projectName: String?
+        var daemonURL: String?
         for line in contents.split(whereSeparator: \.isNewline) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard trimmed.hasPrefix("project:") else {
-                continue
+            if trimmed.hasPrefix("project:") {
+                let value = trimmed.dropFirst("project:".count).trimmingCharacters(in: .whitespaces)
+                let unquoted = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                projectName = unquoted.isEmpty ? nil : unquoted
             }
-            let value = trimmed.dropFirst("project:".count).trimmingCharacters(in: .whitespaces)
-            let unquoted = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-            return unquoted.isEmpty ? nil : unquoted
+            if trimmed.hasPrefix("listen_addr:") {
+                let value = trimmed.dropFirst("listen_addr:".count).trimmingCharacters(in: .whitespaces)
+                let unquoted = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                daemonURL = daemonURLFromListenAddr(unquoted)
+            }
         }
-        return nil
+        return (projectName, daemonURL)
     }
 
-    /// FNV-1a 32-bit hash — matches the Go simpleHash function in protocol/socket.go.
+    static func daemonURLFromListenAddr(_ listenAddr: String) -> String? {
+        guard !listenAddr.isEmpty else {
+            return nil
+        }
+        guard let hostRange = listenAddr.lastIndex(of: ":") else {
+            return nil
+        }
+        let hostPart = String(listenAddr[..<hostRange])
+        let portPart = String(listenAddr[listenAddr.index(after: hostRange)...])
+        guard !portPart.isEmpty else {
+            return nil
+        }
+        let host = hostPart.isEmpty ? "127.0.0.1" : hostPart
+        let normalizedHost = host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]" ? host : ""
+        guard !normalizedHost.isEmpty else {
+            return nil
+        }
+        let urlHost = normalizedHost == "::1" ? "[::1]" : normalizedHost
+        return "http://\(urlHost):\(portPart)"
+    }
+
+    /// FNV-1a 32-bit hash — matches the Go simpleHash function in protocol/daemon_url.go.
     private static func fnv1a32(_ s: String) -> UInt32 {
         var h: UInt32 = 2166136261
         for byte in s.utf8 {
@@ -97,4 +127,15 @@ private extension String {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
+}
+
+private func validatedLoopbackDaemonURL(_ rawValue: String?) -> String? {
+    guard let rawValue = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+          let url = URL(string: rawValue),
+          url.scheme == "http",
+          let host = url.host?.lowercased(),
+          host == "127.0.0.1" || host == "localhost" || host == "::1" else {
+        return nil
+    }
+    return rawValue
 }

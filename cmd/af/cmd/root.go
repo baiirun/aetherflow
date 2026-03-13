@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/baiirun/aetherflow/internal/daemon"
 	"github.com/baiirun/aetherflow/internal/protocol"
 	"github.com/baiirun/aetherflow/internal/term"
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 )
 
 var rootCmd = &cobra.Command{
@@ -51,33 +51,35 @@ func init() {
 // resolveDaemonURL determines the daemon URL from the CLI flag,
 // config file, or default convention. Priority:
 //  1. Explicit --project flag -> project-scoped daemon URL
-//  2. Project from config file -> project-scoped daemon URL
-//  3. DefaultDaemonURL fallback
+//  2. Config listen_addr -> canonical daemon URL
+//  3. Config project -> project-scoped daemon URL
+//  4. DefaultDaemonURL fallback
 func resolveDaemonURL(cmd *cobra.Command) string {
 	if cmd.Flags().Changed("project") {
 		p, _ := cmd.Flags().GetString("project")
 		return protocol.DaemonURLFor(p)
 	}
 
-	// Discover the project from the config file to derive the daemon URL.
-	// Only the project field is needed — we parse a minimal struct to avoid
-	// importing the daemon package into the CLI layer.
 	configPath, _ := cmd.Flags().GetString("config")
 	if configPath == "" {
 		configPath = ".aetherflow.yaml"
 	}
-	data, err := os.ReadFile(configPath)
-	if err == nil {
-		var partial struct {
-			Project string `yaml:"project"`
+	var cfg daemon.Config
+	if err := daemon.LoadConfigFile(configPath, &cfg); err == nil {
+		cfg.ApplyDefaults()
+		if cfg.ListenAddr != "" {
+			daemonURL, err := protocol.DaemonURLFromListenAddr(cfg.ListenAddr)
+			if err == nil {
+				return daemonURL
+			}
+			fmt.Fprintf(os.Stderr, "warning: invalid listen_addr %q in %s: %v (using default daemon URL)\n", cfg.ListenAddr, configPath, err)
 		}
-		if err := yaml.Unmarshal(data, &partial); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to parse %s: %v (using default daemon URL)\n", configPath, err)
-		} else if partial.Project != "" {
-			return protocol.DaemonURLFor(partial.Project)
+		if cfg.Project != "" {
+			return protocol.DaemonURLFor(cfg.Project)
 		}
+	} else if !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "warning: failed to parse %s: %v (using default daemon URL)\n", configPath, err)
 	}
-	// File doesn't exist or has no project — use the global default.
 
 	return protocol.DefaultDaemonURL
 }

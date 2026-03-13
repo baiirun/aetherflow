@@ -9,7 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// logEventsMsg carries newly fetched event lines from the daemon RPC.
+// logEventsMsg carries newly fetched event lines from the daemon API.
 type logEventsMsg struct {
 	lines  []string
 	lastTS int64 // for incremental polling
@@ -17,7 +17,7 @@ type logEventsMsg struct {
 }
 
 // LogStreamModel is the full-screen event log viewer.
-// It reads events from the daemon's in-memory buffer via the events.list RPC,
+// It reads events from the daemon's in-memory buffer via the events HTTP endpoint,
 // formats them, and renders in a scrollable viewport.
 // New events are polled on each tick (every 2s from the parent).
 type LogStreamModel struct {
@@ -137,7 +137,7 @@ func (m *LogStreamModel) refreshContent() {
 	}
 }
 
-// fetchEventsCmd returns a Cmd that fetches events from the daemon RPC.
+// fetchEventsCmd returns a Cmd that fetches events from the daemon API.
 // Uses lastTS for incremental reads so we only get new events.
 func (m LogStreamModel) fetchEventsCmd() tea.Cmd {
 	agentID := m.agentID

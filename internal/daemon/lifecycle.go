@@ -59,11 +59,15 @@ func (d *Daemon) lifecycleStatus() protocol.DaemonLifecycleStatus {
 }
 
 func (d *Daemon) setLifecycleState(state protocol.LifecycleState, lastErr string) {
+	daemonURL, err := protocol.DaemonURLFromListenAddr(d.config.ListenAddr)
+	if err != nil {
+		daemonURL = protocol.DefaultDaemonURL
+	}
 	d.lifeMu.Lock()
 	d.life.State = state
 	d.life.Project = d.config.Project
 	d.life.ServerURL = d.config.ServerURL
-	d.life.DaemonURL = "http://" + d.config.ListenAddr
+	d.life.DaemonURL = daemonURL
 	d.life.SpawnPolicy = string(d.config.SpawnPolicy.Normalized())
 	d.life.LastError = lastErr
 	d.life.UpdatedAt = time.Now()

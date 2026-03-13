@@ -8,7 +8,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/baiirun/aetherflow/internal/protocol"
@@ -17,6 +20,7 @@ import (
 // Client communicates with the aetherd daemon over HTTP.
 type Client struct {
 	baseURL    string
+	authToken  string
 	httpClient *http.Client
 }
 
@@ -27,7 +31,8 @@ func New(daemonURL string) *Client {
 		daemonURL = protocol.DefaultDaemonURL
 	}
 	return &Client{
-		baseURL: daemonURL,
+		baseURL:   daemonURL,
+		authToken: loadAuthToken(daemonURL),
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -41,10 +46,23 @@ type Response struct {
 	Error   string          `json:"error,omitempty"`
 }
 
+// ShutdownRefusedError preserves the daemon-owned refusal outcome so callers
+// can distinguish it from transport or protocol failures.
+type ShutdownRefusedError struct {
+	Result protocol.StopDaemonResult
+}
+
+func (e *ShutdownRefusedError) Error() string {
+	return e.Result.Message
+}
+
 // doGet makes a GET request and decodes the result.
 func (c *Client) doGet(path string, result any) error {
-	url := c.baseURL + path
-	resp, err := c.httpClient.Get(url)
+	req, err := c.newRequest(http.MethodGet, path, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to connect to aetherd: %w (is aetherd running?)", err)
 	}
@@ -55,7 +73,6 @@ func (c *Client) doGet(path string, result any) error {
 
 // doPost makes a POST request with a JSON body and decodes the result.
 func (c *Client) doPost(path string, body any, result any) error {
-	url := c.baseURL + path
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -64,7 +81,14 @@ func (c *Client) doPost(path string, body any, result any) error {
 		}
 		bodyReader = bytes.NewReader(data)
 	}
-	resp, err := c.httpClient.Post(url, "application/json", bodyReader)
+	req, err := c.newRequest(http.MethodPost, path, bodyReader)
+	if err != nil {
+		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to connect to aetherd: %w (is aetherd running?)", err)
 	}
@@ -75,10 +99,9 @@ func (c *Client) doPost(path string, body any, result any) error {
 
 // doDelete makes a DELETE request and decodes the result.
 func (c *Client) doDelete(path string, result any) error {
-	url := c.baseURL + path
-	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	req, err := c.newRequest(http.MethodDelete, path, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return err
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -118,7 +141,54 @@ func (c *Client) decodeResponse(resp *http.Response, result any) error {
 	return nil
 }
 
-// FullStatus is the enriched swarm status returned by the status.full RPC.
+func (c *Client) newRequest(method, path string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequest(method, c.baseURL+path, body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	if c.authToken == "" {
+		c.authToken = loadAuthToken(c.baseURL)
+	}
+	if c.authToken != "" {
+		req.Header.Set("X-Aetherflow-Token", c.authToken)
+	}
+	return req, nil
+}
+
+func loadAuthToken(daemonURL string) string {
+	path, err := authTokenPath(daemonURL)
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func authTokenPath(daemonURL string) (string, error) {
+	parsed, err := url.Parse(daemonURL)
+	if err != nil {
+		return "", err
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	host = strings.NewReplacer(":", "_", "[", "", "]", "").Replace(host)
+	port := parsed.Port()
+	if port == "" {
+		return "", fmt.Errorf("daemon url missing port")
+	}
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(configDir, "aetherflow", "auth", fmt.Sprintf("%s_%s.token", host, port)), nil
+}
+
+// FullStatus is the enriched swarm status returned by the daemon HTTP API.
 type FullStatus struct {
 	PoolSize    int           `json:"pool_size"`
 	PoolMode    string        `json:"pool_mode"`
@@ -225,7 +295,7 @@ type SessionMetadata struct {
 	Attachable bool      `json:"attachable"`
 }
 
-// StatusAgentParams are the parameters for the status.agent RPC.
+// StatusAgentParams is the request shape for agent detail lookups.
 type StatusAgentParams struct {
 	AgentName string `json:"agent_name"`
 	Limit     int    `json:"limit,omitempty"`
@@ -262,14 +332,14 @@ func (c *Client) DaemonLifecycle() (*protocol.DaemonLifecycleStatus, error) {
 	return &result, nil
 }
 
-// EventsListParams are the parameters for the events.list RPC.
+// EventsListParams is the query shape for event reads from the daemon API.
 type EventsListParams struct {
 	AgentName      string `json:"agent_name"`
 	AfterTimestamp int64  `json:"after_timestamp,omitempty"`
 	Raw            bool   `json:"raw,omitempty"`
 }
 
-// EventsListResult is the response for the events.list RPC.
+// EventsListResult is the response payload for daemon event reads.
 type EventsListResult struct {
 	Lines     []string        `json:"lines,omitempty"`
 	Events    []SessionEvent  `json:"events,omitempty"`
@@ -302,7 +372,7 @@ func (c *Client) EventsList(agentName string, afterTimestamp int64) (*EventsList
 	return &result, nil
 }
 
-// PoolModeResult is the response for pool control RPCs.
+// PoolModeResult is the response payload for pool control endpoints.
 type PoolModeResult struct {
 	Mode    string `json:"mode"`
 	Running int    `json:"running"`
@@ -335,7 +405,7 @@ func (c *Client) PoolResume() (*PoolModeResult, error) {
 	return &result, nil
 }
 
-// SpawnRegisterParams are the parameters for the spawn.register RPC.
+// SpawnRegisterParams is the payload for registering a tracked spawn.
 type SpawnRegisterParams struct {
 	SpawnID string `json:"spawn_id"`
 	PID     int    `json:"pid"`
@@ -359,16 +429,22 @@ func (c *Client) SpawnDeregister(spawnID string) error {
 // sessions, it returns a "refused" error with a human-readable message.
 // Pass force=true to stop unconditionally.
 func (c *Client) Shutdown(force bool) error {
+	_, err := c.StopDaemon(force)
+	return err
+}
+
+// StopDaemon stops the daemon and returns the daemon-owned outcome.
+func (c *Client) StopDaemon(force bool) (*protocol.StopDaemonResult, error) {
 	path := "/api/v1/shutdown"
 	if force {
 		path += "?force=true"
 	}
 	var result protocol.StopDaemonResult
 	if err := c.doPost(path, nil, &result); err != nil {
-		return err
+		return nil, err
 	}
 	if result.Outcome == protocol.StopOutcomeRefused {
-		return fmt.Errorf("%s (use --force to stop anyway)", result.Message)
+		return &result, &ShutdownRefusedError{Result: result}
 	}
-	return nil
+	return &result, nil
 }

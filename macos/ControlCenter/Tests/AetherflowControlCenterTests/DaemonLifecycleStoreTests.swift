@@ -3,22 +3,67 @@ import XCTest
 
 actor FakeDaemonController: DaemonControlling {
     var lifecycleResult: Result<DaemonLifecyclePayload, Error>
+    var statusResult: Result<DaemonStatusPayload, Error>
+    var detailResult: Result<DaemonAgentDetailPayload, Error>
+    var eventsResult: Result<DaemonEventsPayload, Error>
     var stopResult: Result<DaemonStopResponse, Error>
     var startResult: Result<DaemonStartReceipt, Error>
     private(set) var stopRequests: [Bool] = []
 
     init(
         lifecycleResult: Result<DaemonLifecyclePayload, Error>,
+        statusResult: Result<DaemonStatusPayload, Error> = .success(
+            DaemonStatusPayload(poolSize: 0, poolMode: "", project: "", spawnPolicy: "", agents: [], spawns: [], queue: [], errors: [])
+        ),
+        detailResult: Result<DaemonAgentDetailPayload, Error> = .success(
+            DaemonAgentDetailPayload(
+                agent: DaemonAgentStatusPayload(
+                    id: "",
+                    taskID: "",
+                    role: "",
+                    pid: 0,
+                    spawnTime: .now,
+                    taskTitle: "",
+                    lastLog: "",
+                    sessionID: "",
+                    state: "",
+                    lifecycleState: "",
+                    lastActivityAt: nil,
+                    attentionNeeded: false
+                ),
+                session: .empty,
+                toolCalls: [],
+                errors: []
+            )
+        ),
+        eventsResult: Result<DaemonEventsPayload, Error> = .success(
+            DaemonEventsPayload(lines: [], sessionID: "", session: .empty, lastTS: 0)
+        ),
         stopResult: Result<DaemonStopResponse, Error>,
         startResult: Result<DaemonStartReceipt, Error>
     ) {
         self.lifecycleResult = lifecycleResult
+        self.statusResult = statusResult
+        self.detailResult = detailResult
+        self.eventsResult = eventsResult
         self.stopResult = stopResult
         self.startResult = startResult
     }
 
     func fetchLifecycle(daemonURL: String) async throws -> DaemonLifecyclePayload {
         try lifecycleResult.get()
+    }
+
+    func fetchStatus(daemonURL: String) async throws -> DaemonStatusPayload {
+        try statusResult.get()
+    }
+
+    func fetchAgentDetail(daemonURL: String, agentName: String, limit: Int) async throws -> DaemonAgentDetailPayload {
+        try detailResult.get()
+    }
+
+    func fetchEvents(daemonURL: String, agentName: String, afterTimestamp: Int64) async throws -> DaemonEventsPayload {
+        try eventsResult.get()
     }
 
     func requestStop(daemonURL: String, force: Bool) async throws -> DaemonStopResponse {

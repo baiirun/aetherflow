@@ -4,13 +4,13 @@
 
 ### Breaking Changes
 
-- **Log files removed.** JSONL log files are no longer created for agent sessions. All observability flows through the plugin event pipeline. If you had tooling that read `.aetherflow/logs/*.jsonl`, migrate to `af logs <agent>` or the `events.list` RPC.
+- **Log files removed.** JSONL log files are no longer created for agent sessions. All observability flows through the plugin event pipeline. If you had tooling that read `.aetherflow/logs/*.jsonl`, migrate to `af logs <agent>` or the daemon events API.
 - **Default spawn policy is now `manual`.** Previously defaulted to `auto` (poll prog and auto-schedule). Set `--spawn-policy=auto` explicitly to restore the old behavior.
 
 ### Added
 
 - **Server-first runtime.** All agents now connect to a shared opencode server via `opencode run --attach <url>`. The daemon auto-starts and supervises the server on `http://127.0.0.1:4096`.
-- **Plugin event pipeline.** A plugin on the opencode server (`aetherflow-events.ts`) streams session events to the daemon in real-time. Replaces JSONL log file polling with structured event delivery over Unix socket RPC.
+- **Plugin event pipeline.** A plugin on the opencode server (`aetherflow-events.ts`) streams session events to the daemon in real-time. Replaces JSONL log file polling with structured event delivery over the daemon's local HTTP API.
 - **`af spawn`** — spawn one-off agents with a freeform prompt, no daemon or task tracker required.
 - **`af sessions`** — list known opencode sessions from the global registry.
 - **`af session attach <id>`** — attach interactively to a running opencode session.

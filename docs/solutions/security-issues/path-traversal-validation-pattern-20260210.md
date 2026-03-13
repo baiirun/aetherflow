@@ -127,4 +127,4 @@ This same pattern applies whenever constructing paths from user input:
 
 - CWE-22: Improper Limitation of a Pathname to a Restricted Directory
 - OWASP Path Traversal
-- `internal/protocol/socket.go` uses this pattern for socket path validation
+- `internal/protocol/daemon_url.go` uses this pattern for daemon URL/listen address validation

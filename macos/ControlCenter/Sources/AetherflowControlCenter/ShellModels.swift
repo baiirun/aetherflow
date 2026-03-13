@@ -141,7 +141,7 @@ enum ShellSection: String, CaseIterable, Hashable, Identifiable {
                     highlights: [
                         "Detail content hangs off a selected item, not off global app state.",
                         "The pane can absorb timeline and handoff surfaces later.",
-                        "No layout rework is required to add status.agent or events.list data."
+                        "No layout rework is required to add agent detail or event feed data."
                     ]
                 ),
             ]

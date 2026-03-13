@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -143,8 +144,18 @@ var daemonStopCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		force, _ := cmd.Flags().GetBool("force")
 		c := client.New(resolveDaemonURL(cmd))
-		if err := c.Shutdown(force); err != nil {
+		result, err := c.StopDaemon(force)
+		if err != nil {
+			var refused *client.ShutdownRefusedError
+			if errors.As(err, &refused) {
+				fmt.Fprintln(os.Stderr, refused.Result.Message)
+				os.Exit(2)
+			}
 			Fatal("%v", err)
+		}
+		if result != nil && result.Message != "" {
+			fmt.Println(result.Message)
+			return
 		}
 		fmt.Println("daemon stopping")
 	},

@@ -321,7 +321,7 @@ func (p *Pool) spawn(ctx context.Context, task Task) {
 	)
 
 	// Session ID is captured when the session.created plugin event arrives
-	// at the daemon — see event_rpc.go claimSession.
+	// at the daemon — see session_events.go claimSession.
 
 	// Wait for process exit in background.
 	go p.reap(agent, proc)
@@ -486,7 +486,7 @@ func (p *Pool) respawn(taskID string, role Role, sessionID string) {
 
 	// If we resumed an existing session, the session ID is already set.
 	// If not, it will be captured when the session.created plugin event
-	// arrives at the daemon — see event_rpc.go claimSession.
+	// arrives at the daemon — see session_events.go claimSession.
 
 	go p.reap(agent, proc)
 }
@@ -610,7 +610,7 @@ func (p *Pool) sweepDead() {
 	}
 }
 
-// Status returns the current pool state for the status RPC.
+// Status returns the current pool state for the status API.
 func (p *Pool) Status() []Agent {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

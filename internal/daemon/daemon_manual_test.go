@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os/exec"
@@ -16,7 +17,7 @@ import (
 
 // noopServerStarter skips the real opencode server startup in tests.
 // CI environments don't have opencode installed, so the managed server
-// would fail to start and cause the daemon socket to never become ready.
+// would fail to start and cause the daemon HTTP endpoint to never become ready.
 func noopServerStarter(_ context.Context, _ string, _ []string, _ func(string, ...any)) (*exec.Cmd, error) {
 	return nil, nil
 }
@@ -223,6 +224,48 @@ func TestDaemonSecondInstanceSameAddrFailsFast(t *testing.T) {
 		t.Fatalf("shutdown failed: %v", err)
 	}
 	waitForDaemonExit(t, done1, 2*time.Second)
+}
+
+func TestHandleShutdownRefusesActiveWorkWithoutSession(t *testing.T) {
+	cfg := Config{
+		ListenAddr:        "127.0.0.1:7070",
+		Project:           "manual-test",
+		PollInterval:      time.Second,
+		PoolSize:          1,
+		SpawnCmd:          "echo test",
+		SpawnPolicy:       SpawnPolicyManual,
+		ReconcileInterval: DefaultReconcileInterval,
+		ServerStarter:     noopServerStarter,
+		SessionDir:        t.TempDir(),
+	}
+	d := New(cfg)
+	d.pool = NewPool(cfg, nil, nil, d.log)
+	d.pool.mu.Lock()
+	d.pool.agents["ts-1"] = &Agent{
+		ID:        "agent-1",
+		TaskID:    "ts-1",
+		Role:      RoleWorker,
+		PID:       42,
+		SpawnTime: time.Now(),
+		State:     AgentRunning,
+		SessionID: "",
+	}
+	d.pool.mu.Unlock()
+
+	resp := d.handleShutdown(false)
+	if !resp.Success {
+		t.Fatalf("handleShutdown error: %s", resp.Error)
+	}
+	var result protocol.StopDaemonResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if result.Outcome != protocol.StopOutcomeRefused {
+		t.Fatalf("Outcome = %q, want %q", result.Outcome, protocol.StopOutcomeRefused)
+	}
+	if !strings.Contains(result.Message, "active workload") {
+		t.Fatalf("Message = %q, want active workload refusal", result.Message)
+	}
 }
 
 func TestDaemonRunRejectsAutoPolicyWithoutProject(t *testing.T) {
