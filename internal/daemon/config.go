@@ -69,8 +69,9 @@ func (p SpawnPolicy) ProgEnrichmentEnabled() bool {
 }
 
 // validProjectName restricts project names to safe characters for use in
-// socket paths and log file paths. Rejects slashes, spaces, and other
-// characters that could cause path traversal or shell interpretation issues.
+// daemon URL derivation and filesystem paths. Rejects slashes, spaces, and
+// other characters that could cause path traversal or shell interpretation
+// issues.
 var validProjectName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
 // validTaskID restricts task IDs parsed from prog output to safe characters

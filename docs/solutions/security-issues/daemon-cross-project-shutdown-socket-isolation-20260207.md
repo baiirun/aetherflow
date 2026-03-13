@@ -71,7 +71,7 @@ cmd.Stderr = os.Stderr
 Changed from a global singleton socket to project-scoped sockets. Moved `SocketPathFor` to `internal/protocol` as the single source of truth, with `filepath.Base` sanitization to prevent path traversal.
 
 ```go
-// internal/protocol/socket.go — single source of truth
+// internal/protocol/daemon_url.go — single source of truth
 func SocketPathFor(project string) string {
     if project == "" {
         return DefaultSocketPath

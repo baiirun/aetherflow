@@ -8,7 +8,7 @@ import (
 
 const (
 	// maxSpawnEntries caps the registry to prevent memory exhaustion from
-	// runaway or malicious spawn.register RPCs. 128 is generous — even a
+	// runaway or malicious spawn registration calls. 128 is generous — even a
 	// busy team won't run 128 concurrent ad-hoc agents.
 	maxSpawnEntries = 128
 

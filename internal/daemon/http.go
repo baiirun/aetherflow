@@ -140,7 +140,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// writeResponse converts a legacy *Response to an HTTP response.
+// writeResponse converts the shared daemon response envelope to an HTTP response.
 // Success → 200, failure → 400 (or caller overrides).
 func writeResponse(w http.ResponseWriter, resp *Response) {
 	if resp.Success {

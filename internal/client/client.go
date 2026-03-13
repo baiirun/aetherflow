@@ -188,7 +188,7 @@ func authTokenPath(daemonURL string) (string, error) {
 	return filepath.Join(configDir, "aetherflow", "auth", fmt.Sprintf("%s_%s.token", host, port)), nil
 }
 
-// FullStatus is the enriched swarm status returned by the status.full RPC.
+// FullStatus is the enriched swarm status returned by the daemon HTTP API.
 type FullStatus struct {
 	PoolSize    int           `json:"pool_size"`
 	PoolMode    string        `json:"pool_mode"`
@@ -295,7 +295,7 @@ type SessionMetadata struct {
 	Attachable bool      `json:"attachable"`
 }
 
-// StatusAgentParams are the parameters for the status.agent RPC.
+// StatusAgentParams is the request shape for agent detail lookups.
 type StatusAgentParams struct {
 	AgentName string `json:"agent_name"`
 	Limit     int    `json:"limit,omitempty"`
@@ -332,14 +332,14 @@ func (c *Client) DaemonLifecycle() (*protocol.DaemonLifecycleStatus, error) {
 	return &result, nil
 }
 
-// EventsListParams are the parameters for the events.list RPC.
+// EventsListParams is the query shape for event reads from the daemon API.
 type EventsListParams struct {
 	AgentName      string `json:"agent_name"`
 	AfterTimestamp int64  `json:"after_timestamp,omitempty"`
 	Raw            bool   `json:"raw,omitempty"`
 }
 
-// EventsListResult is the response for the events.list RPC.
+// EventsListResult is the response payload for daemon event reads.
 type EventsListResult struct {
 	Lines     []string        `json:"lines,omitempty"`
 	Events    []SessionEvent  `json:"events,omitempty"`
@@ -372,7 +372,7 @@ func (c *Client) EventsList(agentName string, afterTimestamp int64) (*EventsList
 	return &result, nil
 }
 
-// PoolModeResult is the response for pool control RPCs.
+// PoolModeResult is the response payload for pool control endpoints.
 type PoolModeResult struct {
 	Mode    string `json:"mode"`
 	Running int    `json:"running"`
@@ -405,7 +405,7 @@ func (c *Client) PoolResume() (*PoolModeResult, error) {
 	return &result, nil
 }
 
-// SpawnRegisterParams are the parameters for the spawn.register RPC.
+// SpawnRegisterParams is the payload for registering a tracked spawn.
 type SpawnRegisterParams struct {
 	SpawnID string `json:"spawn_id"`
 	PID     int    `json:"pid"`

@@ -11,7 +11,7 @@ import (
 	"github.com/baiirun/aetherflow/internal/sessions"
 )
 
-// FullStatus is the response for the status.full RPC method.
+// FullStatus is the response payload for the swarm status endpoint.
 // It enriches the live pool data with task metadata from prog.
 type FullStatus struct {
 	PoolSize    int           `json:"pool_size"`
@@ -273,7 +273,7 @@ func applySessionSummaryToSpawn(spawn *SpawnStatus, summary sessionSummary) {
 	spawn.AttentionNeeded = summary.attention
 }
 
-// AgentDetail is the response for the status.agent RPC method.
+// AgentDetail is the response payload for the agent detail endpoint.
 // It provides a detailed view of a single agent with tool call history.
 type AgentDetail struct {
 	AgentStatus
@@ -282,7 +282,7 @@ type AgentDetail struct {
 	Errors    []string        `json:"errors,omitempty"`
 }
 
-// StatusAgentParams are the parameters for the status.agent RPC method.
+// StatusAgentParams is the query shape for the agent detail endpoint.
 type StatusAgentParams struct {
 	AgentName string `json:"agent_name"`
 	Limit     int    `json:"limit,omitempty"` // max tool calls to return; 0 = default (20)

@@ -2,7 +2,7 @@ package protocol
 
 import "time"
 
-// LifecycleState is the daemon lifecycle state exposed over RPC.
+// LifecycleState is the daemon lifecycle state exposed over the HTTP API.
 type LifecycleState string
 
 const (

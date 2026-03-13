@@ -111,7 +111,7 @@ struct ShellBootstrapContext: Equatable, Sendable {
         return "http://\(urlHost):\(portPart)"
     }
 
-    /// FNV-1a 32-bit hash — matches the Go simpleHash function in protocol/socket.go.
+    /// FNV-1a 32-bit hash — matches the Go simpleHash function in protocol/daemon_url.go.
     private static func fnv1a32(_ s: String) -> UInt32 {
         var h: UInt32 = 2166136261
         for byte in s.utf8 {

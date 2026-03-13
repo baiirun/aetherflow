@@ -119,7 +119,7 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: "project is required when spawn-policy is",
 		},
 		{
-			name: "missing project in manual mode without socket",
+			name: "missing project in manual mode without explicit project",
 			cfg: Config{
 				PollInterval:      time.Second,
 				PoolSize:          1,

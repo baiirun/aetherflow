@@ -49,7 +49,7 @@ type Daemon struct {
 	log          *slog.Logger
 }
 
-// Response is the JSON-RPC style response envelope.
+// Response is the shared daemon response envelope.
 // Used by both HTTP handlers and internal handler methods.
 type Response struct {
 	Success bool            `json:"success"`

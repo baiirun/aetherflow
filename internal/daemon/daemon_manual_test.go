@@ -17,7 +17,7 @@ import (
 
 // noopServerStarter skips the real opencode server startup in tests.
 // CI environments don't have opencode installed, so the managed server
-// would fail to start and cause the daemon socket to never become ready.
+// would fail to start and cause the daemon HTTP endpoint to never become ready.
 func noopServerStarter(_ context.Context, _ string, _ []string, _ func(string, ...any)) (*exec.Cmd, error) {
 	return nil, nil
 }

@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// PoolModeResult is the response for pool control RPC methods.
+// PoolModeResult is the response for pool control handlers.
 type PoolModeResult struct {
 	Mode    PoolMode `json:"mode"`
 	Running int      `json:"running"`

@@ -13,7 +13,7 @@ const (
 	maxSpawnIDLen = 128
 )
 
-// SpawnRegisterParams are the parameters for the spawn.register RPC method.
+// SpawnRegisterParams is the HTTP payload for registering a tracked spawn.
 type SpawnRegisterParams struct {
 	SpawnID string `json:"spawn_id"`
 	PID     int    `json:"pid"`
@@ -54,12 +54,12 @@ func (d *Daemon) handleSpawnRegister(params SpawnRegisterParams) *Response {
 	)
 
 	// Session ID is captured when the session.created plugin event arrives
-	// at the daemon — see event_rpc.go claimSession.
+	// at the daemon — see session_events.go claimSession.
 
 	return &Response{Success: true}
 }
 
-// SpawnDeregisterParams are the parameters for the spawn.deregister RPC method.
+// SpawnDeregisterParams is the HTTP payload for deregistering a tracked spawn.
 type SpawnDeregisterParams struct {
 	SpawnID string `json:"spawn_id"`
 }
