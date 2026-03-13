@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
 )
 
 // newHTTPHandler builds the HTTP handler (mux) for the daemon API.
@@ -45,7 +47,7 @@ func (d *Daemon) newHTTPHandler() http.Handler {
 	// POST /api/v1/shutdown — shut down the daemon (was shutdown)
 	mux.HandleFunc("POST /api/v1/shutdown", d.httpShutdown)
 
-	return hostCheckMiddleware(d.config.ListenAddr, mux)
+	return hostCheckMiddleware(browserBoundaryMiddleware(mux))
 }
 
 // hostCheckMiddleware rejects requests whose Host header is not a loopback
@@ -53,15 +55,14 @@ func (d *Daemon) newHTTPHandler() http.Handler {
 // A cross-origin browser request sends its target domain as the Host header;
 // by requiring the Host to be a loopback address, we ensure only code running
 // on the same machine can reach the daemon API.
-func hostCheckMiddleware(listenAddr string, next http.Handler) http.Handler {
-	listenHost, _, _ := net.SplitHostPort(listenAddr)
+func hostCheckMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reqHost, _, _ := net.SplitHostPort(r.Host)
 		if reqHost == "" {
 			reqHost = r.Host // Host header without port
 		}
 		switch reqHost {
-		case "127.0.0.1", "::1", "localhost", listenHost, "":
+		case "127.0.0.1", "::1", "localhost", "":
 			next.ServeHTTP(w, r)
 		default:
 			writeJSON(w, http.StatusForbidden, &Response{
@@ -70,6 +71,38 @@ func hostCheckMiddleware(listenAddr string, next http.Handler) http.Handler {
 			})
 		}
 	})
+}
+
+// browserBoundaryMiddleware rejects browser-originated requests to mutating
+// endpoints. Local CLI, plugin, and app requests omit these headers.
+func browserBoundaryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isMutatingMethod(r.Method) && hasBrowserRequestHeaders(r) {
+			writeJSON(w, http.StatusForbidden, &Response{
+				Success: false,
+				Error:   "forbidden: browser-originated requests are not allowed",
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isMutatingMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+func hasBrowserRequestHeaders(r *http.Request) bool {
+	if r.Header.Get("Origin") != "" || r.Header.Get("Referer") != "" {
+		return true
+	}
+	site := strings.ToLower(r.Header.Get("Sec-Fetch-Site"))
+	return site != "" && site != "none"
 }
 
 // writeJSON sends a JSON response with the given status code.
@@ -108,10 +141,12 @@ func (d *Daemon) httpEventsList(w http.ResponseWriter, r *http.Request) {
 		AgentName: r.URL.Query().Get("agent_name"),
 	}
 	if after := r.URL.Query().Get("after_timestamp"); after != "" {
-		var ts int64
-		if _, err := fmt.Sscanf(after, "%d", &ts); err == nil {
-			params.AfterTimestamp = ts
+		ts, err := strconv.ParseInt(after, 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, &Response{Success: false, Error: "after_timestamp must be a valid int64"})
+			return
 		}
+		params.AfterTimestamp = ts
 	}
 	if r.URL.Query().Get("raw") == "true" {
 		params.Raw = true
@@ -134,10 +169,12 @@ func (d *Daemon) httpStatusAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	params := StatusAgentParams{AgentName: agentID}
 	if limit := r.URL.Query().Get("limit"); limit != "" {
-		var l int
-		if _, err := fmt.Sscanf(limit, "%d", &l); err == nil {
-			params.Limit = l
+		l, err := strconv.Atoi(limit)
+		if err != nil || l < 0 {
+			writeJSON(w, http.StatusBadRequest, &Response{Success: false, Error: "limit must be a non-negative integer"})
+			return
 		}
+		params.Limit = l
 	}
 	writeResponse(w, d.handleStatusAgent(r.Context(), params))
 }

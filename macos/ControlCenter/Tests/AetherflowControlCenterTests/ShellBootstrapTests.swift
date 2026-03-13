@@ -84,6 +84,38 @@ final class ShellBootstrapTests: XCTestCase {
         XCTAssertEqual(context.daemonURL, ShellBootstrapContext.defaultDaemonURL(for: "control-room"))
     }
 
+    func testDetectUsesConfiguredListenAddrFromAetherflowConfig() throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let configURL = tempDirectory.appendingPathComponent(".aetherflow.yaml")
+        try """
+        project: control-room
+        listen_addr: :7099
+        """.write(to: configURL, atomically: true, encoding: .utf8)
+
+        let context = ShellBootstrapContext.detect(
+            environment: [:],
+            currentDirectoryPath: tempDirectory.path
+        )
+
+        XCTAssertEqual(context.daemonURL, "http://127.0.0.1:7099")
+    }
+
+    func testDetectIgnoresNonLoopbackEnvironmentDaemonURL() {
+        let context = ShellBootstrapContext.detect(
+            environment: [
+                "AETHERFLOW_PROJECT": "control-room",
+                "AETHERFLOW_DAEMON_URL": "http://example.com:7070",
+            ],
+            currentDirectoryPath: "/tmp/control-room"
+        )
+
+        XCTAssertEqual(context.daemonURL, ShellBootstrapContext.defaultDaemonURL(for: "control-room"))
+    }
+
     @MainActor
     func testNavigationStoreResetsSelectionWhenSectionChanges() {
         let store = NavigationStore()

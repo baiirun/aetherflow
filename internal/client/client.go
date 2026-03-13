@@ -41,6 +41,16 @@ type Response struct {
 	Error   string          `json:"error,omitempty"`
 }
 
+// ShutdownRefusedError preserves the daemon-owned refusal outcome so callers
+// can distinguish it from transport or protocol failures.
+type ShutdownRefusedError struct {
+	Result protocol.StopDaemonResult
+}
+
+func (e *ShutdownRefusedError) Error() string {
+	return e.Result.Message
+}
+
 // doGet makes a GET request and decodes the result.
 func (c *Client) doGet(path string, result any) error {
 	url := c.baseURL + path
@@ -359,16 +369,22 @@ func (c *Client) SpawnDeregister(spawnID string) error {
 // sessions, it returns a "refused" error with a human-readable message.
 // Pass force=true to stop unconditionally.
 func (c *Client) Shutdown(force bool) error {
+	_, err := c.StopDaemon(force)
+	return err
+}
+
+// StopDaemon stops the daemon and returns the daemon-owned outcome.
+func (c *Client) StopDaemon(force bool) (*protocol.StopDaemonResult, error) {
 	path := "/api/v1/shutdown"
 	if force {
 		path += "?force=true"
 	}
 	var result protocol.StopDaemonResult
 	if err := c.doPost(path, nil, &result); err != nil {
-		return err
+		return nil, err
 	}
 	if result.Outcome == protocol.StopOutcomeRefused {
-		return fmt.Errorf("%s (use --force to stop anyway)", result.Message)
+		return &result, &ShutdownRefusedError{Result: result}
 	}
-	return nil
+	return &result, nil
 }

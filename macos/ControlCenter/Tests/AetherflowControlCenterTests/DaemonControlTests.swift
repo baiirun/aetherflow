@@ -3,6 +3,47 @@ import XCTest
 @testable import AetherflowControlCenter
 
 final class DaemonControlTests: XCTestCase {
+    func testFetchStatusConnectsToStatusEndpoint() async throws {
+        let responseData = try JSONEncoder().encode(
+            RPCSuccessEnvelope(
+                result: DaemonStatusPayload(
+                    poolSize: 1,
+                    poolMode: "active",
+                    project: "control-room",
+                    spawnPolicy: "manual",
+                    agents: [],
+                    spawns: [],
+                    queue: [],
+                    errors: []
+                )
+            )
+        )
+
+        var capturedRequest: URLRequest?
+        MockHTTPProtocol.handler = { request in
+            capturedRequest = request
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, responseData)
+        }
+        defer { MockHTTPProtocol.handler = nil }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockHTTPProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let response = try await DefaultDaemonController(session: session)
+            .fetchStatus(daemonURL: "http://127.0.0.1:7070")
+
+        XCTAssertEqual(response.project, "control-room")
+        XCTAssertEqual(capturedRequest?.url?.path, "/api/v1/status")
+        XCTAssertEqual(capturedRequest?.httpMethod, "GET")
+    }
+
     func testFetchLifecycleConnectsToHTTPEndpoint() async throws {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -138,6 +179,49 @@ final class DaemonControlTests: XCTestCase {
             .requestStop(daemonURL: "http://127.0.0.1:7070", force: true)
 
         XCTAssertEqual(capturedRequest?.url?.query, "force=true")
+    }
+
+    func testFetchEventsIncludesAfterTimestampQuery() async throws {
+        let responseData = try JSONEncoder().encode(
+            RPCSuccessEnvelope(
+                result: DaemonEventsPayload(
+                    lines: ["session.created"],
+                    sessionID: "ses-1",
+                    session: .empty,
+                    lastTS: 42
+                )
+            )
+        )
+
+        var capturedRequest: URLRequest?
+        MockHTTPProtocol.handler = { request in
+            capturedRequest = request
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, responseData)
+        }
+        defer { MockHTTPProtocol.handler = nil }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockHTTPProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let response = try await DefaultDaemonController(session: session)
+            .fetchEvents(daemonURL: "http://127.0.0.1:7070", agentName: "agent-1", afterTimestamp: 42)
+
+        XCTAssertEqual(response.lastTS, 42)
+        XCTAssertEqual(capturedRequest?.url?.path, "/api/v1/events")
+        XCTAssertEqual(
+            URLComponents(url: try XCTUnwrap(capturedRequest?.url), resolvingAgainstBaseURL: false)?.queryItems?.sorted { $0.name < $1.name },
+            [
+                URLQueryItem(name: "after_timestamp", value: "42"),
+                URLQueryItem(name: "agent_name", value: "agent-1"),
+            ]
+        )
     }
 }
 

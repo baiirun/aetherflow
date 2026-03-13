@@ -142,6 +142,30 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: "",
 		},
 		{
+			name: "empty-host listen addr normalizes to loopback",
+			cfg: Config{
+				ListenAddr:        ":7070",
+				PollInterval:      time.Second,
+				PoolSize:          1,
+				SpawnCmd:          "cmd",
+				SpawnPolicy:       SpawnPolicyManual,
+				ReconcileInterval: DefaultReconcileInterval,
+			},
+			wantErr: "",
+		},
+		{
+			name: "non-loopback listen addr rejected",
+			cfg: Config{
+				ListenAddr:        "0.0.0.0:7070",
+				PollInterval:      time.Second,
+				PoolSize:          1,
+				SpawnCmd:          "cmd",
+				SpawnPolicy:       SpawnPolicyManual,
+				ReconcileInterval: DefaultReconcileInterval,
+			},
+			wantErr: "not a loopback address",
+		},
+		{
 			name:    "project with slashes",
 			cfg:     Config{Project: "../etc/evil", PollInterval: time.Second, PoolSize: 1, SpawnCmd: "cmd"},
 			wantErr: "invalid characters",
@@ -261,6 +285,9 @@ func TestConfigValidate(t *testing.T) {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
 				}
+				if tt.name == "empty-host listen addr normalizes to loopback" && tt.cfg.ListenAddr != "127.0.0.1:7070" {
+					t.Fatalf("ListenAddr = %q, want %q", tt.cfg.ListenAddr, "127.0.0.1:7070")
+				}
 				return
 			}
 			if err == nil {
@@ -305,6 +332,7 @@ func TestLoadConfigFile(t *testing.T) {
 	path := filepath.Join(dir, ".aetherflow.yaml")
 
 	yaml := `project: from-file
+listen_addr: :7099
 poll_interval: 30s
 pool_size: 5
 spawn_cmd: custom-agent
@@ -324,8 +352,8 @@ prompt_dir: /custom/prompts
 	if cfg.Project != "from-file" {
 		t.Errorf("Project = %q, want %q", cfg.Project, "from-file")
 	}
-	if cfg.ListenAddr != "" {
-		t.Errorf("ListenAddr = %q, want empty (not loaded from config file)", cfg.ListenAddr)
+	if cfg.ListenAddr != ":7099" {
+		t.Errorf("ListenAddr = %q, want %q", cfg.ListenAddr, ":7099")
 	}
 	if cfg.PollInterval != 30*time.Second {
 		t.Errorf("PollInterval = %v, want %v", cfg.PollInterval, 30*time.Second)
@@ -355,6 +383,7 @@ func TestLoadConfigFileFlagOverride(t *testing.T) {
 	path := filepath.Join(dir, ".aetherflow.yaml")
 
 	yaml := `project: from-file
+listen_addr: :7099
 pool_size: 10
 spawn_cmd: file-cmd
 spawn_policy: manual
@@ -365,8 +394,9 @@ spawn_policy: manual
 
 	// Simulate CLI flags by pre-setting some values.
 	cfg := Config{
-		Project:  "from-flag",
-		PoolSize: 7,
+		ListenAddr: "127.0.0.1:9999",
+		Project:    "from-flag",
+		PoolSize:   7,
 	}
 
 	if err := LoadConfigFile(path, &cfg); err != nil {
@@ -379,6 +409,9 @@ spawn_policy: manual
 	}
 	if cfg.PoolSize != 7 {
 		t.Errorf("PoolSize = %d, want %d (flag should override file)", cfg.PoolSize, 7)
+	}
+	if cfg.ListenAddr != "127.0.0.1:9999" {
+		t.Errorf("ListenAddr = %q, want %q (flag should override file)", cfg.ListenAddr, "127.0.0.1:9999")
 	}
 
 	// File values should fill gaps.

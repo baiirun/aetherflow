@@ -10,6 +10,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -97,7 +98,7 @@ func New(cfg Config) *Daemon {
 			State:       protocol.LifecycleStateStopped,
 			Project:     cfg.Project,
 			ServerURL:   cfg.ServerURL,
-			DaemonURL:   "http://" + cfg.ListenAddr,
+			DaemonURL:   daemonURLOrDefault(cfg.ListenAddr),
 			SpawnPolicy: string(cfg.SpawnPolicy.Normalized()),
 		},
 		log: log,
@@ -127,15 +128,6 @@ func (d *Daemon) Run() error {
 	}
 	d.setLifecycleState(protocol.LifecycleStateStarting, "")
 
-	// Check if another daemon is already listening on the same address.
-	conn, err := net.DialTimeout("tcp", d.config.ListenAddr, 200*time.Millisecond)
-	if err == nil {
-		_ = conn.Close()
-		_, port, _ := net.SplitHostPort(d.config.ListenAddr)
-		d.setLifecycleState(protocol.LifecycleStateFailed, fmt.Sprintf("daemon already running on %s", d.config.ListenAddr))
-		return fmt.Errorf("daemon already running on %s (run `lsof -i :%s` to identify the owner, or set listen_addr in .aetherflow.yaml to use a different port)", d.config.ListenAddr, port)
-	}
-
 	// Create HTTP server with the API handler.
 	d.httpServer = &http.Server{
 		Addr:              d.config.ListenAddr,
@@ -150,11 +142,16 @@ func (d *Daemon) Run() error {
 	// background goroutines.
 	listener, err := net.Listen("tcp", d.config.ListenAddr)
 	if err != nil {
+		_, port, _ := net.SplitHostPort(d.config.ListenAddr)
+		if port != "" && isAddrInUse(err) {
+			d.setLifecycleState(protocol.LifecycleStateFailed, fmt.Sprintf("daemon already running on %s", d.config.ListenAddr))
+			return fmt.Errorf("daemon already running on %s (run `lsof -i :%s` to identify the owner, or set listen_addr in .aetherflow.yaml to use a different port)", d.config.ListenAddr, port)
+		}
 		d.setLifecycleState(protocol.LifecycleStateFailed, fmt.Sprintf("failed to listen on %s: %v", d.config.ListenAddr, err))
 		return fmt.Errorf("failed to listen on %s: %w", d.config.ListenAddr, err)
 	}
 
-	daemonURL := fmt.Sprintf("http://%s", d.config.ListenAddr)
+	daemonURL := daemonURLOrDefault(d.config.ListenAddr)
 	d.log.Info("daemon started", "listen_addr", d.config.ListenAddr, "url", daemonURL)
 
 	// Handle shutdown gracefully
@@ -334,11 +331,12 @@ func (d *Daemon) handleShutdown(force bool) *Response {
 	d.log.Info("shutdown requested via API", "force", force)
 
 	life := d.lifecycleStatus()
-	if !force && life.ActiveSessionCount > 0 {
+	activeWorkCount, _ := activeWorkSnapshot(d.pool, d.spawns)
+	if !force && activeWorkCount > 0 {
 		result, _ := json.Marshal(protocol.StopDaemonResult{
 			Outcome: protocol.StopOutcomeRefused,
 			Status:  life,
-			Message: fmt.Sprintf("refusing stop with %d active session(s); retry with --force after confirmation", life.ActiveSessionCount),
+			Message: fmt.Sprintf("refusing stop with %d active workload(s) across %d attached session(s); retry with --force after confirmation", activeWorkCount, life.ActiveSessionCount),
 		})
 		return &Response{Success: true, Result: result}
 	}
@@ -357,6 +355,26 @@ func (d *Daemon) handleShutdown(force bool) *Response {
 		Message: "daemon stopping",
 	})
 	return &Response{Success: true, Result: result}
+}
+
+func daemonURLOrDefault(listenAddr string) string {
+	daemonURL, err := protocol.DaemonURLFromListenAddr(listenAddr)
+	if err != nil {
+		return protocol.DefaultDaemonURL
+	}
+	return daemonURL
+}
+
+func isAddrInUse(err error) bool {
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) {
+		return false
+	}
+	var sysErr *os.SyscallError
+	if !errors.As(opErr.Err, &sysErr) {
+		return false
+	}
+	return errors.Is(sysErr.Err, syscall.EADDRINUSE)
 }
 
 func (d *Daemon) handleStatusAgent(ctx context.Context, params StatusAgentParams) *Response {

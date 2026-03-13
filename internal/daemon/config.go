@@ -24,7 +24,11 @@ func listenAddrFromURL(rawURL string) string {
 	if err != nil {
 		return "127.0.0.1:7070"
 	}
-	return u.Host
+	addr, err := protocol.NormalizeListenAddr(u.Host)
+	if err != nil {
+		return "127.0.0.1:7070"
+	}
+	return addr
 }
 
 const (
@@ -187,10 +191,18 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("listen_addr must not contain leading or trailing whitespace")
 	}
 	if c.ListenAddr != "" {
-		host, _, err := net.SplitHostPort(c.ListenAddr)
-		if err == nil && host != "" && host != "127.0.0.1" && host != "::1" && host != "localhost" {
+		addr, err := protocol.NormalizeListenAddr(c.ListenAddr)
+		if err != nil {
+			return fmt.Errorf("listen_addr must be host:port: %w", err)
+		}
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			return fmt.Errorf("listen_addr must be host:port: %w", err)
+		}
+		if host != "127.0.0.1" && host != "::1" && host != "localhost" {
 			return fmt.Errorf("listen_addr host %q is not a loopback address (only 127.0.0.1, ::1, or localhost are permitted)", host)
 		}
+		c.ListenAddr = addr
 	}
 
 	if c.PollInterval <= 0 {
@@ -285,6 +297,9 @@ func LoadConfigFile(path string, into *Config) error {
 // dst has the zero value. This means CLI flags (set on dst before merge)
 // take priority over file values.
 func mergeConfig(src, dst *Config) {
+	if dst.ListenAddr == "" {
+		dst.ListenAddr = src.ListenAddr
+	}
 	if dst.Project == "" {
 		dst.Project = src.Project
 	}

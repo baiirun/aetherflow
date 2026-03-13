@@ -33,3 +33,35 @@ func TestDaemonURLFor(t *testing.T) {
 		t.Errorf("unexpected hash collision between %q and %q", "myproject", "other-project")
 	}
 }
+
+func TestNormalizeListenAddr(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{in: ":7070", want: "127.0.0.1:7070"},
+		{in: "127.0.0.1:7071", want: "127.0.0.1:7071"},
+		{in: "localhost:7072", want: "localhost:7072"},
+		{in: "[::1]:7073", want: "[::1]:7073"},
+	}
+
+	for _, tt := range tests {
+		got, err := NormalizeListenAddr(tt.in)
+		if err != nil {
+			t.Fatalf("NormalizeListenAddr(%q) error = %v", tt.in, err)
+		}
+		if got != tt.want {
+			t.Fatalf("NormalizeListenAddr(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestDaemonURLFromListenAddr(t *testing.T) {
+	got, err := DaemonURLFromListenAddr(":7070")
+	if err != nil {
+		t.Fatalf("DaemonURLFromListenAddr error = %v", err)
+	}
+	if got != "http://127.0.0.1:7070" {
+		t.Fatalf("DaemonURLFromListenAddr = %q, want %q", got, "http://127.0.0.1:7070")
+	}
+}

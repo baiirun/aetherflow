@@ -24,11 +24,23 @@ function sendEvent(daemonURL: string, params: unknown): void {
       body: JSON.stringify(params),
       signal: AbortSignal.timeout(5000),
     }).catch(() => {
-      // Silently ignore — daemon may be restarting or unreachable.
+      console.warn("[aetherflow-events] event delivery failed")
+      // Daemon may be restarting or unreachable.
       // Events are best-effort; the daemon can backfill from the REST API.
     })
-  } catch {
+  } catch (error) {
+    console.warn("[aetherflow-events] event delivery setup failed", error)
     // Don't crash the agent if the request fails.
+  }
+}
+
+function isLoopbackDaemonURL(rawURL: string): boolean {
+  try {
+    const parsed = new URL(rawURL)
+    if (parsed.protocol !== "http:") return false
+    return parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "::1" || parsed.hostname === "[::1]"
+  } catch {
+    return false
   }
 }
 
@@ -50,6 +62,10 @@ export const AetherflowEvents: Plugin = async () => {
 
   // If not running under aetherflow, return no hooks — completely inert.
   if (!daemonURL) return {}
+  if (!isLoopbackDaemonURL(daemonURL)) {
+    console.warn("[aetherflow-events] ignoring non-loopback AETHERFLOW_URL")
+    return {}
+  }
 
   return {
     event: async ({ event }) => {
