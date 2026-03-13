@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/baiirun/aetherflow/internal/protocol"
@@ -36,6 +38,38 @@ func TestStopDaemonPreservesRefusedOutcome(t *testing.T) {
 	}
 	if refused.Result.Outcome != protocol.StopOutcomeRefused {
 		t.Fatalf("Outcome = %q, want %q", refused.Result.Outcome, protocol.StopOutcomeRefused)
+	}
+}
+
+func TestClientSendsDaemonAuthTokenWhenPresent(t *testing.T) {
+	var gotToken string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotToken = r.Header.Get("X-Aetherflow-Token")
+		_ = json.NewEncoder(w).Encode(Response{
+			Success: true,
+			Result:  mustMarshal(t, protocol.DaemonLifecycleStatus{}),
+		})
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path, err := authTokenPath(server.URL)
+	if err != nil {
+		t.Fatalf("authTokenPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("secret-token\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if _, err := New(server.URL).DaemonLifecycle(); err != nil {
+		t.Fatalf("DaemonLifecycle: %v", err)
+	}
+	if gotToken != "secret-token" {
+		t.Fatalf("X-Aetherflow-Token = %q, want %q", gotToken, "secret-token")
 	}
 }
 

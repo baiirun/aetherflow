@@ -10,6 +10,8 @@ actor RecordingDaemonController: DaemonControlling {
     private var detailResults: [Result<DaemonAgentDetailPayload, Error>]
     private var eventResults: [Result<DaemonEventsPayload, Error>]
     private(set) var eventAfterTimestamps: [Int64] = []
+    private(set) var detailAgentNames: [String] = []
+    private(set) var eventAgentNames: [String] = []
 
     init(
         statusResults: [Result<DaemonStatusPayload, Error>],
@@ -30,11 +32,13 @@ actor RecordingDaemonController: DaemonControlling {
     }
 
     func fetchAgentDetail(daemonURL: String, agentName: String, limit: Int) async throws -> DaemonAgentDetailPayload {
-        try nextResult(from: &detailResults).get()
+        detailAgentNames.append(agentName)
+        return try nextResult(from: &detailResults).get()
     }
 
     func fetchEvents(daemonURL: String, agentName: String, afterTimestamp: Int64) async throws -> DaemonEventsPayload {
         eventAfterTimestamps.append(afterTimestamp)
+        eventAgentNames.append(agentName)
         return try nextResult(from: &eventResults).get()
     }
 
@@ -48,6 +52,14 @@ actor RecordingDaemonController: DaemonControlling {
 
     func recordedEventAfterTimestamps() -> [Int64] {
         eventAfterTimestamps
+    }
+
+    func recordedDetailAgentNames() -> [String] {
+        detailAgentNames
+    }
+
+    func recordedEventAgentNames() -> [String] {
+        eventAgentNames
     }
 
     private func nextResult<T>(from results: inout [Result<T, Error>]) -> Result<T, Error> {
@@ -122,6 +134,43 @@ final class MonitoringStoreTests: XCTestCase {
         XCTAssertEqual(eventAfterTimestamps, [0, 0])
     }
 
+    func testSelectingDifferentWorkloadReloadsDetailForThatSelection() async throws {
+        let bootstrap = Self.bootstrap
+        let controller = RecordingDaemonController(
+            statusResults: [
+                .success(Self.statusWithAgentAndSpawn()),
+                .success(Self.statusWithAgentAndSpawn()),
+            ],
+            detailResults: [
+                .success(Self.detail(agentID: "agent-1", workRef: "ts-c9cdd2", sessionID: "ses-1")),
+                .success(Self.detail(agentID: "spawn-1", workRef: "manual-spawn", sessionID: "ses-2")),
+            ],
+            eventResults: [
+                .success(Self.events(lines: ["session.created"], sessionID: "ses-1", workRef: "ts-c9cdd2", agentID: "agent-1", lastTS: 101)),
+                .success(Self.events(lines: ["spawn.created"], sessionID: "ses-2", workRef: "manual-spawn", agentID: "spawn-1", lastTS: 202)),
+            ]
+        )
+        let store = MonitoringStore(
+            context: bootstrap,
+            controller: controller,
+            isDaemonAbsent: { _ in false },
+            autoStartMonitoring: false
+        )
+
+        await store.refresh()
+        store.selectWorkload(id: "spawn-1")
+        await store.refresh()
+
+        XCTAssertEqual(store.snapshot.selectedWorkloadID, "spawn-1")
+        XCTAssertEqual(store.snapshot.selectedDetail?.workloadID, "spawn-1")
+        XCTAssertEqual(store.snapshot.selectedDetail?.session.sessionID, "ses-2")
+
+        let detailAgentNames = await controller.recordedDetailAgentNames()
+        let eventAgentNames = await controller.recordedEventAgentNames()
+        XCTAssertEqual(detailAgentNames, ["agent-1", "spawn-1"])
+        XCTAssertEqual(eventAgentNames, ["agent-1", "spawn-1"])
+    }
+
     private static var bootstrap: ShellBootstrapContext {
         ShellBootstrapContext(
             projectName: "aetherflow",
@@ -161,17 +210,62 @@ final class MonitoringStoreTests: XCTestCase {
         )
     }
 
-    private static func detail() -> DaemonAgentDetailPayload {
+    private static func statusWithAgentAndSpawn() -> DaemonStatusPayload {
+        DaemonStatusPayload(
+            poolSize: 1,
+            poolMode: "active",
+            project: "aetherflow",
+            spawnPolicy: "manual",
+            agents: [
+                DaemonAgentStatusPayload(
+                    id: "agent-1",
+                    taskID: "ts-c9cdd2",
+                    role: "worker",
+                    pid: 42,
+                    spawnTime: .now,
+                    taskTitle: "Implement HTTP transport",
+                    lastLog: "working",
+                    sessionID: "ses-1",
+                    state: "running",
+                    lifecycleState: "running",
+                    lastActivityAt: .now,
+                    attentionNeeded: false
+                )
+            ],
+            spawns: [
+                DaemonSpawnStatusPayload(
+                    spawnID: "spawn-1",
+                    pid: 99,
+                    sessionID: "ses-2",
+                    state: "running",
+                    lifecycleState: "running",
+                    lastActivityAt: .now,
+                    attentionNeeded: false,
+                    prompt: "Manual validation run",
+                    spawnTime: .now,
+                    exitedAt: nil
+                )
+            ],
+            queue: [],
+            errors: []
+        )
+    }
+
+    private static func detail(
+        agentID: String = "agent-1",
+        workRef: String = "ts-c9cdd2",
+        sessionID: String = "ses-1"
+    ) -> DaemonAgentDetailPayload {
         DaemonAgentDetailPayload(
             agent: DaemonAgentStatusPayload(
-                id: "agent-1",
-                taskID: "ts-c9cdd2",
-                role: "worker",
+                id: agentID,
+                taskID: workRef,
+                role: agentID == "spawn-1" ? "spawn" : "worker",
                 pid: 42,
                 spawnTime: .now,
-                taskTitle: "Implement HTTP transport",
+                taskTitle: workRef == "manual-spawn" ? "Manual validation run" : "Implement HTTP transport",
                 lastLog: "working",
-                sessionID: "ses-1",
+                sessionID: sessionID,
                 state: "running",
                 lifecycleState: "running",
                 lastActivityAt: .now,
@@ -179,12 +273,12 @@ final class MonitoringStoreTests: XCTestCase {
             ),
             session: DaemonSessionMetadataPayload(
                 serverRef: "http://127.0.0.1:4096",
-                sessionID: "ses-1",
+                sessionID: sessionID,
                 directory: "/tmp/aetherflow",
                 project: "aetherflow",
-                originType: "pool",
-                workRef: "ts-c9cdd2",
-                agentID: "agent-1",
+                originType: agentID == "spawn-1" ? "spawn" : "pool",
+                workRef: workRef,
+                agentID: agentID,
                 status: "active",
                 createdAt: .now,
                 lastSeenAt: .now,
@@ -196,18 +290,24 @@ final class MonitoringStoreTests: XCTestCase {
         )
     }
 
-    private static func events(lines: [String], lastTS: Int64) -> DaemonEventsPayload {
+    private static func events(
+        lines: [String],
+        sessionID: String = "ses-1",
+        workRef: String = "ts-c9cdd2",
+        agentID: String = "agent-1",
+        lastTS: Int64
+    ) -> DaemonEventsPayload {
         DaemonEventsPayload(
             lines: lines,
-            sessionID: "ses-1",
+            sessionID: sessionID,
             session: DaemonSessionMetadataPayload(
                 serverRef: "http://127.0.0.1:4096",
-                sessionID: "ses-1",
+                sessionID: sessionID,
                 directory: "/tmp/aetherflow",
                 project: "aetherflow",
-                originType: "pool",
-                workRef: "ts-c9cdd2",
-                agentID: "agent-1",
+                originType: agentID == "spawn-1" ? "spawn" : "pool",
+                workRef: workRef,
+                agentID: agentID,
                 status: "active",
                 createdAt: .now,
                 lastSeenAt: .now,

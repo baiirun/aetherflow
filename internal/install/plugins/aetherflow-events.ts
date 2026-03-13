@@ -7,6 +7,7 @@ import type { Plugin } from "@opencode-ai/plugin"
 // on the opencode serve process:
 //
 //   AETHERFLOW_URL  - daemon HTTP URL (absent = plugin is inert)
+//   AETHERFLOW_AUTH_TOKEN - daemon API token for local authorization
 //
 // The plugin is a dumb pipe: it forwards every event without filtering.
 // The daemon decides what to keep, index, and expose. Events are keyed
@@ -15,12 +16,16 @@ import type { Plugin } from "@opencode-ai/plugin"
 // Send a fire-and-forget POST to the daemon's HTTP API.
 // Does not wait for the response — we don't want to block agent execution
 // if the daemon is slow or unreachable.
-function sendEvent(daemonURL: string, params: unknown): void {
+function sendEvent(daemonURL: string, authToken: string | undefined, params: unknown): void {
   try {
     const url = `${daemonURL}/api/v1/events`
+    const headers: Record<string, string> = { "Content-Type": "application/json" }
+    if (authToken) {
+      headers["X-Aetherflow-Token"] = authToken
+    }
     fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(params),
       signal: AbortSignal.timeout(5000),
     }).catch(() => {
@@ -59,6 +64,7 @@ function extractSessionID(properties: any): string | undefined {
 
 export const AetherflowEvents: Plugin = async () => {
   const daemonURL = process.env.AETHERFLOW_URL
+  const authToken = process.env.AETHERFLOW_AUTH_TOKEN
 
   // If not running under aetherflow, return no hooks — completely inert.
   if (!daemonURL) return {}
@@ -72,7 +78,7 @@ export const AetherflowEvents: Plugin = async () => {
       const sessionId = extractSessionID(event.properties)
       if (!sessionId) return // Skip events without a session ID
 
-      sendEvent(daemonURL, {
+      sendEvent(daemonURL, authToken, {
         event_type: event.type,
         session_id: sessionId,
         timestamp: Date.now(),

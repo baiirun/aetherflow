@@ -41,14 +41,54 @@ func TestHTTPStatusAgentRejectsInvalidLimit(t *testing.T) {
 		ReconcileInterval: DefaultReconcileInterval,
 	}
 	d := New(cfg)
+	d.authToken = "test-token"
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/status/agents/ghost?limit=-1", nil)
-	req.SetPathValue("id", "ghost")
+	req.Host = "127.0.0.1:7070"
+	req.Header.Set(daemonAuthHeader, d.authToken)
 	rec := httptest.NewRecorder()
-	d.httpStatusAgent(rec, req)
+	d.newHTTPHandler().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHTTPHandlerRoutesLifecycleByPath(t *testing.T) {
+	cfg := Config{
+		ListenAddr:        "127.0.0.1:7070",
+		Project:           "test",
+		PollInterval:      time.Second,
+		PoolSize:          1,
+		SpawnCmd:          "echo test",
+		SpawnPolicy:       SpawnPolicyManual,
+		ReconcileInterval: DefaultReconcileInterval,
+	}
+	d := New(cfg)
+	d.authToken = "test-token"
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/lifecycle", nil)
+	req.Host = "127.0.0.1:7070"
+	req.Header.Set(daemonAuthHeader, d.authToken)
+	rec := httptest.NewRecorder()
+	d.newHTTPHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+func TestAuthTokenMiddlewareRejectsMissingToken(t *testing.T) {
+	handler := authTokenMiddleware("secret", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 }
 

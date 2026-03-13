@@ -535,7 +535,8 @@ struct DefaultDaemonController: DaemonControlling, Sendable {
         guard let url = URL(string: daemonURL + "/api/v1/lifecycle") else {
             throw DaemonControlError.connectionFailed("invalid daemon URL: \(daemonURL)")
         }
-        let (data, response) = try await session.data(from: url)
+        let request = try Self.authorizedRequest(url: url)
+        let (data, response) = try await session.data(for: request)
         return try decodeEnvelope(data, response: response)
     }
 
@@ -543,7 +544,8 @@ struct DefaultDaemonController: DaemonControlling, Sendable {
         guard let url = URL(string: daemonURL + "/api/v1/status") else {
             throw DaemonControlError.connectionFailed("invalid daemon URL: \(daemonURL)")
         }
-        let (data, response) = try await session.data(from: url)
+        let request = try Self.authorizedRequest(url: url)
+        let (data, response) = try await session.data(for: request)
         return try decodeEnvelope(data, response: response)
     }
 
@@ -557,7 +559,8 @@ struct DefaultDaemonController: DaemonControlling, Sendable {
         guard let url = components.url else {
             throw DaemonControlError.connectionFailed("invalid daemon URL: \(daemonURL)")
         }
-        let (data, response) = try await session.data(from: url)
+        let request = try Self.authorizedRequest(url: url)
+        let (data, response) = try await session.data(for: request)
         return try decodeEnvelope(data, response: response)
     }
 
@@ -573,7 +576,8 @@ struct DefaultDaemonController: DaemonControlling, Sendable {
         guard let url = components.url else {
             throw DaemonControlError.connectionFailed("invalid daemon URL: \(daemonURL)")
         }
-        let (data, response) = try await session.data(from: url)
+        let request = try Self.authorizedRequest(url: url)
+        let (data, response) = try await session.data(for: request)
         return try decodeEnvelope(data, response: response)
     }
 
@@ -582,7 +586,7 @@ struct DefaultDaemonController: DaemonControlling, Sendable {
         guard let url = URL(string: urlString) else {
             throw DaemonControlError.connectionFailed("invalid daemon URL: \(daemonURL)")
         }
-        var request = URLRequest(url: url)
+        var request = try Self.authorizedRequest(url: url)
         request.httpMethod = "POST"
         let (data, response) = try await session.data(for: request)
         return try decodeEnvelope(data, response: response)
@@ -702,6 +706,43 @@ struct DefaultDaemonController: DaemonControlling, Sendable {
         configuration.timeoutIntervalForRequest = 5
         configuration.timeoutIntervalForResource = 10
         return URLSession(configuration: configuration)
+    }
+
+    private static func authorizedRequest(url: URL) throws -> URLRequest {
+        var request = URLRequest(url: url)
+        if let token = daemonAuthToken(for: url) {
+            request.setValue(token, forHTTPHeaderField: "X-Aetherflow-Token")
+        }
+        return request
+    }
+
+    private static func daemonAuthToken(for url: URL) -> String? {
+        guard let path = daemonAuthTokenPath(for: url),
+              let data = FileManager.default.contents(atPath: path) else {
+            return nil
+        }
+        let token = String(decoding: data, as: UTF8.self).trimmed
+        return token.isEmpty ? nil : token
+    }
+
+    private static func daemonAuthTokenPath(for url: URL) -> String? {
+        let host = normalizedAuthHost(url.host ?? "127.0.0.1")
+        guard let port = url.port else {
+            return nil
+        }
+        let configRoot = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config", isDirectory: true)
+            .appendingPathComponent("aetherflow", isDirectory: true)
+            .appendingPathComponent("auth", isDirectory: true)
+        return configRoot.appendingPathComponent("\(host)_\(port).token").path
+    }
+
+    private static func normalizedAuthHost(_ host: String) -> String {
+        host
+            .lowercased()
+            .replacingOccurrences(of: ":", with: "_")
+            .replacingOccurrences(of: "[", with: "")
+            .replacingOccurrences(of: "]", with: "")
     }
 }
 

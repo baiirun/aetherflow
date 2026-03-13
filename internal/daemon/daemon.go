@@ -41,6 +41,7 @@ type Daemon struct {
 	events       *EventBuffer
 	server       *exec.Cmd
 	serverMu     sync.Mutex
+	authToken    string
 	shutdown     chan struct{}
 	shutdownOnce sync.Once
 	lifeMu       sync.RWMutex
@@ -128,6 +129,14 @@ func (d *Daemon) Run() error {
 	}
 	d.setLifecycleState(protocol.LifecycleStateStarting, "")
 
+	daemonURL := daemonURLOrDefault(d.config.ListenAddr)
+	authToken, err := ensureDaemonAuthToken(daemonURL)
+	if err != nil {
+		d.setLifecycleState(protocol.LifecycleStateFailed, err.Error())
+		return err
+	}
+	d.authToken = authToken
+
 	// Create HTTP server with the API handler.
 	d.httpServer = &http.Server{
 		Addr:              d.config.ListenAddr,
@@ -151,7 +160,6 @@ func (d *Daemon) Run() error {
 		return fmt.Errorf("failed to listen on %s: %w", d.config.ListenAddr, err)
 	}
 
-	daemonURL := daemonURLOrDefault(d.config.ListenAddr)
 	d.log.Info("daemon started", "listen_addr", d.config.ListenAddr, "url", daemonURL)
 
 	// Handle shutdown gracefully
@@ -160,6 +168,7 @@ func (d *Daemon) Run() error {
 
 	serverEnv := []string{
 		"AETHERFLOW_URL=" + daemonURL,
+		"AETHERFLOW_AUTH_TOKEN=" + authToken,
 	}
 	startServer := d.config.ServerStarter
 	if startServer == nil {
@@ -256,7 +265,7 @@ func (d *Daemon) Run() error {
 }
 
 func (d *Daemon) superviseServer(ctx context.Context) {
-	daemonURL := fmt.Sprintf("http://%s", d.config.ListenAddr)
+	daemonURL := daemonURLOrDefault(d.config.ListenAddr)
 
 	for {
 		d.serverMu.Lock()
@@ -277,6 +286,7 @@ func (d *Daemon) superviseServer(ctx context.Context) {
 		time.Sleep(500 * time.Millisecond)
 		restartEnv := []string{
 			"AETHERFLOW_URL=" + daemonURL,
+			"AETHERFLOW_AUTH_TOKEN=" + d.authToken,
 		}
 		restarted, startErr := StartManagedServer(ctx, d.config.ServerURL, restartEnv, func(msg string, args ...any) {
 			d.log.Info(msg, args...)

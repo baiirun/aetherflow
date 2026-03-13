@@ -8,6 +8,7 @@ enum SceneID {
 struct AetherflowControlCenterApp: App {
     @StateObject private var transportStore: TransportStore
     @StateObject private var lifecycleStore: DaemonLifecycleStore
+    @StateObject private var monitoringStore: MonitoringStore
     @StateObject private var navigationStore: NavigationStore
 
     init() {
@@ -15,6 +16,7 @@ struct AetherflowControlCenterApp: App {
         let transportStore = TransportStore(context: bootstrap)
         _transportStore = StateObject(wrappedValue: transportStore)
         _lifecycleStore = StateObject(wrappedValue: DaemonLifecycleStore(context: bootstrap, transportStore: transportStore))
+        _monitoringStore = StateObject(wrappedValue: MonitoringStore(context: bootstrap))
         _navigationStore = StateObject(wrappedValue: NavigationStore())
     }
 
@@ -23,6 +25,7 @@ struct AetherflowControlCenterApp: App {
             ControlCenterRootView()
                 .environmentObject(transportStore)
                 .environmentObject(lifecycleStore)
+                .environmentObject(monitoringStore)
                 .environmentObject(navigationStore)
         }
         .defaultSize(width: 1480, height: 920)
@@ -31,6 +34,7 @@ struct AetherflowControlCenterApp: App {
             MenuBarControlCenterView(windowID: SceneID.controlCenter)
                 .environmentObject(transportStore)
                 .environmentObject(lifecycleStore)
+                .environmentObject(monitoringStore)
                 .environmentObject(navigationStore)
         }
         .menuBarExtraStyle(.window)

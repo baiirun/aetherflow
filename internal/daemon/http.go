@@ -1,10 +1,12 @@
 package daemon
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -14,40 +16,45 @@ import (
 func (d *Daemon) newHTTPHandler() http.Handler {
 	mux := http.NewServeMux()
 
-	// POST /api/v1/events — plugin event ingestion (was session.event)
-	mux.HandleFunc("POST /api/v1/events", d.httpSessionEvent)
+	mux.HandleFunc("/api/v1/events", d.routeEvents)
+	mux.HandleFunc("/api/v1/lifecycle", d.methodHandler(http.MethodGet, d.httpLifecycle))
+	mux.HandleFunc("/api/v1/status", d.methodHandler(http.MethodGet, d.httpStatusFull))
+	mux.HandleFunc("/api/v1/status/agents/", d.methodHandler(http.MethodGet, d.httpStatusAgent))
+	mux.HandleFunc("/api/v1/pool/drain", d.methodHandler(http.MethodPost, d.httpPoolDrain))
+	mux.HandleFunc("/api/v1/pool/pause", d.methodHandler(http.MethodPost, d.httpPoolPause))
+	mux.HandleFunc("/api/v1/pool/resume", d.methodHandler(http.MethodPost, d.httpPoolResume))
+	mux.HandleFunc("/api/v1/spawns", d.methodHandler(http.MethodPost, d.httpSpawnRegister))
+	mux.HandleFunc("/api/v1/spawns/", d.methodHandler(http.MethodDelete, d.httpSpawnDeregister))
+	mux.HandleFunc("/api/v1/shutdown", d.methodHandler(http.MethodPost, d.httpShutdown))
 
-	// GET /api/v1/events — list events for an agent (was events.list)
-	mux.HandleFunc("GET /api/v1/events", d.httpEventsList)
+	return hostCheckMiddleware(browserBoundaryMiddleware(authTokenMiddleware(d.authToken, mux)))
+}
 
-	// GET /api/v1/lifecycle — daemon lifecycle state
-	mux.HandleFunc("GET /api/v1/lifecycle", d.httpLifecycle)
+func (d *Daemon) routeEvents(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		d.httpEventsList(w, r)
+	case http.MethodPost:
+		d.httpSessionEvent(w, r)
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, &Response{
+			Success: false,
+			Error:   fmt.Sprintf("method %s not allowed", r.Method),
+		})
+	}
+}
 
-	// GET /api/v1/status — full swarm status (was status.full)
-	mux.HandleFunc("GET /api/v1/status", d.httpStatusFull)
-
-	// GET /api/v1/status/agents/{id} — single agent detail (was status.agent)
-	mux.HandleFunc("GET /api/v1/status/agents/{id}", d.httpStatusAgent)
-
-	// POST /api/v1/pool/drain — drain the pool (was pool.drain)
-	mux.HandleFunc("POST /api/v1/pool/drain", d.httpPoolDrain)
-
-	// POST /api/v1/pool/pause — pause the pool (was pool.pause)
-	mux.HandleFunc("POST /api/v1/pool/pause", d.httpPoolPause)
-
-	// POST /api/v1/pool/resume — resume the pool (was pool.resume)
-	mux.HandleFunc("POST /api/v1/pool/resume", d.httpPoolResume)
-
-	// POST /api/v1/spawns — register a spawn (was spawn.register)
-	mux.HandleFunc("POST /api/v1/spawns", d.httpSpawnRegister)
-
-	// DELETE /api/v1/spawns/{id} — deregister a spawn (was spawn.deregister)
-	mux.HandleFunc("DELETE /api/v1/spawns/{id}", d.httpSpawnDeregister)
-
-	// POST /api/v1/shutdown — shut down the daemon (was shutdown)
-	mux.HandleFunc("POST /api/v1/shutdown", d.httpShutdown)
-
-	return hostCheckMiddleware(browserBoundaryMiddleware(mux))
+func (d *Daemon) methodHandler(method string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != method {
+			writeJSON(w, http.StatusMethodNotAllowed, &Response{
+				Success: false,
+				Error:   fmt.Sprintf("method %s not allowed", r.Method),
+			})
+			return
+		}
+		next(w, r)
+	}
 }
 
 // hostCheckMiddleware rejects requests whose Host header is not a loopback
@@ -81,6 +88,27 @@ func browserBoundaryMiddleware(next http.Handler) http.Handler {
 			writeJSON(w, http.StatusForbidden, &Response{
 				Success: false,
 				Error:   "forbidden: browser-originated requests are not allowed",
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func authTokenMiddleware(expectedToken string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if expectedToken == "" {
+			writeJSON(w, http.StatusServiceUnavailable, &Response{
+				Success: false,
+				Error:   "daemon auth token is unavailable",
+			})
+			return
+		}
+		presented := r.Header.Get(daemonAuthHeader)
+		if subtle.ConstantTimeCompare([]byte(presented), []byte(expectedToken)) != 1 {
+			writeJSON(w, http.StatusUnauthorized, &Response{
+				Success: false,
+				Error:   "missing or invalid daemon auth token",
 			})
 			return
 		}
@@ -159,7 +187,11 @@ func (d *Daemon) httpStatusFull(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) httpStatusAgent(w http.ResponseWriter, r *http.Request) {
-	agentID := r.PathValue("id")
+	agentID := strings.TrimPrefix(r.URL.Path, "/api/v1/status/agents/")
+	agentID = strings.Trim(agentID, "/")
+	if decoded, err := url.PathUnescape(agentID); err == nil {
+		agentID = decoded
+	}
 	if agentID == "" {
 		writeJSON(w, http.StatusBadRequest, &Response{
 			Success: false,
@@ -205,7 +237,11 @@ func (d *Daemon) httpSpawnRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) httpSpawnDeregister(w http.ResponseWriter, r *http.Request) {
-	spawnID := r.PathValue("id")
+	spawnID := strings.TrimPrefix(r.URL.Path, "/api/v1/spawns/")
+	spawnID = strings.Trim(spawnID, "/")
+	if decoded, err := url.PathUnescape(spawnID); err == nil {
+		spawnID = decoded
+	}
 	if spawnID == "" {
 		writeJSON(w, http.StatusBadRequest, &Response{
 			Success: false,
