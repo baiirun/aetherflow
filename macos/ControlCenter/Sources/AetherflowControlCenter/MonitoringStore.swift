@@ -223,15 +223,8 @@ final class MonitoringStore: ObservableObject {
             afterTimestamp: afterTimestamp
         )
 
-        let lines: [String]
-        let lastEventTimestamp: Int64
-        if previous == nil {
-            lines = events.lines
-            lastEventTimestamp = events.lastTS
-        } else {
-            lines = previous!.eventLines + events.lines
-            lastEventTimestamp = max(previous!.lastEventTimestamp, events.lastTS)
-        }
+        let lines = (previous?.eventLines ?? []) + events.lines
+        let lastEventTimestamp = max(previous?.lastEventTimestamp ?? 0, events.lastTS)
 
         return MonitoringSelectionDetail(
             workloadID: workloadID,
@@ -304,31 +297,29 @@ final class MonitoringStore: ObservableObject {
         incoming: [MonitoringWorkloadSummary],
         previous: [MonitoringWorkloadSummary]
     ) -> [MonitoringWorkloadSummary] {
-        let previousIndexes = Dictionary(uniqueKeysWithValues: previous.enumerated().map { ($1.id, $0) })
+        let incomingByID = Dictionary(uniqueKeysWithValues: incoming.map { ($0.id, $0) })
+        let retained = previous.compactMap { incomingByID[$0.id] }
+        let retainedIDs = Set(retained.map(\.id))
+        let appended = incoming
+            .filter { !retainedIDs.contains($0.id) }
+            .sorted(by: compareNewWorkloads)
+        return retained + appended
+    }
 
-        return incoming.sorted { lhs, rhs in
-            let lhsIndex = previousIndexes[lhs.id]
-            let rhsIndex = previousIndexes[rhs.id]
-            switch (lhsIndex, rhsIndex) {
-            case let (lhsIndex?, rhsIndex?):
-                return lhsIndex < rhsIndex
-            case (.some, nil):
-                return true
-            case (nil, .some):
-                return false
-            case (nil, nil):
-                if lhs.attentionNeeded != rhs.attentionNeeded {
-                    return lhs.attentionNeeded && !rhs.attentionNeeded
-                }
-                if lhs.kind != rhs.kind {
-                    return lhs.kind == .poolAgent
-                }
-                if lhs.spawnedAt != rhs.spawnedAt {
-                    return lhs.spawnedAt > rhs.spawnedAt
-                }
-                return lhs.id.localizedStandardCompare(rhs.id) == .orderedAscending
-            }
+    private func compareNewWorkloads(
+        _ lhs: MonitoringWorkloadSummary,
+        _ rhs: MonitoringWorkloadSummary
+    ) -> Bool {
+        if lhs.attentionNeeded != rhs.attentionNeeded {
+            return lhs.attentionNeeded && !rhs.attentionNeeded
         }
+        if lhs.kind != rhs.kind {
+            return lhs.kind == .poolAgent
+        }
+        if lhs.spawnedAt != rhs.spawnedAt {
+            return lhs.spawnedAt > rhs.spawnedAt
+        }
+        return lhs.id.localizedStandardCompare(rhs.id) == .orderedAscending
     }
 
     private func resolvedSelectionID(workloads: [MonitoringWorkloadSummary]) -> String? {

@@ -234,6 +234,34 @@ final class MonitoringStoreTests: XCTestCase {
         XCTAssertEqual(store.snapshot.workloads.map(\.id), ["agent-1", "spawn-1", "agent-2"])
     }
 
+    func testRefreshOrdersNewWorkloadsByAttentionKindSpawnTimeAndID() async throws {
+        let bootstrap = Self.bootstrap
+        let controller = RecordingDaemonController(
+            statusResults: [
+                .success(Self.statusForNewWorkloadOrdering()),
+            ],
+            detailResults: [
+                .success(Self.detail(agentID: "agent-attn", workRef: "ts-attn", sessionID: "ses-attn")),
+            ],
+            eventResults: [
+                .success(Self.events(lines: ["session.created"], sessionID: "ses-attn", workRef: "ts-attn", agentID: "agent-attn", lastTS: 101)),
+            ]
+        )
+        let store = MonitoringStore(
+            context: bootstrap,
+            controller: controller,
+            isDaemonAbsent: { _ in false },
+            autoStartMonitoring: false
+        )
+
+        await store.refresh()
+
+        XCTAssertEqual(
+            store.snapshot.workloads.map(\.id),
+            ["agent-attn", "agent-newer", "agent-older", "spawn-a", "spawn-b"]
+        )
+    }
+
     private static var bootstrap: ShellBootstrapContext {
         ShellBootstrapContext(
             projectName: "aetherflow",
@@ -365,6 +393,89 @@ final class MonitoringStoreTests: XCTestCase {
                     attentionNeeded: false,
                     prompt: "Manual validation run",
                     spawnTime: .now,
+                    exitedAt: nil
+                )
+            ],
+            queue: [],
+            errors: []
+        )
+    }
+
+    private static func statusForNewWorkloadOrdering() -> DaemonStatusPayload {
+        let baseTime = Date(timeIntervalSince1970: 1_700_000_000)
+
+        return DaemonStatusPayload(
+            poolSize: 3,
+            poolMode: "active",
+            project: "aetherflow",
+            spawnPolicy: "manual",
+            agents: [
+                DaemonAgentStatusPayload(
+                    id: "agent-attn",
+                    taskID: "ts-attn",
+                    role: "worker",
+                    pid: 0,
+                    spawnTime: baseTime.addingTimeInterval(-300),
+                    taskTitle: "Needs attention",
+                    lastLog: "waiting for reconnect",
+                    sessionID: "ses-attn",
+                    state: "pending",
+                    lifecycleState: "starting",
+                    lastActivityAt: nil,
+                    attentionNeeded: true
+                ),
+                DaemonAgentStatusPayload(
+                    id: "agent-newer",
+                    taskID: "ts-newer",
+                    role: "worker",
+                    pid: 41,
+                    spawnTime: baseTime.addingTimeInterval(-60),
+                    taskTitle: "Newest agent",
+                    lastLog: "running",
+                    sessionID: "ses-newer",
+                    state: "running",
+                    lifecycleState: "running",
+                    lastActivityAt: baseTime,
+                    attentionNeeded: false
+                ),
+                DaemonAgentStatusPayload(
+                    id: "agent-older",
+                    taskID: "ts-older",
+                    role: "worker",
+                    pid: 40,
+                    spawnTime: baseTime.addingTimeInterval(-120),
+                    taskTitle: "Older agent",
+                    lastLog: "running",
+                    sessionID: "ses-older",
+                    state: "running",
+                    lifecycleState: "running",
+                    lastActivityAt: baseTime.addingTimeInterval(-10),
+                    attentionNeeded: false
+                ),
+            ],
+            spawns: [
+                DaemonSpawnStatusPayload(
+                    spawnID: "spawn-b",
+                    pid: 51,
+                    sessionID: "ses-spawn-b",
+                    state: "running",
+                    lifecycleState: "running",
+                    lastActivityAt: baseTime,
+                    attentionNeeded: false,
+                    prompt: "Spawn B",
+                    spawnTime: baseTime.addingTimeInterval(-180),
+                    exitedAt: nil
+                ),
+                DaemonSpawnStatusPayload(
+                    spawnID: "spawn-a",
+                    pid: 50,
+                    sessionID: "ses-spawn-a",
+                    state: "running",
+                    lifecycleState: "running",
+                    lastActivityAt: baseTime,
+                    attentionNeeded: false,
+                    prompt: "Spawn A",
+                    spawnTime: baseTime.addingTimeInterval(-180),
                     exitedAt: nil
                 )
             ],

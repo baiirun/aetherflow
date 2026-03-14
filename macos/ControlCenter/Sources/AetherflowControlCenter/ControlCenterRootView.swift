@@ -523,8 +523,9 @@ private struct DetailHighlightsPanel: View {
         switch section {
         case .sessions:
             if let detail = monitoring.selectedDetail {
+                let pidLabel = detail.agent.pid > 0 ? String(detail.agent.pid) : "pending"
                 return [
-                    "Selected workload: \(detail.workloadID) on pid \(detail.agent.pid).",
+                    "Selected workload: \(detail.workloadID) on pid \(pidLabel).",
                     "Session route: \(detail.session.serverRef.nonEmptyValue ?? "pending server") / \(detail.session.sessionID.nonEmptyValue ?? "pending session").",
                     "Task lane: \(detail.agent.taskID.nonEmptyValue ?? detail.session.workRef.nonEmptyValue ?? "manual spawn"). Lifecycle: \(detail.agent.lifecycleState.nonEmptyValue ?? detail.agent.state.nonEmptyValue ?? "unknown").",
                     "Recent tool calls: \(detail.toolCalls.count). Event lines cached: \(detail.eventLines.count).",
