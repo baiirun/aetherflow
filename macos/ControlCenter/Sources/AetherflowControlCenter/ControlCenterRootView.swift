@@ -453,7 +453,8 @@ private struct DetailColumn: View {
     private var headerTitle: String {
         switch selectedSection {
         case .sessions:
-            return monitoring.selectedDetail?.session.workRef.nonEmptyValue
+            return monitoring.selectedDetail?.agent.taskTitle.nonEmptyValue
+                ?? monitoring.selectedDetail?.session.workRef.nonEmptyValue
                 ?? monitoring.selectedDetail?.workloadID
                 ?? "Live session monitor"
         case .queue:
@@ -466,9 +467,12 @@ private struct DetailColumn: View {
     private var headerSummary: String {
         switch selectedSection {
         case .sessions:
-            return monitoring.selectedDetail?.session.sessionID.nonEmptyValue.map {
-                "Showing live status, tool activity, and recent events for \($0)."
-            } ?? monitoring.note
+            if let detail = monitoring.selectedDetail {
+                let sessionRoute = detail.session.sessionID.nonEmptyValue ?? "pending session"
+                let lifecycle = detail.agent.lifecycleState.nonEmptyValue ?? detail.session.status.nonEmptyValue ?? "unknown"
+                return "Showing live status, tool activity, and recent events for \(sessionRoute) in \(lifecycle) state."
+            }
+            return monitoring.note
         case .queue:
             return monitoring.queue.isEmpty ? monitoring.note : "The queue lane mirrors the daemon's waiting work without leaving the monitoring shell."
         case .overview, .diagnostics:
@@ -519,9 +523,11 @@ private struct DetailHighlightsPanel: View {
         switch section {
         case .sessions:
             if let detail = monitoring.selectedDetail {
+                let pidLabel = detail.agent.pid > 0 ? String(detail.agent.pid) : "pending"
                 return [
-                    "Selected workload: \(detail.workloadID).",
+                    "Selected workload: \(detail.workloadID) on pid \(pidLabel).",
                     "Session route: \(detail.session.serverRef.nonEmptyValue ?? "pending server") / \(detail.session.sessionID.nonEmptyValue ?? "pending session").",
+                    "Task lane: \(detail.agent.taskID.nonEmptyValue ?? detail.session.workRef.nonEmptyValue ?? "manual spawn"). Lifecycle: \(detail.agent.lifecycleState.nonEmptyValue ?? detail.agent.state.nonEmptyValue ?? "unknown").",
                     "Recent tool calls: \(detail.toolCalls.count). Event lines cached: \(detail.eventLines.count).",
                     detail.errors.isEmpty ? "No daemon-reported errors on the selected workload." : "Daemon reported \(detail.errors.count) error\(detail.errors.count == 1 ? "" : "s") for this workload."
                 ]
@@ -529,7 +535,7 @@ private struct DetailHighlightsPanel: View {
             return [
                 "Monitoring phase: \(monitoring.phase.rawValue).",
                 "Visible workloads: \(monitoring.workloads.count).",
-                "Selection will load session metadata, tool calls, and recent daemon events in place."
+                "Selection follows the same session when the daemon rekeys a workload after reconnect."
             ]
         case .queue:
             if monitoring.queue.isEmpty {
@@ -926,6 +932,12 @@ private struct MonitoringSummaryRow: View {
     var body: some View {
         HStack(spacing: 12) {
             MiniChip(text: snapshot.phase.rawValue.capitalized, tone: phaseTone)
+            if let poolMode = snapshot.poolMode.nonEmptyValue {
+                MiniChip(text: "Pool \(poolMode)", tone: ShellPalette.brass)
+            }
+            if let spawnPolicy = snapshot.spawnPolicy.nonEmptyValue {
+                MiniChip(text: "Policy \(spawnPolicy)", tone: ShellPalette.moss)
+            }
             MiniChip(text: "Workloads \(snapshot.workloads.count)", tone: ShellPalette.ember)
             MiniChip(text: "Queue \(snapshot.queue.count)", tone: ShellPalette.moss)
             Spacer(minLength: 0)
@@ -967,6 +979,9 @@ private struct MonitoringWorkloadRow: View {
                         Text(workload.kind == .poolAgent ? "POOL" : "SPAWN")
                             .font(.system(size: 10, weight: .bold, design: .monospaced))
                             .foregroundStyle(workload.kind == .poolAgent ? ShellPalette.ember : ShellPalette.moss)
+                        Text(workload.workRef)
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(ShellPalette.mutedInk)
                         if workload.attentionNeeded {
                             Text("ATTN")
                                 .font(.system(size: 10, weight: .bold, design: .monospaced))
@@ -990,7 +1005,8 @@ private struct MonitoringWorkloadRow: View {
 
             HStack(spacing: 10) {
                 DetailPill(label: "role", value: workload.role)
-                DetailPill(label: "session", value: workload.sessionID.nonEmptyValue ?? "pending")
+                DetailPill(label: "session", value: workload.sessionID.nonEmptyValue ?? "claiming")
+                DetailPill(label: "pid", value: workload.pid > 0 ? String(workload.pid) : "pending")
                 DetailPill(label: "activity", value: workload.lastActivityAt.map(Self.relativeTimestamp) ?? "waiting")
             }
         }
@@ -1077,10 +1093,26 @@ private struct SessionsDetailPanel: View {
         if let detail = snapshot.selectedDetail {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 12) {
-                    DetailPill(label: "work", value: detail.session.workRef.nonEmptyValue ?? detail.workloadID)
+                    DetailPill(label: "work", value: detail.agent.taskID.nonEmptyValue ?? detail.session.workRef.nonEmptyValue ?? detail.workloadID)
                     DetailPill(label: "session", value: detail.session.sessionID.nonEmptyValue ?? "pending")
                     DetailPill(label: "origin", value: detail.session.originType.nonEmptyValue ?? "unknown")
-                    DetailPill(label: "status", value: detail.session.status.nonEmptyValue ?? "unknown")
+                    DetailPill(label: "status", value: detail.agent.lifecycleState.nonEmptyValue ?? detail.session.status.nonEmptyValue ?? "unknown")
+                }
+
+                HStack(spacing: 12) {
+                    DetailPill(label: "agent", value: detail.workloadID)
+                    DetailPill(label: "pid", value: detail.agent.pid > 0 ? String(detail.agent.pid) : "pending")
+                    DetailPill(label: "server", value: detail.session.serverRef.nonEmptyValue ?? "pending")
+                    DetailPill(label: "attach", value: detail.session.attachable ? "ready" : "pending")
+                }
+
+                if let lastLog = detail.agent.lastLog.nonEmptyValue {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Latest daemon note")
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundStyle(ShellPalette.mutedInk)
+                        EventLineRow(line: lastLog, tone: ShellPalette.brass)
+                    }
                 }
 
                 if !detail.toolCalls.isEmpty {
@@ -1122,8 +1154,10 @@ private struct SessionsDetailPanel: View {
             }
         } else {
             MonitoringEmptyRow(
-                title: snapshot.workloads.isEmpty ? "No session selected" : "Select a workload",
-                detail: snapshot.note
+                title: snapshot.workloads.isEmpty ? "No session selected" : "Select a session lane",
+                detail: snapshot.workloads.isEmpty
+                    ? snapshot.note
+                    : "The detail pane will hold session route, tool activity, and recent daemon events without changing selection."
             )
         }
     }
