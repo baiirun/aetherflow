@@ -171,6 +171,69 @@ final class MonitoringStoreTests: XCTestCase {
         XCTAssertEqual(eventAgentNames, ["agent-1", "spawn-1"])
     }
 
+    func testSelectionTracksSameSessionWhenWorkloadIDChanges() async throws {
+        let bootstrap = Self.bootstrap
+        let controller = RecordingDaemonController(
+            statusResults: [
+                .success(Self.status(taskTitle: "Initial task")),
+                .success(Self.status(agentID: "agent-2", taskTitle: "Recovered task", sessionID: "ses-1")),
+            ],
+            detailResults: [
+                .success(Self.detail(agentID: "agent-1", workRef: "ts-c9cdd2", sessionID: "ses-1")),
+                .success(Self.detail(agentID: "agent-2", workRef: "ts-c9cdd2", sessionID: "ses-1")),
+            ],
+            eventResults: [
+                .success(Self.events(lines: ["session.created"], sessionID: "ses-1", workRef: "ts-c9cdd2", agentID: "agent-1", lastTS: 101)),
+                .success(Self.events(lines: ["session.reclaimed"], sessionID: "ses-1", workRef: "ts-c9cdd2", agentID: "agent-2", lastTS: 202)),
+            ]
+        )
+        let store = MonitoringStore(
+            context: bootstrap,
+            controller: controller,
+            isDaemonAbsent: { _ in false },
+            autoStartMonitoring: false
+        )
+
+        await store.refresh()
+        await store.refresh()
+
+        XCTAssertEqual(store.snapshot.selectedWorkloadID, "agent-2")
+        XCTAssertEqual(store.snapshot.selectedDetail?.workloadID, "agent-2")
+        XCTAssertEqual(store.snapshot.selectedDetail?.session.sessionID, "ses-1")
+
+        let detailAgentNames = await controller.recordedDetailAgentNames()
+        XCTAssertEqual(detailAgentNames, ["agent-1", "agent-2"])
+    }
+
+    func testRefreshPreservesExistingOrderAndAppendsNewWorkloads() async throws {
+        let bootstrap = Self.bootstrap
+        let controller = RecordingDaemonController(
+            statusResults: [
+                .success(Self.statusWithAgentAndSpawn()),
+                .success(Self.statusWithAdditionalAgent()),
+            ],
+            detailResults: [
+                .success(Self.detail(agentID: "agent-1", workRef: "ts-c9cdd2", sessionID: "ses-1")),
+                .success(Self.detail(agentID: "agent-1", workRef: "ts-c9cdd2", sessionID: "ses-1")),
+            ],
+            eventResults: [
+                .success(Self.events(lines: ["session.created"], sessionID: "ses-1", workRef: "ts-c9cdd2", agentID: "agent-1", lastTS: 101)),
+                .success(Self.events(lines: ["task.updated"], sessionID: "ses-1", workRef: "ts-c9cdd2", agentID: "agent-1", lastTS: 120)),
+            ]
+        )
+        let store = MonitoringStore(
+            context: bootstrap,
+            controller: controller,
+            isDaemonAbsent: { _ in false },
+            autoStartMonitoring: false
+        )
+
+        await store.refresh()
+        await store.refresh()
+
+        XCTAssertEqual(store.snapshot.workloads.map(\.id), ["agent-1", "spawn-1", "agent-2"])
+    }
+
     private static var bootstrap: ShellBootstrapContext {
         ShellBootstrapContext(
             projectName: "aetherflow",
@@ -180,7 +243,11 @@ final class MonitoringStoreTests: XCTestCase {
         )
     }
 
-    private static func status(taskTitle: String) -> DaemonStatusPayload {
+    private static func status(
+        agentID: String = "agent-1",
+        taskTitle: String,
+        sessionID: String = "ses-1"
+    ) -> DaemonStatusPayload {
         DaemonStatusPayload(
             poolSize: 1,
             poolMode: "active",
@@ -188,14 +255,14 @@ final class MonitoringStoreTests: XCTestCase {
             spawnPolicy: "manual",
             agents: [
                 DaemonAgentStatusPayload(
-                    id: "agent-1",
+                    id: agentID,
                     taskID: "ts-c9cdd2",
                     role: "worker",
                     pid: 42,
                     spawnTime: .now,
                     taskTitle: taskTitle,
                     lastLog: "working",
-                    sessionID: "ses-1",
+                    sessionID: sessionID,
                     state: "running",
                     lifecycleState: "running",
                     lastActivityAt: .now,
@@ -206,6 +273,61 @@ final class MonitoringStoreTests: XCTestCase {
             queue: [
                 DaemonQueueTaskPayload(id: "ts-next", priority: 1, title: "Next task")
             ],
+            errors: []
+        )
+    }
+
+    private static func statusWithAdditionalAgent() -> DaemonStatusPayload {
+        DaemonStatusPayload(
+            poolSize: 2,
+            poolMode: "active",
+            project: "aetherflow",
+            spawnPolicy: "manual",
+            agents: [
+                DaemonAgentStatusPayload(
+                    id: "agent-1",
+                    taskID: "ts-c9cdd2",
+                    role: "worker",
+                    pid: 42,
+                    spawnTime: .now.addingTimeInterval(-120),
+                    taskTitle: "Implement HTTP transport",
+                    lastLog: "working",
+                    sessionID: "ses-1",
+                    state: "running",
+                    lifecycleState: "running",
+                    lastActivityAt: .now,
+                    attentionNeeded: false
+                ),
+                DaemonAgentStatusPayload(
+                    id: "agent-2",
+                    taskID: "ts-next",
+                    role: "worker",
+                    pid: 43,
+                    spawnTime: .now,
+                    taskTitle: "Follow-up task",
+                    lastLog: "queued for handoff",
+                    sessionID: "ses-3",
+                    state: "running",
+                    lifecycleState: "running",
+                    lastActivityAt: .now,
+                    attentionNeeded: true
+                ),
+            ],
+            spawns: [
+                DaemonSpawnStatusPayload(
+                    spawnID: "spawn-1",
+                    pid: 99,
+                    sessionID: "ses-2",
+                    state: "running",
+                    lifecycleState: "running",
+                    lastActivityAt: .now,
+                    attentionNeeded: false,
+                    prompt: "Manual validation run",
+                    spawnTime: .now.addingTimeInterval(-60),
+                    exitedAt: nil
+                )
+            ],
+            queue: [],
             errors: []
         )
     }

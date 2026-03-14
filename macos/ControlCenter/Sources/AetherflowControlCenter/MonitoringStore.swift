@@ -17,11 +17,14 @@ struct MonitoringWorkloadSummary: Identifiable, Equatable, Sendable {
     let id: String
     let kind: MonitoringWorkloadKind
     let role: String
+    let workRef: String
     let title: String
     let subtitle: String
     let sessionID: String
     let lifecycleState: String
+    let pid: Int
     let attentionNeeded: Bool
+    let spawnedAt: Date
     let lastActivityAt: Date?
 }
 
@@ -34,6 +37,7 @@ struct MonitoringQueueItem: Identifiable, Equatable, Sendable {
 struct MonitoringSelectionDetail: Equatable, Sendable {
     let workloadID: String
     let session: DaemonSessionMetadataPayload
+    let agent: DaemonAgentStatusPayload
     let toolCalls: [DaemonToolCallPayload]
     let eventLines: [String]
     let lastEventTimestamp: Int64
@@ -74,6 +78,11 @@ struct MonitoringSnapshot: Equatable, Sendable {
 final class MonitoringStore: ObservableObject {
     @Published private(set) var snapshot: MonitoringSnapshot
 
+    private struct SelectionAnchor: Equatable {
+        let workloadID: String
+        let sessionID: String?
+    }
+
     private let context: ShellBootstrapContext
     private let controller: DaemonControlling
     private let isDaemonAbsent: (Error) -> Bool
@@ -82,6 +91,7 @@ final class MonitoringStore: ObservableObject {
     private var monitorTask: Task<Void, Never>?
     private var hasConnected = false
     private var needsAuthoritativeReload = true
+    private var selectionAnchor: SelectionAnchor?
 
     init(
         context: ShellBootstrapContext,
@@ -132,6 +142,12 @@ final class MonitoringStore: ObservableObject {
             return
         }
         needsAuthoritativeReload = true
+        selectionAnchor = id.flatMap { workloadID in
+            guard let workload = snapshot.workloads.first(where: { $0.id == workloadID }) else {
+                return SelectionAnchor(workloadID: workloadID, sessionID: nil)
+            }
+            return SelectionAnchor(workloadID: workloadID, sessionID: workload.sessionID.nonEmptyValue)
+        }
         snapshot = MonitoringSnapshot(
             phase: snapshot.phase,
             project: snapshot.project,
@@ -150,8 +166,8 @@ final class MonitoringStore: ObservableObject {
     func refresh() async {
         do {
             let status = try await controller.fetchStatus(daemonURL: context.daemonURL)
-            let workloads = buildWorkloads(status: status)
-            let selectedWorkloadID = resolvedSelectionID(workloads: workloads, preferredID: snapshot.selectedWorkloadID)
+            let workloads = orderedWorkloads(incoming: buildWorkloads(status: status), previous: snapshot.workloads)
+            let selectedWorkloadID = resolvedSelectionID(workloads: workloads)
             var selectedDetail = snapshot.selectedDetail
 
             let reconnected = needsAuthoritativeReload || snapshot.phase != .connected
@@ -177,6 +193,12 @@ final class MonitoringStore: ObservableObject {
                 lastError: status.errors.last?.nonEmptyValue,
                 updatedAt: .now
             )
+            selectionAnchor = selectedWorkloadID.flatMap { workloadID in
+                guard let workload = workloads.first(where: { $0.id == workloadID }) else {
+                    return SelectionAnchor(workloadID: workloadID, sessionID: selectedDetail?.session.sessionID.nonEmptyValue)
+                }
+                return SelectionAnchor(workloadID: workloadID, sessionID: workload.sessionID.nonEmptyValue)
+            }
             hasConnected = true
             needsAuthoritativeReload = false
         } catch {
@@ -214,6 +236,7 @@ final class MonitoringStore: ObservableObject {
         return MonitoringSelectionDetail(
             workloadID: workloadID,
             session: events.session.sessionID.nonEmptyValue == nil ? detail.session : events.session,
+            agent: detail.agent,
             toolCalls: detail.toolCalls,
             eventLines: lines,
             lastEventTimestamp: lastEventTimestamp,
@@ -247,11 +270,14 @@ final class MonitoringStore: ObservableObject {
                 id: $0.id,
                 kind: .poolAgent,
                 role: $0.role,
+                workRef: $0.taskID.nonEmptyValue ?? $0.id,
                 title: $0.taskTitle.nonEmptyValue ?? $0.id,
                 subtitle: $0.lastLog.nonEmptyValue ?? $0.taskID.nonEmptyValue ?? "Pool agent",
                 sessionID: $0.sessionID,
                 lifecycleState: $0.lifecycleState.nonEmptyValue ?? $0.state,
+                pid: $0.pid,
                 attentionNeeded: $0.attentionNeeded,
+                spawnedAt: $0.spawnTime,
                 lastActivityAt: $0.lastActivityAt
             )
         }
@@ -260,25 +286,64 @@ final class MonitoringStore: ObservableObject {
                 id: $0.spawnID,
                 kind: .spawn,
                 role: "spawn",
+                workRef: $0.spawnID,
                 title: $0.prompt.nonEmptyValue ?? $0.spawnID,
-                subtitle: $0.state.nonEmptyValue ?? "Spawned session",
+                subtitle: $0.sessionID.nonEmptyValue ?? ($0.state.nonEmptyValue ?? "Spawned session"),
                 sessionID: $0.sessionID,
                 lifecycleState: $0.lifecycleState.nonEmptyValue ?? $0.state,
+                pid: $0.pid,
                 attentionNeeded: $0.attentionNeeded,
+                spawnedAt: $0.spawnTime,
                 lastActivityAt: $0.lastActivityAt ?? $0.exitedAt
             )
         }
         return agents + spawns
     }
 
-    private func resolvedSelectionID(
-        workloads: [MonitoringWorkloadSummary],
-        preferredID: String?
-    ) -> String? {
-        if let preferredID, workloads.contains(where: { $0.id == preferredID }) {
-            return preferredID
+    private func orderedWorkloads(
+        incoming: [MonitoringWorkloadSummary],
+        previous: [MonitoringWorkloadSummary]
+    ) -> [MonitoringWorkloadSummary] {
+        let previousIndexes = Dictionary(uniqueKeysWithValues: previous.enumerated().map { ($1.id, $0) })
+
+        return incoming.sorted { lhs, rhs in
+            let lhsIndex = previousIndexes[lhs.id]
+            let rhsIndex = previousIndexes[rhs.id]
+            switch (lhsIndex, rhsIndex) {
+            case let (lhsIndex?, rhsIndex?):
+                return lhsIndex < rhsIndex
+            case (.some, nil):
+                return true
+            case (nil, .some):
+                return false
+            case (nil, nil):
+                if lhs.attentionNeeded != rhs.attentionNeeded {
+                    return lhs.attentionNeeded && !rhs.attentionNeeded
+                }
+                if lhs.kind != rhs.kind {
+                    return lhs.kind == .poolAgent
+                }
+                if lhs.spawnedAt != rhs.spawnedAt {
+                    return lhs.spawnedAt > rhs.spawnedAt
+                }
+                return lhs.id.localizedStandardCompare(rhs.id) == .orderedAscending
+            }
         }
-        return workloads.first?.id
+    }
+
+    private func resolvedSelectionID(workloads: [MonitoringWorkloadSummary]) -> String? {
+        if let sessionID = selectionAnchor?.sessionID,
+           let match = workloads.first(where: { $0.sessionID == sessionID }) {
+            return match.id
+        }
+        if let workloadID = selectionAnchor?.workloadID,
+           workloads.contains(where: { $0.id == workloadID }) {
+            return workloadID
+        }
+        guard let preferred = workloads.first else {
+            return nil
+        }
+        return preferred.id
     }
 
     private func monitoringNote(for status: DaemonStatusPayload, workloadCount: Int) -> String {
