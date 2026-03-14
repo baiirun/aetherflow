@@ -75,7 +75,7 @@ final class MonitoringStoreTests: XCTestCase {
         let controller = RecordingDaemonController(
             statusResults: [.success(Self.status(taskTitle: "Implement HTTP transport"))],
             detailResults: [.success(Self.detail())],
-            eventResults: [.success(Self.events(lines: ["session.created"], lastTS: 101))]
+            eventResults: [.success(Self.events(lines: ["\u{001B}[2m12:00:00\u{001B}[0m  session.created"], lastTS: 101))]
         )
         let store = MonitoringStore(
             context: bootstrap,
@@ -89,8 +89,9 @@ final class MonitoringStoreTests: XCTestCase {
         XCTAssertEqual(store.snapshot.phase, .connected)
         XCTAssertEqual(store.snapshot.workloads.map(\.id), ["agent-1"])
         XCTAssertEqual(store.snapshot.selectedWorkloadID, "agent-1")
-        XCTAssertEqual(store.snapshot.selectedDetail?.eventLines, ["session.created"])
+        XCTAssertEqual(store.snapshot.selectedDetail?.eventLines, ["12:00:00  session.created"])
         XCTAssertEqual(store.snapshot.selectedDetail?.lastEventTimestamp, 101)
+        XCTAssertEqual(store.snapshot.selectedDetail?.isLive, true)
     }
 
     func testReconnectForcesAuthoritativeEventReloadBeforeCursorResumes() async throws {
@@ -203,6 +204,47 @@ final class MonitoringStoreTests: XCTestCase {
 
         let detailAgentNames = await controller.recordedDetailAgentNames()
         XCTAssertEqual(detailAgentNames, ["agent-1", "agent-2"])
+    }
+
+    func testSelectedDetailIsRetainedWhenWorkloadLeavesLiveStatus() async throws {
+        let bootstrap = Self.bootstrap
+        let controller = RecordingDaemonController(
+            statusResults: [
+                .success(Self.status(taskTitle: "Live task")),
+                .success(Self.statusWithoutWorkloads()),
+                .success(Self.statusWithoutWorkloads()),
+            ],
+            detailResults: [
+                .success(Self.detail()),
+            ],
+            eventResults: [
+                .success(Self.events(lines: ["session.created", "agent finished"], lastTS: 101)),
+            ]
+        )
+        let store = MonitoringStore(
+            context: bootstrap,
+            controller: controller,
+            isDaemonAbsent: { _ in false },
+            autoStartMonitoring: false
+        )
+
+        await store.refresh()
+        await store.refresh()
+        await store.refresh()
+
+        XCTAssertEqual(store.snapshot.phase, .connected)
+        XCTAssertEqual(store.snapshot.workloads.count, 0)
+        XCTAssertEqual(store.snapshot.selectedWorkloadID, "agent-1")
+        XCTAssertEqual(store.snapshot.selectedDetail?.workloadID, "agent-1")
+        XCTAssertEqual(store.snapshot.selectedDetail?.session.sessionID, "ses-1")
+        XCTAssertEqual(store.snapshot.selectedDetail?.eventLines, ["session.created", "agent finished"])
+        XCTAssertEqual(store.snapshot.selectedDetail?.isLive, false)
+        XCTAssertEqual(store.snapshot.selectedDetail?.agent.lifecycleState, "exited")
+
+        let detailAgentNames = await controller.recordedDetailAgentNames()
+        let eventAgentNames = await controller.recordedEventAgentNames()
+        XCTAssertEqual(detailAgentNames, ["agent-1"])
+        XCTAssertEqual(eventAgentNames, ["agent-1"])
     }
 
     func testRefreshPreservesExistingOrderAndAppendsNewWorkloads() async throws {
@@ -479,6 +521,19 @@ final class MonitoringStoreTests: XCTestCase {
                     exitedAt: nil
                 )
             ],
+            queue: [],
+            errors: []
+        )
+    }
+
+    private static func statusWithoutWorkloads() -> DaemonStatusPayload {
+        DaemonStatusPayload(
+            poolSize: 0,
+            poolMode: "active",
+            project: "aetherflow",
+            spawnPolicy: "manual",
+            agents: [],
+            spawns: [],
             queue: [],
             errors: []
         )

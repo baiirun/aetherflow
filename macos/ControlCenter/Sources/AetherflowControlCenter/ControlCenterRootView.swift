@@ -469,8 +469,11 @@ private struct DetailColumn: View {
         case .sessions:
             if let detail = monitoring.selectedDetail {
                 let sessionRoute = detail.session.sessionID.nonEmptyValue ?? "pending session"
-                let lifecycle = detail.agent.lifecycleState.nonEmptyValue ?? detail.session.status.nonEmptyValue ?? "unknown"
-                return "Showing live status, tool activity, and recent events for \(sessionRoute) in \(lifecycle) state."
+                let lifecycle = detail.lifecycleLabel
+                if detail.isLive {
+                    return "Showing live status, tool activity, and plain-text session output for \(sessionRoute) in \(lifecycle) state."
+                }
+                return "Showing retained session detail for \(sessionRoute). The live workload exited, but recent output and tool activity remain available in \(lifecycle) state."
             }
             return monitoring.note
         case .queue:
@@ -524,11 +527,15 @@ private struct DetailHighlightsPanel: View {
         case .sessions:
             if let detail = monitoring.selectedDetail {
                 let pidLabel = detail.agent.pid > 0 ? String(detail.agent.pid) : "pending"
+                let liveSummary = detail.isLive
+                    ? "Selected workload is live in the monitoring list."
+                    : "Selected workload has exited; the pane is holding the last readable session detail."
                 return [
                     "Selected workload: \(detail.workloadID) on pid \(pidLabel).",
                     "Session route: \(detail.session.serverRef.nonEmptyValue ?? "pending server") / \(detail.session.sessionID.nonEmptyValue ?? "pending session").",
-                    "Task lane: \(detail.agent.taskID.nonEmptyValue ?? detail.session.workRef.nonEmptyValue ?? "manual spawn"). Lifecycle: \(detail.agent.lifecycleState.nonEmptyValue ?? detail.agent.state.nonEmptyValue ?? "unknown").",
-                    "Recent tool calls: \(detail.toolCalls.count). Event lines cached: \(detail.eventLines.count).",
+                    "Task lane: \(detail.agent.taskID.nonEmptyValue ?? detail.session.workRef.nonEmptyValue ?? "manual spawn"). Lifecycle: \(detail.lifecycleLabel).",
+                    "Recent tool calls: \(detail.toolCalls.count). Plain-text output lines cached: \(detail.eventLines.count).",
+                    liveSummary,
                     detail.errors.isEmpty ? "No daemon-reported errors on the selected workload." : "Daemon reported \(detail.errors.count) error\(detail.errors.count == 1 ? "" : "s") for this workload."
                 ]
             }
@@ -555,6 +562,26 @@ private struct DetailHighlightsPanel: View {
             return selectedCard.highlights
         }
     }
+}
+
+private func monitoringLifecycleTone(for detail: MonitoringSelectionDetail) -> Color {
+    switch detail.lifecycleLabel.lowercased() {
+    case "completed", "complete", "idle":
+        return ShellPalette.moss
+    case "failed", "error", "errored", "crashed":
+        return ShellPalette.ember
+    case "exited":
+        return ShellPalette.brass
+    default:
+        return detail.isLive ? ShellPalette.moss : ShellPalette.brass
+    }
+}
+
+private func monitoringTimestampLabel(_ date: Date?) -> String {
+    guard let date else {
+        return "Pending"
+    }
+    return date.formatted(date: .abbreviated, time: .shortened)
 }
 
 private struct SectionPreview: View {
@@ -1092,18 +1119,47 @@ private struct SessionsDetailPanel: View {
     var body: some View {
         if let detail = snapshot.selectedDetail {
             VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 12) {
-                    DetailPill(label: "work", value: detail.agent.taskID.nonEmptyValue ?? detail.session.workRef.nonEmptyValue ?? detail.workloadID)
-                    DetailPill(label: "session", value: detail.session.sessionID.nonEmptyValue ?? "pending")
-                    DetailPill(label: "origin", value: detail.session.originType.nonEmptyValue ?? "unknown")
-                    DetailPill(label: "status", value: detail.agent.lifecycleState.nonEmptyValue ?? detail.session.status.nonEmptyValue ?? "unknown")
+                HStack(alignment: .top, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(detail.agent.taskTitle.nonEmptyValue ?? detail.session.workRef.nonEmptyValue ?? detail.workloadID)
+                            .font(.system(size: 24, weight: .bold, design: .serif))
+                            .foregroundStyle(ShellPalette.ink)
+                        Text(detail.session.sessionID.nonEmptyValue ?? "Waiting for session route")
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundStyle(ShellPalette.mutedInk)
+                        Text(detail.isLive
+                             ? "The detail pane is following the live workload directly from the daemon read model."
+                             : "The workload dropped out of the live list, but the selected session stays open with its last readable output and tool activity.")
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .foregroundStyle(ShellPalette.mutedInk)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                    VStack(alignment: .trailing, spacing: 8) {
+                        MiniChip(text: detail.lifecycleLabel, tone: monitoringLifecycleTone(for: detail))
+                        if !detail.isLive {
+                            MiniChip(text: "Retained detail", tone: ShellPalette.brass)
+                        }
+                    }
                 }
 
-                HStack(spacing: 12) {
-                    DetailPill(label: "agent", value: detail.workloadID)
-                    DetailPill(label: "pid", value: detail.agent.pid > 0 ? String(detail.agent.pid) : "pending")
-                    DetailPill(label: "server", value: detail.session.serverRef.nonEmptyValue ?? "pending")
-                    DetailPill(label: "attach", value: detail.session.attachable ? "ready" : "pending")
+                LazyVGrid(
+                    columns: [
+                        GridItem(.flexible(), spacing: 12, alignment: .leading),
+                        GridItem(.flexible(), spacing: 12, alignment: .leading)
+                    ],
+                    spacing: 12
+                ) {
+                    SessionFactCard(label: "Workload", value: detail.workloadID)
+                    SessionFactCard(label: "Work ref", value: detail.agent.taskID.nonEmptyValue ?? detail.session.workRef.nonEmptyValue ?? "Manual spawn")
+                    SessionFactCard(label: "Session", value: detail.session.sessionID.nonEmptyValue ?? "Pending")
+                    SessionFactCard(label: "Origin", value: detail.session.originType.nonEmptyValue ?? "Unknown")
+                    SessionFactCard(label: "Server", value: detail.session.serverRef.nonEmptyValue ?? "Pending")
+                    SessionFactCard(label: "Directory", value: detail.session.directory.nonEmptyValue ?? "Pending")
+                    SessionFactCard(label: "PID", value: detail.agent.pid > 0 ? String(detail.agent.pid) : "Pending")
+                    SessionFactCard(label: "Attach", value: detail.session.attachable ? "Ready" : "Pending")
+                    SessionFactCard(label: "Last activity", value: monitoringTimestampLabel(detail.agent.lastActivityAt ?? detail.session.lastSeenAt))
+                    SessionFactCard(label: "Updated", value: monitoringTimestampLabel(detail.session.updatedAt))
                 }
 
                 if let lastLog = detail.agent.lastLog.nonEmptyValue {
@@ -1115,11 +1171,15 @@ private struct SessionsDetailPanel: View {
                     }
                 }
 
-                if !detail.toolCalls.isEmpty {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Recent tool calls")
-                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Tool activity")
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .foregroundStyle(ShellPalette.mutedInk)
+                    if detail.toolCalls.isEmpty {
+                        Text("No tool calls are visible yet for this session.")
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
                             .foregroundStyle(ShellPalette.mutedInk)
+                    } else {
                         ForEach(Array(detail.toolCalls.prefix(6).enumerated()), id: \.offset) { _, call in
                             ToolCallRow(call: call)
                         }
@@ -1127,16 +1187,16 @@ private struct SessionsDetailPanel: View {
                 }
 
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Recent events")
+                    Text("Recent session output")
                         .font(.system(size: 12, weight: .bold, design: .monospaced))
                         .foregroundStyle(ShellPalette.mutedInk)
                     if detail.eventLines.isEmpty {
-                        Text("No daemon event lines captured yet for this selection.")
+                        Text("No plain-text session output is cached yet for this selection.")
                             .font(.system(size: 13, weight: .medium, design: .rounded))
                             .foregroundStyle(ShellPalette.mutedInk)
                     } else {
-                        ForEach(Array(detail.eventLines.suffix(8).enumerated()), id: \.offset) { _, line in
-                            EventLineRow(line: line)
+                        ForEach(Array(detail.eventLines.suffix(12).enumerated()), id: \.offset) { _, line in
+                            EventLineRow(line: line, tone: detail.isLive ? ShellPalette.moss : ShellPalette.brass)
                         }
                     }
                 }
@@ -1160,6 +1220,34 @@ private struct SessionsDetailPanel: View {
                     : "The detail pane will hold session route, tool activity, and recent daemon events without changing selection."
             )
         }
+    }
+}
+
+private struct SessionFactCard: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label.uppercased())
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(ShellPalette.mutedInk)
+            Text(value)
+                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                .foregroundStyle(ShellPalette.ink)
+                .textSelection(.enabled)
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(Color.white.opacity(0.22))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18)
+                        .stroke(ShellPalette.panelBorder, lineWidth: 1)
+                )
+        )
     }
 }
 
