@@ -1,5 +1,7 @@
 import Foundation
 
+private let monitoringANSIEscapeRegex = try! NSRegularExpression(pattern: "\u{001B}\\[[0-9;]*[ -/]*[@-~]")
+
 enum MonitoringConnectionPhase: String, Equatable {
     case connecting
     case connected
@@ -42,6 +44,47 @@ struct MonitoringSelectionDetail: Equatable, Sendable {
     let eventLines: [String]
     let lastEventTimestamp: Int64
     let errors: [String]
+    let isLive: Bool
+
+    var lifecycleLabel: String {
+        Self.normalizedLifecycleLabel(
+            agentLifecycleState: agent.lifecycleState.nonEmptyValue,
+            agentState: agent.state.nonEmptyValue,
+            sessionStatus: session.status.nonEmptyValue,
+            isLive: isLive
+        )
+    }
+
+    var retainedLifecycleLabel: String {
+        Self.normalizedLifecycleLabel(
+            agentLifecycleState: agent.lifecycleState.nonEmptyValue,
+            agentState: agent.state.nonEmptyValue,
+            sessionStatus: session.status.nonEmptyValue,
+            isLive: false
+        )
+    }
+
+    static func isTerminalLifecycle(_ value: String) -> Bool {
+        switch value.lowercased() {
+        case "complete", "completed", "crashed", "error", "errored", "exited", "failed", "idle":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func normalizedLifecycleLabel(
+        agentLifecycleState: String?,
+        agentState: String?,
+        sessionStatus: String?,
+        isLive: Bool
+    ) -> String {
+        let candidate = agentLifecycleState ?? agentState ?? sessionStatus ?? (isLive ? "unknown" : "exited")
+        if isLive || isTerminalLifecycle(candidate) {
+            return candidate
+        }
+        return "exited"
+    }
 }
 
 struct MonitoringSnapshot: Equatable, Sendable {
@@ -78,6 +121,7 @@ struct MonitoringSnapshot: Equatable, Sendable {
 final class MonitoringStore: ObservableObject {
     @Published private(set) var snapshot: MonitoringSnapshot
 
+    private static let retainedEventLineLimit = 200
     private struct SelectionAnchor: Equatable {
         let workloadID: String
         let sessionID: String?
@@ -167,15 +211,27 @@ final class MonitoringStore: ObservableObject {
         do {
             let status = try await controller.fetchStatus(daemonURL: context.daemonURL)
             let workloads = orderedWorkloads(incoming: buildWorkloads(status: status), previous: snapshot.workloads)
-            let selectedWorkloadID = resolvedSelectionID(workloads: workloads)
+            let selectedWorkloadID = resolvedSelectionID(
+                workloads: workloads,
+                previousSelection: snapshot.selectedDetail
+            )
             var selectedDetail = snapshot.selectedDetail
 
             let reconnected = needsAuthoritativeReload || snapshot.phase != .connected
             if let selectedWorkloadID {
-                selectedDetail = try await refreshSelectedDetail(
-                    workloadID: selectedWorkloadID,
-                    previous: reconnected ? nil : snapshot.selectedDetail
-                )
+                let selectedWorkloadIsLive = workloads.contains { $0.id == selectedWorkloadID }
+                if !selectedWorkloadIsLive, let previous = snapshot.selectedDetail {
+                    selectedDetail = retainedTerminalDetail(
+                        from: previous,
+                        workloadID: selectedWorkloadID
+                    )
+                } else {
+                    selectedDetail = try await refreshSelectedDetail(
+                        workloadID: selectedWorkloadID,
+                        previous: reconnected ? nil : snapshot.selectedDetail,
+                        isLive: selectedWorkloadIsLive
+                    )
+                }
             } else {
                 selectedDetail = nil
             }
@@ -193,9 +249,12 @@ final class MonitoringStore: ObservableObject {
                 lastError: status.errors.last?.nonEmptyValue,
                 updatedAt: .now
             )
-            selectionAnchor = selectedWorkloadID.flatMap { workloadID in
+            selectionAnchor = selectedWorkloadID.map { workloadID in
                 guard let workload = workloads.first(where: { $0.id == workloadID }) else {
-                    return SelectionAnchor(workloadID: workloadID, sessionID: selectedDetail?.session.sessionID.nonEmptyValue)
+                    return SelectionAnchor(
+                        workloadID: workloadID,
+                        sessionID: selectedDetail?.session.sessionID.nonEmptyValue
+                    )
                 }
                 return SelectionAnchor(workloadID: workloadID, sessionID: workload.sessionID.nonEmptyValue)
             }
@@ -208,7 +267,8 @@ final class MonitoringStore: ObservableObject {
 
     private func refreshSelectedDetail(
         workloadID: String,
-        previous: MonitoringSelectionDetail?
+        previous: MonitoringSelectionDetail?,
+        isLive: Bool
     ) async throws -> MonitoringSelectionDetail {
         let detail = try await controller.fetchAgentDetail(
             daemonURL: context.daemonURL,
@@ -223,7 +283,10 @@ final class MonitoringStore: ObservableObject {
             afterTimestamp: afterTimestamp
         )
 
-        let lines = (previous?.eventLines ?? []) + events.lines
+        let lines = mergedEventLines(
+            previous: previous?.eventLines ?? [],
+            incoming: events.lines
+        )
         let lastEventTimestamp = max(previous?.lastEventTimestamp ?? 0, events.lastTS)
 
         return MonitoringSelectionDetail(
@@ -233,7 +296,8 @@ final class MonitoringStore: ObservableObject {
             toolCalls: detail.toolCalls,
             eventLines: lines,
             lastEventTimestamp: lastEventTimestamp,
-            errors: detail.errors
+            errors: detail.errors,
+            isLive: isLive
         )
     }
 
@@ -322,7 +386,10 @@ final class MonitoringStore: ObservableObject {
         return lhs.id.localizedStandardCompare(rhs.id) == .orderedAscending
     }
 
-    private func resolvedSelectionID(workloads: [MonitoringWorkloadSummary]) -> String? {
+    private func resolvedSelectionID(
+        workloads: [MonitoringWorkloadSummary],
+        previousSelection: MonitoringSelectionDetail?
+    ) -> String? {
         if let sessionID = selectionAnchor?.sessionID,
            let match = workloads.first(where: { $0.sessionID == sessionID }) {
             return match.id
@@ -331,10 +398,95 @@ final class MonitoringStore: ObservableObject {
            workloads.contains(where: { $0.id == workloadID }) {
             return workloadID
         }
+        if shouldRetainSelection(workloads: workloads, previousSelection: previousSelection),
+           let workloadID = selectionAnchor?.workloadID {
+            return workloadID
+        }
         guard let preferred = workloads.first else {
             return nil
         }
         return preferred.id
+    }
+
+    private func shouldRetainSelection(
+        workloads: [MonitoringWorkloadSummary],
+        previousSelection: MonitoringSelectionDetail?
+    ) -> Bool {
+        guard let previousSelection,
+              let anchoredWorkloadID = selectionAnchor?.workloadID,
+              anchoredWorkloadID == previousSelection.workloadID
+        else {
+            return false
+        }
+        let previousSessionID = previousSelection.session.sessionID.nonEmptyValue
+        if let anchoredSessionID = selectionAnchor?.sessionID,
+           anchoredSessionID != previousSessionID {
+            return false
+        }
+        return !workloads.contains(where: { $0.id == anchoredWorkloadID })
+    }
+
+    private func mergedEventLines(previous: [String], incoming: [String]) -> [String] {
+        let sanitizedIncoming = incoming.compactMap { line in
+            line.strippingANSIEscapeCodes.nonEmptyValue
+        }
+        let merged = previous + sanitizedIncoming
+        guard merged.count > Self.retainedEventLineLimit else {
+            return merged
+        }
+        return Array(merged.suffix(Self.retainedEventLineLimit))
+    }
+
+    private func retainedTerminalDetail(
+        from previous: MonitoringSelectionDetail,
+        workloadID: String
+    ) -> MonitoringSelectionDetail {
+        assert(previous.workloadID == workloadID, "retained detail must match the selected workload")
+        let lifecycleState = previous.retainedLifecycleLabel
+        assert(
+            MonitoringSelectionDetail.isTerminalLifecycle(lifecycleState),
+            "retained detail must normalize to a terminal lifecycle"
+        )
+        let lastSeenAt = previous.agent.lastActivityAt
+            ?? previous.session.lastSeenAt
+            ?? previous.session.updatedAt
+
+        return MonitoringSelectionDetail(
+            workloadID: workloadID,
+            session: DaemonSessionMetadataPayload(
+                serverRef: previous.session.serverRef,
+                sessionID: previous.session.sessionID,
+                directory: previous.session.directory,
+                project: previous.session.project,
+                originType: previous.session.originType,
+                workRef: previous.session.workRef,
+                agentID: previous.session.agentID,
+                status: lifecycleState,
+                createdAt: previous.session.createdAt,
+                lastSeenAt: lastSeenAt,
+                updatedAt: previous.session.updatedAt,
+                attachable: previous.session.attachable
+            ),
+            agent: DaemonAgentStatusPayload(
+                id: previous.agent.id,
+                taskID: previous.agent.taskID,
+                role: previous.agent.role,
+                pid: previous.agent.pid,
+                spawnTime: previous.agent.spawnTime,
+                taskTitle: previous.agent.taskTitle,
+                lastLog: previous.agent.lastLog,
+                sessionID: previous.agent.sessionID,
+                state: lifecycleState,
+                lifecycleState: lifecycleState,
+                lastActivityAt: lastSeenAt,
+                attentionNeeded: false
+            ),
+            toolCalls: previous.toolCalls,
+            eventLines: previous.eventLines,
+            lastEventTimestamp: previous.lastEventTimestamp,
+            errors: previous.errors,
+            isLive: false
+        )
     }
 
     private func monitoringNote(for status: DaemonStatusPayload, workloadCount: Int) -> String {
@@ -365,5 +517,10 @@ private extension String {
     var nonEmptyValue: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    var strippingANSIEscapeCodes: String {
+        let range = NSRange(startIndex..<endIndex, in: self)
+        return monitoringANSIEscapeRegex.stringByReplacingMatches(in: self, range: range, withTemplate: "")
     }
 }
