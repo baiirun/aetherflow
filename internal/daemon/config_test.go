@@ -57,12 +57,22 @@ func TestConfigApplyDefaults(t *testing.T) {
 }
 
 func TestConfigApplyDefaultsWithProject(t *testing.T) {
-	cfg := Config{Project: "myproject"}
+	cfg := Config{Project: "myproject", SpawnPolicy: SpawnPolicyAuto}
 	cfg.ApplyDefaults()
 
 	want := listenAddrFromURL(protocol.DaemonURLFor("myproject"))
 	if cfg.ListenAddr != want {
 		t.Errorf("ListenAddr = %q, want %q (should derive from project)", cfg.ListenAddr, want)
+	}
+}
+
+func TestConfigApplyDefaultsManualWithProjectUsesGlobalListenAddr(t *testing.T) {
+	cfg := Config{Project: "myproject", SpawnPolicy: SpawnPolicyManual}
+	cfg.ApplyDefaults()
+
+	want := listenAddrFromURL(protocol.DefaultDaemonURL)
+	if cfg.ListenAddr != want {
+		t.Errorf("ListenAddr = %q, want %q (manual mode should ignore project for default listen addr)", cfg.ListenAddr, want)
 	}
 }
 

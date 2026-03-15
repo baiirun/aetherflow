@@ -179,6 +179,8 @@ func init() {
 	f.String("config", "", "Config file path (default: .aetherflow.yaml)")
 
 	daemonStopCmd.Flags().Bool("force", false, "Stop even when the daemon reports active sessions")
+	daemonCmd.Flags().String("spawn-policy", "", "Daemon spawn policy hint for endpoint resolution (auto or manual)")
+	daemonStopCmd.Flags().String("spawn-policy", "", "Daemon spawn policy hint for endpoint resolution (auto or manual)")
 }
 
 func printDaemonNotRunning(w io.Writer) {

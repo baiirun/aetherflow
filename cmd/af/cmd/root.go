@@ -35,7 +35,7 @@ func Execute() error {
 
 func init() {
 	rootCmd.PersistentFlags().StringP("config", "c", "", "config file (default is $HOME/.aetherflow.yaml)")
-	rootCmd.PersistentFlags().StringP("project", "p", "", "Project name (derives daemon URL, overrides config file)")
+	rootCmd.PersistentFlags().StringP("project", "p", "", "Project name (targets a project-scoped daemon URL when set, overrides config file)")
 	rootCmd.PersistentFlags().Bool("no-color", false, "Disable colored output")
 
 	// Wire --no-color to the term package. OnInitialize runs before any
@@ -48,37 +48,46 @@ func init() {
 	})
 }
 
-// resolveDaemonURL determines the daemon URL from the CLI flag,
-// config file, or default convention. Priority:
-//  1. Explicit --project flag -> project-scoped daemon URL
-//  2. Config listen_addr -> canonical daemon URL
-//  3. Config project -> project-scoped daemon URL
-//  4. DefaultDaemonURL fallback
+// resolveDaemonURL determines the daemon URL from the CLI flags,
+// config file, and daemon mode. Priority:
+//  1. Explicit --project -> project-scoped daemon URL
+//  2. Explicit/configured listen_addr -> canonical daemon URL
+//  3. Auto mode + configured project -> project-scoped daemon URL
+//  4. Manual mode default -> DefaultDaemonURL
 func resolveDaemonURL(cmd *cobra.Command) string {
-	if cmd.Flags().Changed("project") {
-		p, _ := cmd.Flags().GetString("project")
-		return protocol.DaemonURLFor(p)
-	}
-
 	configPath, _ := cmd.Flags().GetString("config")
 	if configPath == "" {
 		configPath = ".aetherflow.yaml"
 	}
 	var cfg daemon.Config
-	if err := daemon.LoadConfigFile(configPath, &cfg); err == nil {
-		cfg.ApplyDefaults()
-		if cfg.ListenAddr != "" {
-			daemonURL, err := protocol.DaemonURLFromListenAddr(cfg.ListenAddr)
-			if err == nil {
-				return daemonURL
-			}
-			fmt.Fprintf(os.Stderr, "warning: invalid listen_addr %q in %s: %v (using default daemon URL)\n", cfg.ListenAddr, configPath, err)
-		}
-		if cfg.Project != "" {
-			return protocol.DaemonURLFor(cfg.Project)
-		}
-	} else if !os.IsNotExist(err) {
+	if err := daemon.LoadConfigFile(configPath, &cfg); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "warning: failed to parse %s: %v (using default daemon URL)\n", configPath, err)
+	}
+
+	explicitProject := ""
+	if cmd.Flags().Changed("project") {
+		explicitProject, _ = cmd.Flags().GetString("project")
+		cfg.Project = explicitProject
+	}
+	if cmd.Flags().Lookup("spawn-policy") != nil && cmd.Flags().Changed("spawn-policy") {
+		policy, _ := cmd.Flags().GetString("spawn-policy")
+		cfg.SpawnPolicy = daemon.SpawnPolicy(policy)
+	}
+
+	normalizedPolicy := cfg.SpawnPolicy.Normalized()
+	if explicitProject != "" {
+		return protocol.DaemonURLFor(explicitProject)
+	}
+
+	if listenAddr := cfg.ListenAddr; listenAddr != "" {
+		daemonURL, err := protocol.DaemonURLFromListenAddr(cfg.ListenAddr)
+		if err == nil {
+			return daemonURL
+		}
+		fmt.Fprintf(os.Stderr, "warning: invalid listen_addr %q in %s: %v (using default daemon URL)\n", listenAddr, configPath, err)
+	}
+	if normalizedPolicy == daemon.SpawnPolicyAuto && cfg.Project != "" {
+		return protocol.DaemonURLFor(cfg.Project)
 	}
 
 	return protocol.DefaultDaemonURL

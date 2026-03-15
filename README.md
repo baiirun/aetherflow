@@ -581,10 +581,10 @@ CLI flags override config file values. Config file overrides defaults.
 | `--reconcile-interval` | `30s` | How often to check if reviewing tasks are merged |
 | `-d` / `--detach` | `false` | Run in background |
 
-Daemon listen URLs are derived automatically from the project name. Each project gets an isolated loopback port so multiple daemons can run side-by-side. Custom listen addresses are configured via `listen_addr`, not per-command flags.
+Daemon listen URLs depend on spawn policy by default. In `manual` mode, the daemon uses the single global loopback URL `http://127.0.0.1:7070` unless `listen_addr` is set explicitly. In `auto` mode, daemon listen URLs are derived automatically from the project name so multiple auto daemons can run side-by-side. Custom listen addresses are configured via `listen_addr`, not per-command flags.
 
 `--project` is required when `--spawn-policy=auto`, and optional when `--spawn-policy=manual`.
-Manual mode without a project uses the global default daemon URL. Starting a second daemon on the same listen address fails fast.
+Manual mode ignores project for default daemon startup addressing and uses the global default daemon URL unless `listen_addr` is set. Client commands still treat an explicit `--project` as an intentional project-scoped daemon target, so `af status --project myapp` and similar commands continue to reach auto daemons without requiring a config file. Starting a second daemon on the same listen address fails fast.
 
 ## CLI Reference
 
