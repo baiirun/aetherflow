@@ -1,17 +1,10 @@
 import Foundation
 
-enum DaemonTargetSource: Equatable, Sendable {
-    case environmentOverride
-    case configListenAddr
-    case manualDefault
-}
-
 struct ShellBootstrapContext: Equatable, Sendable {
     let projectName: String
     let workingDirectory: String
     let daemonURL: String
     let cliPath: String
-    let daemonTargetSource: DaemonTargetSource
     let daemonTargetReason: String
     let daemonListenAddressOverride: String?
 
@@ -20,7 +13,6 @@ struct ShellBootstrapContext: Equatable, Sendable {
         workingDirectory: String,
         daemonURL: String,
         cliPath: String,
-        daemonTargetSource: DaemonTargetSource = .manualDefault,
         daemonTargetReason: String = "Defaulting to the global manual daemon endpoint.",
         daemonListenAddressOverride: String? = nil
     ) {
@@ -28,7 +20,6 @@ struct ShellBootstrapContext: Equatable, Sendable {
         self.workingDirectory = workingDirectory
         self.daemonURL = daemonURL
         self.cliPath = cliPath
-        self.daemonTargetSource = daemonTargetSource
         self.daemonTargetReason = daemonTargetReason
         self.daemonListenAddressOverride = daemonListenAddressOverride ?? Self.listenAddrFromDaemonURL(daemonURL)
     }
@@ -56,7 +47,6 @@ struct ShellBootstrapContext: Equatable, Sendable {
             workingDirectory: workingDirectory,
             daemonURL: daemonTarget.url,
             cliPath: cliPath,
-            daemonTargetSource: daemonTarget.source,
             daemonTargetReason: daemonTarget.reason,
             daemonListenAddressOverride: daemonTarget.listenAddress
         )
@@ -112,32 +102,28 @@ struct ShellBootstrapContext: Equatable, Sendable {
             if trimmed.hasPrefix("listen_addr:") {
                 let value = trimmed.dropFirst("listen_addr:".count).trimmingCharacters(in: .whitespaces)
                 let unquoted = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-                listenAddress = unquoted.isEmpty ? nil : unquoted
-                daemonURL = daemonURLFromListenAddr(unquoted)
+                if let target = daemonTargetFromListenAddr(unquoted) {
+                    listenAddress = target.listenAddress
+                    daemonURL = target.url
+                }
             }
         }
         return (projectName, daemonURL, listenAddress)
     }
 
-    static func daemonURLFromListenAddr(_ listenAddr: String) -> String? {
-        guard !listenAddr.isEmpty else {
+    static func daemonTargetFromListenAddr(_ listenAddr: String) -> (url: String, listenAddress: String)? {
+        let trimmed = listenAddr.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
             return nil
         }
-        guard let hostRange = listenAddr.lastIndex(of: ":") else {
+
+        let normalizedListenAddr = trimmed.hasPrefix(":") ? "127.0.0.1\(trimmed)" : trimmed
+        let candidateURL = "http://\(normalizedListenAddr)"
+        guard let daemonURL = validatedLoopbackDaemonURL(candidateURL),
+              let normalizedListenAddress = listenAddrFromDaemonURL(daemonURL) else {
             return nil
         }
-        let hostPart = String(listenAddr[..<hostRange])
-        let portPart = String(listenAddr[listenAddr.index(after: hostRange)...])
-        guard !portPart.isEmpty else {
-            return nil
-        }
-        let host = hostPart.isEmpty ? "127.0.0.1" : hostPart
-        let normalizedHost = host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]" ? host : ""
-        guard !normalizedHost.isEmpty else {
-            return nil
-        }
-        let urlHost = normalizedHost == "::1" ? "[::1]" : normalizedHost
-        return "http://\(urlHost):\(portPart)"
+        return (daemonURL, normalizedListenAddress)
     }
 
     static func listenAddrFromDaemonURL(_ rawValue: String) -> String? {
@@ -156,12 +142,11 @@ struct ShellBootstrapContext: Equatable, Sendable {
     private static func resolvedDaemonTarget(
         environmentDaemonURL: String?,
         configuredValues: (projectName: String?, daemonURL: String?, listenAddress: String?)
-    ) -> (url: String, source: DaemonTargetSource, reason: String, listenAddress: String?) {
+    ) -> (url: String, reason: String, listenAddress: String?) {
         if let daemonURL = validatedLoopbackDaemonURL(environmentDaemonURL),
            let listenAddress = listenAddrFromDaemonURL(daemonURL) {
             return (
                 daemonURL,
-                .environmentOverride,
                 "Using the explicit AETHERFLOW_DAEMON_URL override for manual daemon monitoring.",
                 listenAddress
             )
@@ -170,7 +155,6 @@ struct ShellBootstrapContext: Equatable, Sendable {
            let listenAddress = configuredValues.listenAddress?.trimmedNonEmpty {
             return (
                 daemonURL,
-                .configListenAddr,
                 "Using listen_addr from .aetherflow.yaml for manual daemon monitoring.",
                 listenAddress
             )
@@ -178,7 +162,6 @@ struct ShellBootstrapContext: Equatable, Sendable {
         let defaultURL = defaultManualDaemonURL()
         return (
             defaultURL,
-            .manualDefault,
             "No daemon override was provided, so the app is targeting the global manual daemon endpoint.",
             listenAddrFromDaemonURL(defaultURL)
         )

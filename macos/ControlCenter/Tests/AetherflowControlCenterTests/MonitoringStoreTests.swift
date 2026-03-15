@@ -334,7 +334,7 @@ final class MonitoringStoreTests: XCTestCase {
         await store.refresh()
 
         XCTAssertTrue(store.snapshot.note.contains("Spawn policy: auto."))
-        XCTAssertTrue(store.snapshot.note.contains("not serving a manual daemon"))
+        XCTAssertTrue(store.snapshot.note.contains("non-manual daemon"))
     }
 
     private static var bootstrap: ShellBootstrapContext {

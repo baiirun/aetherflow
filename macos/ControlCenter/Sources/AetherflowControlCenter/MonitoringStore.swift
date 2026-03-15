@@ -496,8 +496,8 @@ final class MonitoringStore: ObservableObject {
         }
         if let spawnPolicy = status.spawnPolicy.nonEmptyValue {
             parts.append("Spawn policy: \(spawnPolicy).")
-            if spawnPolicy != "manual" {
-                parts.append("The app target is not serving a manual daemon.")
+            if let warning = nonManualDaemonWarning(for: spawnPolicy) {
+                parts.append(warning)
             }
         }
         parts.append("Visible workloads: \(workloadCount).")

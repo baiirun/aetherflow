@@ -380,8 +380,8 @@ final class DaemonLifecycleStore: ObservableObject {
         var parts = ["Lifecycle probe succeeded for \(lifecycle.project.nonEmptyValue ?? context.projectName) at \(context.daemonURL)."]
         if let spawnPolicy = lifecycle.spawnPolicy.nonEmptyValue {
             parts.append("Spawn policy: \(spawnPolicy).")
-            if spawnPolicy != "manual" {
-                parts.append("The app is pointed at a non-manual daemon; manual monitoring defaults are overridden.")
+            if let warning = nonManualDaemonWarning(for: spawnPolicy) {
+                parts.append(warning)
             }
         }
         if let reportedURL = lifecycle.daemonURL.nonEmptyValue, reportedURL != context.daemonURL {

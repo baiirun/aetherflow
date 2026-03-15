@@ -25,6 +25,8 @@ tags:
 
 The globally installed Control Center app was deriving its daemon endpoint the same way auto mode does: from repo/project identity. That is the wrong default for manual mode, where the operator should be able to open the app and connect to the single global manual daemon without precomputing a project-specific URL.
 
+This implementation intentionally scopes the app to the single global manual daemon by default. Project-scoped manual daemons are not auto-discovered by the app; they require an explicit loopback override.
+
 ## What Didn't Work
 
 The app already had explicit daemon URL overrides, but the default path still hashed the project name. That meant the app could probe one loopback URL while `af daemon start` brought up a daemon on another. Fixing only the probe side would still leave app-triggered start misaligned.
@@ -39,5 +41,5 @@ The app already had explicit daemon URL overrides, but the default path still ha
 ## Prevention
 
 - Treat the macOS app as a global operator tool, not a repo-local shell wrapper.
-- Keep manual daemon defaults project-agnostic; only explicit endpoint overrides should change the target.
+- Keep manual daemon defaults project-agnostic and global; only explicit endpoint overrides should change the target.
 - When the app chooses a daemon endpoint, record both the chosen URL and the reason so mismatch reports are debuggable.

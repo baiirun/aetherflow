@@ -263,7 +263,6 @@ final class DaemonControlTests: XCTestCase {
                 workingDirectory: "/tmp/control-room",
                 daemonURL: "http://127.0.0.1:7099",
                 cliPath: "/usr/local/bin/af",
-                daemonTargetSource: .environmentOverride,
                 daemonTargetReason: "Using explicit override.",
                 daemonListenAddressOverride: "127.0.0.1:7099"
             )

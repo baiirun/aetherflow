@@ -225,3 +225,12 @@ struct DaemonLifecycleSnapshot {
     let lastError: String?
     let updatedAt: Date
 }
+
+func nonManualDaemonWarning(for spawnPolicy: String?) -> String? {
+    guard let normalizedPolicy = spawnPolicy?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !normalizedPolicy.isEmpty,
+          normalizedPolicy != "manual" else {
+        return nil
+    }
+    return "The app is pointed at a non-manual daemon; manual monitoring defaults are overridden."
+}

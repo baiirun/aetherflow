@@ -19,7 +19,7 @@ final class ShellBootstrapTests: XCTestCase {
         XCTAssertEqual(context.projectName, "control-room")
         XCTAssertEqual(context.workingDirectory, "/tmp/control-room")
         XCTAssertEqual(context.daemonURL, "http://127.0.0.1:7099")
-        XCTAssertEqual(context.daemonTargetSource, .environmentOverride)
+        XCTAssertTrue(context.daemonTargetReason.contains("AETHERFLOW_DAEMON_URL"))
         XCTAssertEqual(context.daemonListenAddressOverride, "127.0.0.1:7099")
     }
 
@@ -48,7 +48,7 @@ final class ShellBootstrapTests: XCTestCase {
 
         XCTAssertEqual(context.projectName, "control-room")
         XCTAssertEqual(context.daemonURL, ShellBootstrapContext.defaultManualDaemonURL())
-        XCTAssertEqual(context.daemonTargetSource, .manualDefault)
+        XCTAssertTrue(context.daemonTargetReason.contains("global manual daemon endpoint"))
     }
 
     func testDetectUsesConfiguredListenAddrFromAetherflowConfig() throws {
@@ -69,8 +69,28 @@ final class ShellBootstrapTests: XCTestCase {
         )
 
         XCTAssertEqual(context.daemonURL, "http://127.0.0.1:7099")
-        XCTAssertEqual(context.daemonTargetSource, .configListenAddr)
-        XCTAssertEqual(context.daemonListenAddressOverride, ":7099")
+        XCTAssertTrue(context.daemonTargetReason.contains("listen_addr"))
+        XCTAssertEqual(context.daemonListenAddressOverride, "127.0.0.1:7099")
+    }
+
+    func testDetectSupportsConfiguredIPv6ListenAddr() throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let configURL = tempDirectory.appendingPathComponent(".aetherflow.yaml")
+        try """
+        listen_addr: "[::1]:7099"
+        """.write(to: configURL, atomically: true, encoding: .utf8)
+
+        let context = ShellBootstrapContext.detect(
+            environment: [:],
+            currentDirectoryPath: tempDirectory.path
+        )
+
+        XCTAssertEqual(context.daemonURL, "http://[::1]:7099")
+        XCTAssertEqual(context.daemonListenAddressOverride, "[::1]:7099")
     }
 
     func testDetectIgnoresNonLoopbackEnvironmentDaemonURL() {
@@ -83,7 +103,7 @@ final class ShellBootstrapTests: XCTestCase {
         )
 
         XCTAssertEqual(context.daemonURL, ShellBootstrapContext.defaultManualDaemonURL())
-        XCTAssertEqual(context.daemonTargetSource, .manualDefault)
+        XCTAssertTrue(context.daemonTargetReason.contains("global manual daemon endpoint"))
     }
 
     func testDetectDefaultsToGlobalManualDaemonWithoutWorkspaceConfig() {
@@ -94,7 +114,7 @@ final class ShellBootstrapTests: XCTestCase {
 
         XCTAssertEqual(context.projectName, "control-room")
         XCTAssertEqual(context.daemonURL, ShellBootstrapContext.defaultManualDaemonURL())
-        XCTAssertEqual(context.daemonTargetSource, .manualDefault)
+        XCTAssertTrue(context.daemonTargetReason.contains("global manual daemon endpoint"))
         XCTAssertEqual(context.daemonListenAddressOverride, "127.0.0.1:7070")
     }
 

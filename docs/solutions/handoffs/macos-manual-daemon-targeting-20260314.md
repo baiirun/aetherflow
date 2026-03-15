@@ -38,6 +38,7 @@ The original app behavior reused project hashing from the CLI’s old auto-orien
 ## Key Decisions
 
 - The app now treats manual mode as the default operator contract; project name remains display context, not the default transport key.
+- The app intentionally targets only the single global manual daemon by default. Connecting to any other manual daemon requires an explicit loopback override.
 - Explicit loopback daemon overrides remain supported, but they are treated as manual endpoint overrides, not as a signal to re-enter project hashing.
 - A small CLI addition (`--listen-addr`) was included because it is the simplest way to preserve alignment during app-triggered daemon starts.
 
