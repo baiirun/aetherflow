@@ -304,6 +304,93 @@ final class MonitoringStoreTests: XCTestCase {
         )
     }
 
+    func testMenuBarSessionShortcutsExposeLeadingWorkloads() async throws {
+        let bootstrap = Self.bootstrap
+        let controller = RecordingDaemonController(
+            statusResults: [
+                .success(Self.statusForNewWorkloadOrdering()),
+            ],
+            detailResults: [
+                .success(Self.detail(agentID: "agent-attn", workRef: "ts-attn", sessionID: "ses-attn")),
+            ],
+            eventResults: [
+                .success(Self.events(lines: ["session.created"], sessionID: "ses-attn", workRef: "ts-attn", agentID: "agent-attn", lastTS: 101)),
+            ]
+        )
+        let store = MonitoringStore(
+            context: bootstrap,
+            controller: controller,
+            isDaemonAbsent: { _ in false },
+            autoStartMonitoring: false
+        )
+
+        await store.refresh()
+
+        XCTAssertEqual(
+            store.snapshot.menuBarSessionShortcuts.map(\.id),
+            ["agent-attn", "agent-newer", "agent-older"]
+        )
+    }
+
+    func testMenuBarDeepLinkSelectsSessionDetail() async throws {
+        let bootstrap = Self.bootstrap
+        let controller = RecordingDaemonController(
+            statusResults: [
+                .success(Self.statusWithAgentAndSpawn()),
+                .success(Self.statusWithAgentAndSpawn()),
+            ],
+            detailResults: [
+                .success(Self.detail(agentID: "agent-1", workRef: "ts-c9cdd2", sessionID: "ses-1")),
+                .success(Self.detail(agentID: "spawn-1", workRef: "manual-spawn", sessionID: "ses-2")),
+            ],
+            eventResults: [
+                .success(Self.events(lines: ["session.created"], sessionID: "ses-1", workRef: "ts-c9cdd2", agentID: "agent-1", lastTS: 101)),
+                .success(Self.events(lines: ["spawn.created"], sessionID: "ses-2", workRef: "manual-spawn", agentID: "spawn-1", lastTS: 202)),
+            ]
+        )
+        let store = MonitoringStore(
+            context: bootstrap,
+            controller: controller,
+            isDaemonAbsent: { _ in false },
+            autoStartMonitoring: false
+        )
+        let navigationStore = NavigationStore()
+
+        navigationStore.select(section: .diagnostics)
+        await store.refresh()
+
+        activateMenuBarSessionDeepLink(
+            workloadID: "spawn-1",
+            navigationStore: navigationStore,
+            monitoringStore: store
+        )
+        await store.refresh()
+
+        XCTAssertEqual(navigationStore.selectedSection, .sessions)
+        XCTAssertEqual(store.snapshot.selectedWorkloadID, "spawn-1")
+        XCTAssertEqual(store.snapshot.selectedDetail?.workloadID, "spawn-1")
+        XCTAssertEqual(store.snapshot.selectedDetail?.session.sessionID, "ses-2")
+    }
+
+    func testSelectionDetailSurfacesHandoffUnavailableCopy() {
+        let detail = Self.detail(agentID: "spawn-1", workRef: "manual-spawn", sessionID: "ses-2", attachable: false)
+        let selectionDetail = MonitoringSelectionDetail(
+            workloadID: "spawn-1",
+            session: detail.session,
+            agent: detail.agent,
+            toolCalls: [],
+            eventLines: [],
+            lastEventTimestamp: 0,
+            errors: [],
+            isLive: true
+        )
+
+        XCTAssertEqual(
+            selectionDetail.handoffUnavailableCopy,
+            "Opencode handoff is unavailable for this session. The daemon has not exposed an attachable route yet."
+        )
+    }
+
     func testRefreshNoteCallsOutNonManualDaemonTarget() async throws {
         let bootstrap = Self.bootstrap
         let controller = RecordingDaemonController(
@@ -575,7 +662,8 @@ final class MonitoringStoreTests: XCTestCase {
     private static func detail(
         agentID: String = "agent-1",
         workRef: String = "ts-c9cdd2",
-        sessionID: String = "ses-1"
+        sessionID: String = "ses-1",
+        attachable: Bool = true
     ) -> DaemonAgentDetailPayload {
         DaemonAgentDetailPayload(
             agent: DaemonAgentStatusPayload(
@@ -604,7 +692,7 @@ final class MonitoringStoreTests: XCTestCase {
                 createdAt: .now,
                 lastSeenAt: .now,
                 updatedAt: .now,
-                attachable: true
+                attachable: attachable
             ),
             toolCalls: [],
             errors: []

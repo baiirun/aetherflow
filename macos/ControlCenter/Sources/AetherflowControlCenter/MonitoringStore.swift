@@ -30,6 +30,13 @@ struct MonitoringWorkloadSummary: Identifiable, Equatable, Sendable {
     let lastActivityAt: Date?
 }
 
+struct MenuBarSessionShortcut: Identifiable, Equatable, Sendable {
+    let id: String
+    let title: String
+    let subtitle: String
+    let sessionID: String
+}
+
 struct MonitoringQueueItem: Identifiable, Equatable, Sendable {
     let id: String
     let priority: Int
@@ -62,6 +69,13 @@ struct MonitoringSelectionDetail: Equatable, Sendable {
             sessionStatus: session.status.nonEmptyValue,
             isLive: false
         )
+    }
+
+    var handoffUnavailableCopy: String? {
+        guard !session.attachable else {
+            return nil
+        }
+        return "Opencode handoff is unavailable for this session. The daemon has not exposed an attachable route yet."
     }
 
     static func isTerminalLifecycle(_ value: String) -> Bool {
@@ -100,6 +114,17 @@ struct MonitoringSnapshot: Equatable, Sendable {
     let lastError: String?
     let updatedAt: Date
 
+    var menuBarSessionShortcuts: [MenuBarSessionShortcut] {
+        workloads.prefix(3).map { workload in
+            MenuBarSessionShortcut(
+                id: workload.id,
+                title: workload.title,
+                subtitle: workload.workRef,
+                sessionID: workload.sessionID.nonEmptyValue ?? "claiming"
+            )
+        }
+    }
+
     static func initial(context: ShellBootstrapContext) -> Self {
         Self(
             phase: .connecting,
@@ -115,6 +140,16 @@ struct MonitoringSnapshot: Equatable, Sendable {
             updatedAt: .now
         )
     }
+}
+
+@MainActor
+func activateMenuBarSessionDeepLink(
+    workloadID: String,
+    navigationStore: NavigationStore,
+    monitoringStore: MonitoringStore
+) {
+    navigationStore.select(section: .sessions)
+    monitoringStore.selectWorkload(id: workloadID)
 }
 
 @MainActor

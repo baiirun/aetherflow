@@ -644,6 +644,7 @@ struct MenuBarControlCenterView: View {
     @EnvironmentObject private var transportStore: TransportStore
     @EnvironmentObject private var lifecycleStore: DaemonLifecycleStore
     @EnvironmentObject private var navigationStore: NavigationStore
+    @EnvironmentObject private var monitoringStore: MonitoringStore
 
     let windowID: String
 
@@ -689,6 +690,40 @@ struct MenuBarControlCenterView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
+
+            if !monitoringStore.snapshot.menuBarSessionShortcuts.isEmpty {
+                Divider()
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Jump To Session")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundStyle(ShellPalette.mutedInk)
+
+                    ForEach(monitoringStore.snapshot.menuBarSessionShortcuts) { shortcut in
+                        Button {
+                            activateMenuBarSessionDeepLink(
+                                workloadID: shortcut.id,
+                                navigationStore: navigationStore,
+                                monitoringStore: monitoringStore
+                            )
+                            Task {
+                                await monitoringStore.refresh()
+                            }
+                            NSApplication.shared.activate(ignoringOtherApps: true)
+                            openWindow(id: windowID)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(shortcut.title)
+                                Text("\(shortcut.sessionID) • \(shortcut.subtitle)")
+                                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(ShellPalette.mutedInk)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+            }
 
             HStack(spacing: 10) {
                 Button("Start") {
@@ -1163,6 +1198,10 @@ private struct SessionsDetailPanel: View {
                     SessionFactCard(label: "Updated", value: monitoringTimestampLabel(detail.session.updatedAt))
                 }
 
+                if let handoffUnavailableCopy = detail.handoffUnavailableCopy {
+                    HandoffUnavailableCard(copy: handoffUnavailableCopy)
+                }
+
                 if let lastLog = detail.agent.lastLog.nonEmptyValue {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Latest daemon note")
@@ -1221,6 +1260,31 @@ private struct SessionsDetailPanel: View {
                     : "The detail pane will hold session route, tool activity, and recent daemon events without changing selection."
             )
         }
+    }
+}
+
+private struct HandoffUnavailableCard: View {
+    let copy: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Opencode handoff unavailable")
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(ShellPalette.ink)
+            Text(copy)
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(ShellPalette.mutedInk)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(Color.white.opacity(0.28))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18)
+                        .stroke(ShellPalette.ember.opacity(0.45), lineWidth: 1)
+                )
+        )
     }
 }
 
