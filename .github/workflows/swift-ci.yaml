@@ -1,0 +1,37 @@
+name: Swift CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "macos/ControlCenter/**/*.swift"
+      - "macos/ControlCenter/Package.swift"
+      - "macos/ControlCenter/Package.resolved"
+      - ".github/workflows/swift-ci.yaml"
+  pull_request:
+    paths:
+      - "macos/ControlCenter/**/*.swift"
+      - "macos/ControlCenter/Package.swift"
+      - "macos/ControlCenter/Package.resolved"
+      - ".github/workflows/swift-ci.yaml"
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.2"
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Build
+        working-directory: macos/ControlCenter
+        run: swift build
+
+      - name: Test
+        working-directory: macos/ControlCenter
+        run: swift test
