@@ -17,6 +17,7 @@ on:
 
 jobs:
   build:
+    name: Build
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +34,7 @@ jobs:
         run: swift build
 
   test:
+    name: Test
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
