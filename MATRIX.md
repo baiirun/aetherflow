@@ -17,6 +17,8 @@ Expected behaviors and their verification status. This is the project's oracle â
 | Status | af status displays Recent section with exited agents | Manual: `af status` (daemon required) | manual | 2026-02-10 |
 | Events | Session ID captured from plugin session.created event | `go test ./internal/daemon/... -run TestClaimSessionPoolAgent` | covered | 2026-02-19 |
 | Status | Agent detail shows opencode session ID in TUI meta pane | Manual: TUI agent detail view | manual | 2026-02-10 |
+| Control Center | Manual daemon targeting defaults to the single global endpoint without project hashing | `cd macos/ControlCenter && swift test --filter ShellBootstrapTests` | covered | 2026-03-14 |
+| Control Center | App-triggered daemon start uses manual mode with an aligned listen address | `cd macos/ControlCenter && swift test --filter DaemonControlTests` | covered | 2026-03-14 |
 | Agent Control | af kill <agent> sends SIGTERM and validates agent state | `go test ./internal/daemon/... -run TestHandleAgentKill` | covered | 2026-02-10 |
 | Agent Control | Kill rejects invalid PIDs (0 or negative) | `go test ./internal/daemon/... -run TestHandleAgentKillInvalidPID` | covered | 2026-02-10 |
 | Agent Control | Kill rejects non-running agents | `go test ./internal/daemon/... -run TestHandleAgentKillNonRunningAgent` | covered | 2026-02-10 |

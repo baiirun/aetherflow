@@ -223,6 +223,53 @@ final class DaemonControlTests: XCTestCase {
             ]
         )
     }
+
+    func testRequestStartUsesGlobalManualDaemonDefaults() async throws {
+        let capturedInvocation = CommandInvocationBox()
+        let controller = DefaultDaemonController(
+            session: URLSession(configuration: .ephemeral),
+            commandRunner: { invocation in
+                capturedInvocation.value = invocation
+                return CommandOutput(status: 0, stdout: "daemon started", stderr: "")
+            }
+        )
+
+        _ = try await controller.requestStart(
+            context: ShellBootstrapContext(
+                projectName: "control-room",
+                workingDirectory: "/tmp/control-room",
+                daemonURL: "http://127.0.0.1:7070",
+                cliPath: "/usr/local/bin/af"
+            )
+        )
+
+        XCTAssertEqual(capturedInvocation.value?.arguments, ["daemon", "start", "--detach", "--spawn-policy", "manual", "--listen-addr", "127.0.0.1:7070"])
+        XCTAssertEqual(capturedInvocation.value?.currentDirectory, "/tmp/control-room")
+    }
+
+    func testRequestStartPreservesExplicitListenAddrOverride() async throws {
+        let capturedInvocation = CommandInvocationBox()
+        let controller = DefaultDaemonController(
+            session: URLSession(configuration: .ephemeral),
+            commandRunner: { invocation in
+                capturedInvocation.value = invocation
+                return CommandOutput(status: 0, stdout: "daemon started", stderr: "")
+            }
+        )
+
+        _ = try await controller.requestStart(
+            context: ShellBootstrapContext(
+                projectName: "control-room",
+                workingDirectory: "/tmp/control-room",
+                daemonURL: "http://127.0.0.1:7099",
+                cliPath: "/usr/local/bin/af",
+                daemonTargetReason: "Using explicit override.",
+                daemonListenAddressOverride: "127.0.0.1:7099"
+            )
+        )
+
+        XCTAssertEqual(capturedInvocation.value?.arguments, ["daemon", "start", "--detach", "--spawn-policy", "manual", "--listen-addr", "127.0.0.1:7099"])
+    }
 }
 
 // MARK: - Helpers
@@ -269,4 +316,8 @@ final class MockHTTPProtocol: URLProtocol, @unchecked Sendable {
     }
 
     override func stopLoading() {}
+}
+
+private final class CommandInvocationBox: @unchecked Sendable {
+    var value: CommandInvocation?
 }

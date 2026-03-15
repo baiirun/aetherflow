@@ -5,6 +5,24 @@ struct ShellBootstrapContext: Equatable, Sendable {
     let workingDirectory: String
     let daemonURL: String
     let cliPath: String
+    let daemonTargetReason: String
+    let daemonListenAddressOverride: String?
+
+    init(
+        projectName: String,
+        workingDirectory: String,
+        daemonURL: String,
+        cliPath: String,
+        daemonTargetReason: String = "Defaulting to the global manual daemon endpoint.",
+        daemonListenAddressOverride: String? = nil
+    ) {
+        self.projectName = projectName
+        self.workingDirectory = workingDirectory
+        self.daemonURL = daemonURL
+        self.cliPath = cliPath
+        self.daemonTargetReason = daemonTargetReason
+        self.daemonListenAddressOverride = daemonListenAddressOverride ?? Self.listenAddrFromDaemonURL(daemonURL)
+    }
 
     static func detect(
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -17,13 +35,21 @@ struct ShellBootstrapContext: Equatable, Sendable {
         let projectName = environment["AETHERFLOW_PROJECT"]?.trimmedNonEmpty
             ?? configuredProjectName
             ?? fallbackProjectName
-        let daemonURL = validatedLoopbackDaemonURL(environment["AETHERFLOW_DAEMON_URL"])
-            ?? configuredValues.daemonURL
-            ?? defaultDaemonURL(for: projectName)
+        let daemonTarget = resolvedDaemonTarget(
+            environmentDaemonURL: environment["AETHERFLOW_DAEMON_URL"],
+            configuredValues: configuredValues
+        )
         let cliPath = environment["AETHERFLOW_CLI_PATH"]?.trimmedNonEmpty
             ?? defaultCLIPath(for: workingDirectory, pathEnvironment: environment["PATH"])
             ?? "af"
-        return Self(projectName: projectName, workingDirectory: workingDirectory, daemonURL: daemonURL, cliPath: cliPath)
+        return Self(
+            projectName: projectName,
+            workingDirectory: workingDirectory,
+            daemonURL: daemonTarget.url,
+            cliPath: cliPath,
+            daemonTargetReason: daemonTarget.reason,
+            daemonListenAddressOverride: daemonTarget.listenAddress
+        )
     }
 
     static func defaultProjectName(for currentDirectoryPath: String) -> String {
@@ -34,17 +60,8 @@ struct ShellBootstrapContext: Equatable, Sendable {
         return lastComponent
     }
 
-    /// Returns the daemon HTTP URL for the given project name, using the same
-    /// FNV-1a port-hashing scheme as the Go `protocol.DaemonURLFor` function.
-    /// Empty project → "http://127.0.0.1:7070" (the default port).
-    /// Non-empty project → "http://127.0.0.1:<7071–7170>" (hashed range).
-    static func defaultDaemonURL(for projectName: String) -> String {
-        if projectName.isEmpty {
-            return "http://127.0.0.1:7070"
-        }
-        let hash = fnv1a32(projectName)
-        let port = 7070 + 1 + Int(hash % 100)
-        return "http://127.0.0.1:\(port)"
+    static func defaultManualDaemonURL() -> String {
+        "http://127.0.0.1:7070"
     }
 
     static func defaultCLIPath(for workingDirectory: String, pathEnvironment: String?) -> String? {
@@ -65,15 +82,16 @@ struct ShellBootstrapContext: Equatable, Sendable {
         return nil
     }
 
-    static func configuredValues(for workingDirectory: String) -> (projectName: String?, daemonURL: String?) {
+    static func configuredValues(for workingDirectory: String) -> (projectName: String?, daemonURL: String?, listenAddress: String?) {
         let configPath = URL(fileURLWithPath: workingDirectory).appendingPathComponent(".aetherflow.yaml").path
         guard let data = FileManager.default.contents(atPath: configPath),
               let contents = String(data: data, encoding: .utf8) else {
-            return (nil, nil)
+            return (nil, nil, nil)
         }
 
         var projectName: String?
         var daemonURL: String?
+        var listenAddress: String?
         for line in contents.split(whereSeparator: \.isNewline) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("project:") {
@@ -84,41 +102,69 @@ struct ShellBootstrapContext: Equatable, Sendable {
             if trimmed.hasPrefix("listen_addr:") {
                 let value = trimmed.dropFirst("listen_addr:".count).trimmingCharacters(in: .whitespaces)
                 let unquoted = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-                daemonURL = daemonURLFromListenAddr(unquoted)
+                if let target = daemonTargetFromListenAddr(unquoted) {
+                    listenAddress = target.listenAddress
+                    daemonURL = target.url
+                }
             }
         }
-        return (projectName, daemonURL)
+        return (projectName, daemonURL, listenAddress)
     }
 
-    static func daemonURLFromListenAddr(_ listenAddr: String) -> String? {
-        guard !listenAddr.isEmpty else {
+    static func daemonTargetFromListenAddr(_ listenAddr: String) -> (url: String, listenAddress: String)? {
+        let trimmed = listenAddr.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
             return nil
         }
-        guard let hostRange = listenAddr.lastIndex(of: ":") else {
+
+        let normalizedListenAddr = trimmed.hasPrefix(":") ? "127.0.0.1\(trimmed)" : trimmed
+        let candidateURL = "http://\(normalizedListenAddr)"
+        guard let daemonURL = validatedLoopbackDaemonURL(candidateURL),
+              let normalizedListenAddress = listenAddrFromDaemonURL(daemonURL) else {
             return nil
         }
-        let hostPart = String(listenAddr[..<hostRange])
-        let portPart = String(listenAddr[listenAddr.index(after: hostRange)...])
-        guard !portPart.isEmpty else {
-            return nil
-        }
-        let host = hostPart.isEmpty ? "127.0.0.1" : hostPart
-        let normalizedHost = host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]" ? host : ""
-        guard !normalizedHost.isEmpty else {
-            return nil
-        }
-        let urlHost = normalizedHost == "::1" ? "[::1]" : normalizedHost
-        return "http://\(urlHost):\(portPart)"
+        return (daemonURL, normalizedListenAddress)
     }
 
-    /// FNV-1a 32-bit hash — matches the Go simpleHash function in protocol/daemon_url.go.
-    private static func fnv1a32(_ s: String) -> UInt32 {
-        var h: UInt32 = 2166136261
-        for byte in s.utf8 {
-            h ^= UInt32(byte)
-            h = h &* 16777619
+    static func listenAddrFromDaemonURL(_ rawValue: String) -> String? {
+        guard let rawValue = validatedLoopbackDaemonURL(rawValue),
+              let url = URL(string: rawValue),
+              let host = url.host,
+              let port = url.port else {
+            return nil
         }
-        return h
+        if host == "::1" {
+            return "[::1]:\(port)"
+        }
+        return "\(host):\(port)"
+    }
+
+    private static func resolvedDaemonTarget(
+        environmentDaemonURL: String?,
+        configuredValues: (projectName: String?, daemonURL: String?, listenAddress: String?)
+    ) -> (url: String, reason: String, listenAddress: String?) {
+        if let daemonURL = validatedLoopbackDaemonURL(environmentDaemonURL),
+           let listenAddress = listenAddrFromDaemonURL(daemonURL) {
+            return (
+                daemonURL,
+                "Using the explicit AETHERFLOW_DAEMON_URL override for manual daemon monitoring.",
+                listenAddress
+            )
+        }
+        if let daemonURL = configuredValues.daemonURL,
+           let listenAddress = configuredValues.listenAddress?.trimmedNonEmpty {
+            return (
+                daemonURL,
+                "Using listen_addr from .aetherflow.yaml for manual daemon monitoring.",
+                listenAddress
+            )
+        }
+        let defaultURL = defaultManualDaemonURL()
+        return (
+            defaultURL,
+            "No daemon override was provided, so the app is targeting the global manual daemon endpoint.",
+            listenAddrFromDaemonURL(defaultURL)
+        )
     }
 }
 

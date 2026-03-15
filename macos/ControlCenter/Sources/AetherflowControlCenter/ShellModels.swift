@@ -203,6 +203,7 @@ struct TransportSnapshot {
     let workingDirectory: String
     let daemonURL: String
     let cliPath: String
+    let daemonTargetReason: String
     let note: String
 }
 
@@ -223,4 +224,13 @@ struct DaemonLifecycleSnapshot {
     let statusCopy: String
     let lastError: String?
     let updatedAt: Date
+}
+
+func nonManualDaemonWarning(for spawnPolicy: String?) -> String? {
+    guard let normalizedPolicy = spawnPolicy?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !normalizedPolicy.isEmpty,
+          normalizedPolicy != "manual" else {
+        return nil
+    }
+    return "The app is pointed at a non-manual daemon; manual monitoring defaults are overridden."
 }

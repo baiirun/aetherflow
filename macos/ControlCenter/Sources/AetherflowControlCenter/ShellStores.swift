@@ -12,7 +12,8 @@ final class TransportStore: ObservableObject {
             workingDirectory: context.workingDirectory,
             daemonURL: context.daemonURL,
             cliPath: context.cliPath,
-            note: "Shell bootstrap is resolved. Waiting for the first lifecycle probe."
+            daemonTargetReason: context.daemonTargetReason,
+            note: "\(context.daemonTargetReason) Waiting for the first lifecycle probe."
         )
     }
 
@@ -23,6 +24,7 @@ final class TransportStore: ObservableObject {
             workingDirectory: snapshot.workingDirectory,
             daemonURL: snapshot.daemonURL,
             cliPath: snapshot.cliPath,
+            daemonTargetReason: snapshot.daemonTargetReason,
             note: note
         )
     }
@@ -113,7 +115,7 @@ final class DaemonLifecycleStore: ObservableObject {
         banner = nil
         appendDiagnostic(
             title: "Start requested",
-            detail: "Launching daemon from \(context.cliPath) in \(context.workingDirectory).",
+            detail: "Launching a manual daemon from \(context.cliPath) in \(context.workingDirectory) for \(context.daemonURL). \(context.daemonTargetReason)",
             tone: .info
         )
 
@@ -375,9 +377,15 @@ final class DaemonLifecycleStore: ObservableObject {
     }
 
     private func transportNote(for lifecycle: DaemonLifecyclePayload) -> String {
-        var parts = ["Lifecycle probe succeeded for \(lifecycle.project.nonEmptyValue ?? context.projectName)."]
+        var parts = ["Lifecycle probe succeeded for \(lifecycle.project.nonEmptyValue ?? context.projectName) at \(context.daemonURL)."]
         if let spawnPolicy = lifecycle.spawnPolicy.nonEmptyValue {
             parts.append("Spawn policy: \(spawnPolicy).")
+            if let warning = nonManualDaemonWarning(for: spawnPolicy) {
+                parts.append(warning)
+            }
+        }
+        if let reportedURL = lifecycle.daemonURL.nonEmptyValue, reportedURL != context.daemonURL {
+            parts.append("Daemon reported \(reportedURL), which differs from the app target.")
         }
         if lifecycle.activeSessionCount > 0 {
             parts.append("Attached sessions: \(lifecycle.activeSessionCount).")
