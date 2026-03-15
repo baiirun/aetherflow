@@ -304,6 +304,39 @@ final class MonitoringStoreTests: XCTestCase {
         )
     }
 
+    func testRefreshNoteCallsOutNonManualDaemonTarget() async throws {
+        let bootstrap = Self.bootstrap
+        let controller = RecordingDaemonController(
+            statusResults: [
+                .success(
+                    DaemonStatusPayload(
+                        poolSize: 1,
+                        poolMode: "active",
+                        project: "control-room",
+                        spawnPolicy: "auto",
+                        agents: [],
+                        spawns: [],
+                        queue: [],
+                        errors: []
+                    )
+                )
+            ],
+            detailResults: [],
+            eventResults: []
+        )
+        let store = MonitoringStore(
+            context: bootstrap,
+            controller: controller,
+            isDaemonAbsent: { _ in false },
+            autoStartMonitoring: false
+        )
+
+        await store.refresh()
+
+        XCTAssertTrue(store.snapshot.note.contains("Spawn policy: auto."))
+        XCTAssertTrue(store.snapshot.note.contains("not serving a manual daemon"))
+    }
+
     private static var bootstrap: ShellBootstrapContext {
         ShellBootstrapContext(
             projectName: "aetherflow",

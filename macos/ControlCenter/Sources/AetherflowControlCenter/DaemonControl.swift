@@ -518,17 +518,34 @@ private struct RPCEnvelope<Result: Decodable>: Decodable {
     let error: String?
 }
 
-private struct CommandOutput: Sendable {
+struct CommandOutput: Sendable {
     let status: Int32
     let stdout: String
     let stderr: String
 }
 
+struct CommandInvocation: Sendable {
+    let executable: String
+    let arguments: [String]
+    let currentDirectory: String
+}
+
 struct DefaultDaemonController: DaemonControlling, Sendable {
     private let session: URLSession
+    private let commandRunner: @Sendable (CommandInvocation) throws -> CommandOutput
 
-    init(session: URLSession = DefaultDaemonController.makeSession()) {
+    init(
+        session: URLSession = DefaultDaemonController.makeSession(),
+        commandRunner: @escaping @Sendable (CommandInvocation) throws -> CommandOutput = { invocation in
+            try DefaultDaemonController.runCommand(
+                executable: invocation.executable,
+                arguments: invocation.arguments,
+                currentDirectory: invocation.currentDirectory
+            )
+        }
+    ) {
         self.session = session
+        self.commandRunner = commandRunner
     }
 
     func fetchLifecycle(daemonURL: String) async throws -> DaemonLifecyclePayload {
@@ -593,18 +610,27 @@ struct DefaultDaemonController: DaemonControlling, Sendable {
     }
 
     func requestStart(context: ShellBootstrapContext) async throws -> DaemonStartReceipt {
+        let invocation = Self.startInvocation(for: context)
         let output = try await Self.runBlocking {
-            try Self.runCommand(
-                executable: context.cliPath,
-                arguments: ["daemon", "start", "--detach", "--project", context.projectName],
-                currentDirectory: context.workingDirectory
-            )
+            try commandRunner(invocation)
         }
         guard output.status == 0 else {
             throw DaemonControlError.commandFailed(Self.commandFailureMessage(output))
         }
         let message = output.stdout.nonEmptyTrimmed ?? "daemon start requested"
         return DaemonStartReceipt(message: message)
+    }
+
+    static func startInvocation(for context: ShellBootstrapContext) -> CommandInvocation {
+        var arguments = ["daemon", "start", "--detach", "--spawn-policy", "manual"]
+        if let listenAddr = context.daemonListenAddressOverride?.nonEmptyTrimmed {
+            arguments.append(contentsOf: ["--listen-addr", listenAddr])
+        }
+        return CommandInvocation(
+            executable: context.cliPath,
+            arguments: arguments,
+            currentDirectory: context.workingDirectory
+        )
     }
 
     private func decodeEnvelope<T: Decodable>(_ data: Data, response: URLResponse) throws -> T {

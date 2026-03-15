@@ -110,7 +110,7 @@ struct MonitoringSnapshot: Equatable, Sendable {
             queue: [],
             selectedWorkloadID: nil,
             selectedDetail: nil,
-            note: "Waiting for the daemon monitoring endpoint to answer.",
+            note: "\(context.daemonTargetReason) Waiting for the daemon monitoring endpoint to answer.",
             lastError: nil,
             updatedAt: .now
         )
@@ -490,12 +490,15 @@ final class MonitoringStore: ObservableObject {
     }
 
     private func monitoringNote(for status: DaemonStatusPayload, workloadCount: Int) -> String {
-        var parts = ["Monitoring connected for \(status.project.nonEmptyValue ?? context.projectName)."]
+        var parts = ["Monitoring connected for \(status.project.nonEmptyValue ?? context.projectName) at \(context.daemonURL)."]
         if let poolMode = status.poolMode.nonEmptyValue {
             parts.append("Pool mode: \(poolMode).")
         }
         if let spawnPolicy = status.spawnPolicy.nonEmptyValue {
             parts.append("Spawn policy: \(spawnPolicy).")
+            if spawnPolicy != "manual" {
+                parts.append("The app target is not serving a manual daemon.")
+            }
         }
         parts.append("Visible workloads: \(workloadCount).")
         return parts.joined(separator: " ")

@@ -618,6 +618,7 @@ private struct SectionPreview: View {
                     DiagnosticRow(label: "project", value: transport.projectName)
                     DiagnosticRow(label: "cwd", value: transport.workingDirectory)
                     DiagnosticRow(label: "daemon_url", value: transport.daemonURL)
+                    DiagnosticRow(label: "daemon_reason", value: transport.daemonTargetReason)
                     DiagnosticRow(label: "cli", value: transport.cliPath)
                     DiagnosticRow(label: "lifecycle", value: lifecycle.phase.rawValue.lowercased())
                     DiagnosticRow(label: "note", value: transport.note)

@@ -203,6 +203,7 @@ struct TransportSnapshot {
     let workingDirectory: String
     let daemonURL: String
     let cliPath: String
+    let daemonTargetReason: String
     let note: String
 }
 

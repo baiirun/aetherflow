@@ -201,6 +201,46 @@ final class DaemonLifecycleStoreTests: XCTestCase {
         XCTAssertEqual(context.daemonURL, "http://127.0.0.1:7099")
     }
 
+    func testRefreshDiagnosticsCallOutNonManualDaemonTargetMismatch() async throws {
+        let controller = FakeDaemonController(
+            lifecycleResult: .success(
+                DaemonLifecyclePayload(
+                    state: "running",
+                    daemonURL: "http://127.0.0.1:7103",
+                    project: "control-room",
+                    serverURL: "http://127.0.0.1:4096",
+                    spawnPolicy: "auto",
+                    activeSessionCount: 0,
+                    activeSessionIDs: [],
+                    lastError: "",
+                    updatedAt: .now
+                )
+            ),
+            stopResult: .success(Self.stopResponse(outcome: "stopping", activeSessions: 0, message: "daemon stopping")),
+            startResult: .success(DaemonStartReceipt(message: "daemon started"))
+        )
+        let bootstrap = ShellBootstrapContext(
+            projectName: "control-room",
+            workingDirectory: "/tmp/control-room",
+            daemonURL: "http://127.0.0.1:7070",
+            cliPath: "/tmp/control-room/af"
+        )
+        let transportStore = TransportStore(context: bootstrap)
+        let store = DaemonLifecycleStore(
+            context: bootstrap,
+            transportStore: transportStore,
+            controller: controller,
+            isDaemonAbsent: { _ in false },
+            autoStartMonitoring: false
+        )
+
+        await store.refresh()
+
+        XCTAssertTrue(transportStore.snapshot.note.contains("Spawn policy: auto."))
+        XCTAssertTrue(transportStore.snapshot.note.contains("non-manual daemon"))
+        XCTAssertTrue(transportStore.snapshot.note.contains("7103"))
+    }
+
     private func eventually(
         timeoutNanoseconds: UInt64 = 500_000_000,
         pollNanoseconds: UInt64 = 20_000_000,

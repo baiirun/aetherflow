@@ -64,6 +64,9 @@ func buildConfig(cmd *cobra.Command) daemon.Config {
 	if cmd.Flags().Changed("project") {
 		cfg.Project, _ = cmd.Flags().GetString("project")
 	}
+	if cmd.Flags().Changed("listen-addr") {
+		cfg.ListenAddr, _ = cmd.Flags().GetString("listen-addr")
+	}
 	if cmd.Flags().Changed("poll-interval") {
 		cfg.PollInterval, _ = cmd.Flags().GetDuration("poll-interval")
 	}
@@ -114,7 +117,7 @@ func startDetached(cmd *cobra.Command) {
 
 	// Forward all flags except --detach.
 	reArgs := []string{"daemon", "start"}
-	for _, name := range []string{"project", "poll-interval", "pool-size", "spawn-cmd", "server-url", "spawn-policy", "max-retries", "solo", "config"} {
+	for _, name := range []string{"project", "listen-addr", "poll-interval", "pool-size", "spawn-cmd", "server-url", "spawn-policy", "max-retries", "solo", "config"} {
 		if cmd.Flags().Changed(name) {
 			val, _ := cmd.Flags().GetString(name)
 			// Duration and int flags also work with GetString via pflag.
@@ -169,6 +172,7 @@ func init() {
 	f := daemonStartCmd.Flags()
 	f.BoolP("detach", "d", false, "Run in background")
 	f.StringP("project", "p", "", "Project to watch for tasks (required for --spawn-policy=auto)")
+	f.String("listen-addr", "", "Daemon listen address override (for example 127.0.0.1:7070)")
 	f.Duration("poll-interval", daemon.DefaultPollInterval, "How often to poll prog for tasks")
 	f.Int("pool-size", daemon.DefaultPoolSize, "Maximum concurrent agent slots")
 	f.String("spawn-cmd", daemon.DefaultSpawnCmd, "Command to launch agent sessions")
