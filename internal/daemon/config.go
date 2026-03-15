@@ -150,10 +150,17 @@ type Config struct {
 	Logger *slog.Logger `yaml:"-"`
 }
 
+func (c Config) defaultDaemonURL() string {
+	if c.SpawnPolicy.Normalized() == SpawnPolicyAuto {
+		return protocol.DaemonURLFor(c.Project)
+	}
+	return protocol.DefaultDaemonURL
+}
+
 // ApplyDefaults fills in zero-valued fields with sensible defaults.
 func (c *Config) ApplyDefaults() {
 	if c.ListenAddr == "" {
-		c.ListenAddr = listenAddrFromURL(protocol.DaemonURLFor(c.Project))
+		c.ListenAddr = listenAddrFromURL(c.defaultDaemonURL())
 	}
 	if c.PollInterval == 0 {
 		c.PollInterval = DefaultPollInterval
