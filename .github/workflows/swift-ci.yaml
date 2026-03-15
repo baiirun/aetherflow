@@ -16,7 +16,7 @@ on:
       - ".github/workflows/swift-ci.yaml"
 
 jobs:
-  build-and-test:
+  build:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +31,18 @@ jobs:
       - name: Build
         working-directory: macos/ControlCenter
         run: swift build
+
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.2"
+
+      - name: Show Swift version
+        run: swift --version
 
       - name: Test
         working-directory: macos/ControlCenter
