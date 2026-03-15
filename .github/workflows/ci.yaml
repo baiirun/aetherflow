@@ -1,9 +1,19 @@
-name: CI
+name: Go
 
 on:
   push:
     branches: [main]
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/ci.yaml"
   pull_request:
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/ci.yaml"
 
 jobs:
   build:
