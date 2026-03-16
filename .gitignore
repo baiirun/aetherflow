@@ -33,3 +33,4 @@ Thumbs.db
 /macos/*/build/
 *.xcodeproj/xcuserdata/
 *.xcuserstate
+.worktrees

@@ -610,7 +610,7 @@ private struct SectionPreview: View {
                     }
                 }
             case .sessions:
-                SessionsDetailPanel(snapshot: monitoring)
+                SessionsDetailPanel(snapshot: monitoring, transport: transport)
             case .queue:
                 QueueDetailPanel(snapshot: monitoring)
             case .diagnostics:
@@ -1151,6 +1151,7 @@ private struct MonitoringEmptyRow: View {
 
 private struct SessionsDetailPanel: View {
     let snapshot: MonitoringSnapshot
+    let transport: TransportSnapshot
 
     var body: some View {
         if let detail = snapshot.selectedDetail {
@@ -1197,6 +1198,9 @@ private struct SessionsDetailPanel: View {
                     SessionFactCard(label: "Last activity", value: monitoringTimestampLabel(detail.agent.lastActivityAt ?? detail.session.lastSeenAt))
                     SessionFactCard(label: "Updated", value: monitoringTimestampLabel(detail.session.updatedAt))
                 }
+
+                SessionHandoffSection(detail: detail, transport: transport)
+                    .id("\(detail.workloadID)::\(detail.session.sessionID)")
 
                 if let handoffUnavailableCopy = detail.handoffUnavailableCopy {
                     HandoffUnavailableCard(copy: handoffUnavailableCopy)
@@ -1260,6 +1264,88 @@ private struct SessionsDetailPanel: View {
                     : "The detail pane will hold session route, tool activity, and recent daemon events without changing selection."
             )
         }
+    }
+}
+
+private struct SessionHandoffSection: View {
+    @EnvironmentObject private var handoffStore: SessionHandoffStore
+
+    let detail: MonitoringSelectionDetail
+    let transport: TransportSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Opencode handoff")
+                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                .foregroundStyle(ShellPalette.mutedInk)
+
+            HStack(alignment: .center, spacing: 12) {
+                Button {
+                    handoffStore.requestLaunch(detail: detail, transport: transport)
+                } label: {
+                    if launchPhase == .launching {
+                        Text("Launching...")
+                    } else {
+                        Text("Open in Opencode")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!detail.session.attachable || launchPhase == .launching)
+
+                if launchPhase == .launching {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+
+                MiniChip(
+                    text: detail.session.attachable ? "Ready" : "Unavailable",
+                    tone: detail.session.attachable ? ShellPalette.moss : ShellPalette.ember
+                )
+            }
+
+            Text(statusMessage)
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(statusTone)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(Color.white.opacity(0.22))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18)
+                        .stroke(ShellPalette.panelBorder, lineWidth: 1)
+                )
+        )
+    }
+
+    private var statusMessage: String {
+        switch launchPhase {
+        case .idle:
+            if detail.session.attachable {
+                return "Launches Terminal and runs the supported af session attach flow for this session."
+            }
+            return "This session cannot be opened in Opencode until the daemon exposes an attachable route."
+        case .launching:
+            return "Opening a Terminal handoff for \(detail.session.sessionID.nonEmptyValue ?? "the selected session")."
+        case let .success(message), let .failure(message):
+            return message
+        }
+    }
+
+    private var statusTone: Color {
+        switch launchPhase {
+        case .success:
+            return ShellPalette.moss
+        case .failure:
+            return ShellPalette.ember
+        case .idle, .launching:
+            return ShellPalette.mutedInk
+        }
+    }
+
+    private var launchPhase: SessionHandoffPhase {
+        handoffStore.phase(for: detail)
     }
 }
 

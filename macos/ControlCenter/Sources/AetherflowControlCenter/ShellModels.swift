@@ -207,6 +207,18 @@ struct TransportSnapshot {
     let note: String
 }
 
+enum SessionHandoffPhase: Equatable {
+    case idle
+    case launching
+    case success(String)
+    case failure(String)
+}
+
+struct SessionHandoffSnapshot: Equatable {
+    let selectionKey: String
+    let phase: SessionHandoffPhase
+}
+
 enum DaemonLifecyclePhase: String {
     case starting = "Starting"
     case running = "Running"
