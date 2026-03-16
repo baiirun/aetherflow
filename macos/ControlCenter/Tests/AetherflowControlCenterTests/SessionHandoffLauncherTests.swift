@@ -55,15 +55,6 @@ final class SessionHandoffLauncherTests: XCTestCase {
                     currentDirectory: currentDirectory
                 )
             )
-            if arguments.contains("sessions") {
-                return SessionHandoffCommandOutput(
-                    status: 0,
-                    stdout: """
-                    [{"session_id":"ses-123"}]
-                    """,
-                    stderr: ""
-                )
-            }
             return SessionHandoffCommandOutput(status: 0, stdout: "", stderr: "")
         }
 
@@ -72,37 +63,23 @@ final class SessionHandoffLauncherTests: XCTestCase {
             transport: Self.transportSnapshot()
         )
 
-        XCTAssertEqual(recorder.calls.count, 2)
-
-        XCTAssertEqual(recorder.calls[0].executable, "/tmp/aetherflow/af")
-        XCTAssertEqual(
-            recorder.calls[0].arguments,
-            ["sessions", "--json", "--server", "http://127.0.0.1:4096"]
-        )
+        XCTAssertEqual(recorder.calls.count, 1)
+        XCTAssertEqual(recorder.calls[0].executable, "/usr/bin/osascript")
         XCTAssertEqual(recorder.calls[0].currentDirectory, "/tmp/aetherflow")
-
-        XCTAssertEqual(recorder.calls[1].executable, "/usr/bin/osascript")
-        XCTAssertEqual(recorder.calls[1].currentDirectory, "/tmp/aetherflow")
         XCTAssertEqual(
-            Array(recorder.calls[1].arguments.prefix(4)),
+            Array(recorder.calls[0].arguments.prefix(4)),
             ["-e", "tell application \"Terminal\"", "-e", "activate"]
         )
         XCTAssertTrue(
-            recorder.calls[1].arguments.contains(
+            recorder.calls[0].arguments.contains(
                 "do script \"cd '/tmp/aetherflow' && '/tmp/aetherflow/af' session attach 'ses-123' --server 'http://127.0.0.1:4096'\""
             )
         )
     }
 
-    func testLaunchRejectsMissingRegistrySession() async {
+    func testLaunchSurfacesAttachCommandFailure() async {
         let launcher = SessionHandoffLauncher { _, _, _ in
-            SessionHandoffCommandOutput(
-                status: 0,
-                stdout: """
-                [{"session_id":"ses-other"}]
-                """,
-                stderr: ""
-            )
+            SessionHandoffCommandOutput(status: 1, stdout: "", stderr: "attach failed")
         }
 
         await XCTAssertThrowsErrorAsync(
@@ -113,7 +90,7 @@ final class SessionHandoffLauncherTests: XCTestCase {
         ) { error in
             XCTAssertEqual(
                 error as? SessionHandoffLaunchError,
-                .launchFailed("Session ses-123 is not available in the local session registry for http://127.0.0.1:4096.")
+                .launchFailed("attach failed")
             )
         }
     }
