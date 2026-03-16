@@ -8,6 +8,7 @@ import (
 func TestHelloCmdPrintsHelloWorld(t *testing.T) {
 	var buf bytes.Buffer
 	helloCmd.SetOut(&buf)
+	t.Cleanup(func() { helloCmd.SetOut(nil) })
 
 	helloCmd.Run(helloCmd, nil)
 
