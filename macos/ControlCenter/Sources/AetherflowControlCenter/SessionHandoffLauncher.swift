@@ -1,4 +1,6 @@
 import Foundation
+import OSLog
+import Darwin
 
 struct SessionHandoffCommandOutput: Equatable, Sendable {
     let status: Int32
@@ -22,6 +24,9 @@ enum SessionHandoffLaunchError: LocalizedError, Equatable {
 struct SessionHandoffLauncher: Sendable {
     typealias Runner = @Sendable (_ executable: String, _ arguments: [String], _ currentDirectory: String) throws -> SessionHandoffCommandOutput
 
+    private static let logger = Logger(subsystem: "com.baiirun.aetherflow.controlcenter", category: "session-handoff")
+    private static let commandTimeout: TimeInterval = 5
+
     private let runner: Runner
 
     init(runner: @escaping Runner = Self.runProcess) {
@@ -30,13 +35,23 @@ struct SessionHandoffLauncher: Sendable {
 
     func launch(session: DaemonSessionMetadataPayload, transport: TransportSnapshot) async throws {
         let validated = try Self.validatedMetadata(session: session, transport: transport)
+        assert(!validated.workingDirectory.isEmpty)
+        assert(!validated.cliPath.isEmpty)
+        assert(!validated.sessionID.isEmpty)
         let command = Self.terminalCommand(validated: validated)
         let arguments = Self.appleScriptArguments(command: command)
         try await Self.runBlocking {
+            Self.logger.info(
+                "Launching Opencode handoff executable=/usr/bin/osascript cwd=\(validated.workingDirectory, privacy: .public) args=\(arguments.joined(separator: " "), privacy: .public)"
+            )
             let launchOutput = try runner("/usr/bin/osascript", arguments, validated.workingDirectory)
             guard launchOutput.status == 0 else {
+                Self.logger.error(
+                    "Opencode handoff failed status=\(launchOutput.status) stdout=\(launchOutput.stdout, privacy: .public) stderr=\(launchOutput.stderr, privacy: .public)"
+                )
                 throw SessionHandoffLaunchError.launchFailed(Self.commandFailureMessage(launchOutput))
             }
+            Self.logger.info("Opencode handoff launched successfully for session \(validated.sessionID, privacy: .public)")
         }
     }
 
@@ -121,7 +136,16 @@ struct SessionHandoffLauncher: Sendable {
             )
         }
 
-        process.waitUntilExit()
+        if waitForExit(process, timeout: commandTimeout) {
+            logger.error(
+                "Opencode handoff command timed out executable=\(executable, privacy: .public) cwd=\(currentDirectory, privacy: .public) args=\(arguments.joined(separator: " "), privacy: .public)"
+            )
+            terminate(process: process)
+            throw SessionHandoffLaunchError.launchFailed(
+                "Opencode handoff timed out after \(Int(commandTimeout)) seconds."
+            )
+        }
+
         return SessionHandoffCommandOutput(
             status: process.terminationStatus,
             stdout: String(decoding: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
@@ -161,6 +185,14 @@ struct SessionHandoffLauncher: Sendable {
                 "Cannot launch Opencode handoff because server_ref is missing from the daemon metadata."
             )
         }
+
+        var isDirectory = ObjCBool(false)
+        guard FileManager.default.fileExists(atPath: workingDirectory, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw SessionHandoffLaunchError.invalidMetadata(
+                "Cannot launch Opencode handoff because the working directory is unavailable."
+            )
+        }
+
         return (workingDirectory, cliPath, sessionID, serverRef)
     }
 
@@ -172,6 +204,30 @@ struct SessionHandoffLauncher: Sendable {
             return output.stdout
         }
         return "Command exited with status \(output.status)."
+    }
+
+    private static func waitForExit(_ process: Process, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning {
+            if Date() >= deadline {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return false
+    }
+
+    private static func terminate(process: Process) {
+        guard process.isRunning else {
+            return
+        }
+
+        process.terminate()
+        Thread.sleep(forTimeInterval: 0.1)
+        if process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
+        }
+        process.waitUntilExit()
     }
 }
 

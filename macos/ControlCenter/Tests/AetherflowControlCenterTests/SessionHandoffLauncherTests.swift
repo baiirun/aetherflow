@@ -6,14 +6,14 @@ final class SessionHandoffLauncherTests: XCTestCase {
         let command = try SessionHandoffLauncher.terminalCommand(
             session: Self.sessionMetadata(),
             transport: Self.transportSnapshot(
-                workingDirectory: "/tmp/Aetherflow Workspace",
-                cliPath: "/tmp/tools/af"
+                workingDirectory: "/tmp",
+                cliPath: "/tmp/tools/af runner"
             )
         )
 
         XCTAssertEqual(
             command,
-            "cd '/tmp/Aetherflow Workspace' && '/tmp/tools/af' session attach 'ses-123' --server 'http://127.0.0.1:4096'"
+            "cd '/tmp' && '/tmp/tools/af runner' session attach 'ses-123' --server 'http://127.0.0.1:4096'"
         )
     }
 
@@ -65,14 +65,14 @@ final class SessionHandoffLauncherTests: XCTestCase {
 
         XCTAssertEqual(recorder.calls.count, 1)
         XCTAssertEqual(recorder.calls[0].executable, "/usr/bin/osascript")
-        XCTAssertEqual(recorder.calls[0].currentDirectory, "/tmp/aetherflow")
+        XCTAssertEqual(recorder.calls[0].currentDirectory, "/tmp")
         XCTAssertEqual(
             Array(recorder.calls[0].arguments.prefix(4)),
             ["-e", "tell application \"Terminal\"", "-e", "activate"]
         )
         XCTAssertTrue(
             recorder.calls[0].arguments.contains(
-                "do script \"cd '/tmp/aetherflow' && '/tmp/aetherflow/af' session attach 'ses-123' --server 'http://127.0.0.1:4096'\""
+                "do script \"cd '/tmp' && '/tmp/tools/af' session attach 'ses-123' --server 'http://127.0.0.1:4096'\""
             )
         )
     }
@@ -95,9 +95,9 @@ final class SessionHandoffLauncherTests: XCTestCase {
         }
     }
 
-    private static func transportSnapshot(
-        workingDirectory: String = "/tmp/aetherflow",
-        cliPath: String = "/tmp/aetherflow/af"
+    static func transportSnapshot(
+        workingDirectory: String = "/tmp",
+        cliPath: String = "/tmp/tools/af"
     ) -> TransportSnapshot {
         TransportSnapshot(
             phase: .connected,
@@ -110,7 +110,7 @@ final class SessionHandoffLauncherTests: XCTestCase {
         )
     }
 
-    private static func sessionMetadata(
+    static func sessionMetadata(
         sessionID: String = "ses-123",
         serverRef: String = "http://127.0.0.1:4096",
         attachable: Bool = true
@@ -132,8 +132,96 @@ final class SessionHandoffLauncherTests: XCTestCase {
     }
 }
 
+@MainActor
+final class SessionHandoffStoreTests: XCTestCase {
+    func testRequestLaunchTransitionsToLaunchingImmediately() async {
+        let launcher = TestHandoffLauncher { _, _ in
+            try await Task.sleep(nanoseconds: 200_000_000)
+        }
+        let store = SessionHandoffStore(launcher: launcher)
+        let detail = Self.detail()
+        let transport = Self.transportSnapshot()
+
+        store.requestLaunch(detail: detail, transport: transport)
+
+        XCTAssertEqual(store.phase(for: detail), .launching)
+    }
+
+    func testRequestLaunchPublishesFailureForSelection() async {
+        let launcher = TestHandoffLauncher { _, _ in
+            throw SessionHandoffLaunchError.launchFailed("attach failed")
+        }
+        let store = SessionHandoffStore(launcher: launcher)
+        let detail = Self.detail()
+        let transport = Self.transportSnapshot()
+
+        store.requestLaunch(detail: detail, transport: transport)
+        await waitForPhase(store, detail: detail) { phase in
+            phase == .failure("attach failed")
+        }
+
+        XCTAssertEqual(store.phase(for: detail), .failure("attach failed"))
+    }
+
+    private static func detail(sessionID: String = "ses-123") -> MonitoringSelectionDetail {
+        MonitoringSelectionDetail(
+            workloadID: "agent-1",
+            session: SessionHandoffLauncherTests.sessionMetadata(sessionID: sessionID),
+            agent: DaemonAgentStatusPayload(
+                id: "agent-1",
+                taskID: "ts-030640",
+                role: "worker",
+                pid: 42,
+                spawnTime: .now,
+                taskTitle: "Launch handoff",
+                lastLog: "working",
+                sessionID: sessionID,
+                state: "running",
+                lifecycleState: "running",
+                lastActivityAt: .now,
+                attentionNeeded: false
+            ),
+            toolCalls: [],
+            eventLines: [],
+            lastEventTimestamp: 0,
+            errors: [],
+            isLive: true
+        )
+    }
+
+    private static func transportSnapshot() -> TransportSnapshot {
+        SessionHandoffLauncherTests.transportSnapshot()
+    }
+
+    private func waitForPhase(
+        _ store: SessionHandoffStore,
+        detail: MonitoringSelectionDetail,
+        matches: @escaping (SessionHandoffPhase) -> Bool
+    ) async {
+        for _ in 0..<20 {
+            if matches(store.phase(for: detail)) {
+                return
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTFail("Timed out waiting for expected handoff phase.")
+    }
+}
+
 private final class RunnerRecorder: @unchecked Sendable {
     var calls: [RunnerCall] = []
+}
+
+private struct TestHandoffLauncher: SessionHandoffLaunching {
+    let launchImpl: @Sendable (DaemonSessionMetadataPayload, TransportSnapshot) async throws -> Void
+
+    init(_ launchImpl: @escaping @Sendable (DaemonSessionMetadataPayload, TransportSnapshot) async throws -> Void) {
+        self.launchImpl = launchImpl
+    }
+
+    func launch(session: DaemonSessionMetadataPayload, transport: TransportSnapshot) async throws {
+        try await launchImpl(session, transport)
+    }
 }
 
 private struct RunnerCall: Equatable {

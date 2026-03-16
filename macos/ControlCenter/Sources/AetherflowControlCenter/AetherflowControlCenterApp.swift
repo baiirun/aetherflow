@@ -10,6 +10,7 @@ struct AetherflowControlCenterApp: App {
     @StateObject private var lifecycleStore: DaemonLifecycleStore
     @StateObject private var monitoringStore: MonitoringStore
     @StateObject private var navigationStore: NavigationStore
+    @StateObject private var handoffStore: SessionHandoffStore
 
     init() {
         let bootstrap = ShellBootstrapContext.detect()
@@ -18,6 +19,7 @@ struct AetherflowControlCenterApp: App {
         _lifecycleStore = StateObject(wrappedValue: DaemonLifecycleStore(context: bootstrap, transportStore: transportStore))
         _monitoringStore = StateObject(wrappedValue: MonitoringStore(context: bootstrap))
         _navigationStore = StateObject(wrappedValue: NavigationStore())
+        _handoffStore = StateObject(wrappedValue: SessionHandoffStore())
     }
 
     var body: some Scene {
@@ -27,6 +29,7 @@ struct AetherflowControlCenterApp: App {
                 .environmentObject(lifecycleStore)
                 .environmentObject(monitoringStore)
                 .environmentObject(navigationStore)
+                .environmentObject(handoffStore)
         }
         .defaultSize(width: 1480, height: 920)
 
@@ -36,6 +39,7 @@ struct AetherflowControlCenterApp: App {
                 .environmentObject(lifecycleStore)
                 .environmentObject(monitoringStore)
                 .environmentObject(navigationStore)
+                .environmentObject(handoffStore)
         }
         .menuBarExtraStyle(.window)
     }

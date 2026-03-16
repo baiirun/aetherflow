@@ -1268,18 +1268,10 @@ private struct SessionsDetailPanel: View {
 }
 
 private struct SessionHandoffSection: View {
-    private enum LaunchState: Equatable {
-        case idle
-        case launching
-        case success(String)
-        case failure(String)
-    }
+    @EnvironmentObject private var handoffStore: SessionHandoffStore
 
     let detail: MonitoringSelectionDetail
     let transport: TransportSnapshot
-
-    @State private var launchState: LaunchState = .idle
-    private let launcher = SessionHandoffLauncher()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1289,20 +1281,18 @@ private struct SessionHandoffSection: View {
 
             HStack(alignment: .center, spacing: 12) {
                 Button {
-                    Task {
-                        await launchIntoOpencode()
-                    }
+                    handoffStore.requestLaunch(detail: detail, transport: transport)
                 } label: {
-                    if launchState == .launching {
+                    if launchPhase == .launching {
                         Text("Launching...")
                     } else {
                         Text("Open in Opencode")
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!detail.session.attachable || launchState == .launching)
+                .disabled(!detail.session.attachable || launchPhase == .launching)
 
-                if launchState == .launching {
+                if launchPhase == .launching {
                     ProgressView()
                         .controlSize(.small)
                 }
@@ -1330,7 +1320,7 @@ private struct SessionHandoffSection: View {
     }
 
     private var statusMessage: String {
-        switch launchState {
+        switch launchPhase {
         case .idle:
             if detail.session.attachable {
                 return "Launches Terminal and runs the supported af session attach flow for this session."
@@ -1344,7 +1334,7 @@ private struct SessionHandoffSection: View {
     }
 
     private var statusTone: Color {
-        switch launchState {
+        switch launchPhase {
         case .success:
             return ShellPalette.moss
         case .failure:
@@ -1354,16 +1344,8 @@ private struct SessionHandoffSection: View {
         }
     }
 
-    @MainActor
-    private func launchIntoOpencode() async {
-        launchState = .launching
-        do {
-            try await launcher.launch(session: detail.session, transport: transport)
-            let sessionLabel = detail.session.sessionID.nonEmptyValue ?? "the selected session"
-            launchState = .success("Opened Opencode in Terminal for \(sessionLabel).")
-        } catch {
-            launchState = .failure(error.localizedDescription)
-        }
+    private var launchPhase: SessionHandoffPhase {
+        handoffStore.phase(for: detail)
     }
 }
 
