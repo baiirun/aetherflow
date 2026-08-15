@@ -1,21 +1,12 @@
 use aetherflow_pi::{
-    GetSessionState, PiEvent, PiMessage, PiOptions, PiRpc, RpcCommand, SESSION_ACTOR_NAME,
-    SendSessionCommand, SessionActor, SessionActorConfig, SessionEvent, SessionEventPayload,
+    AetherflowClient, AetherflowClientOptions, CreateSessionOptions, DEFAULT_ENDPOINT,
+    DEFAULT_NAMESPACE, DEFAULT_POOL, DEFAULT_SESSION_DIRECTORY_KEY, DEFAULT_TOKEN, PiEvent,
+    PiMessage, PiOptions, PiRpc, RpcCommand,
 };
-use aetherflow_storage::{Agent, AgentId, ChannelId, Session, SessionAssociation, SessionId};
-use anyhow::{Context, Result, bail};
+use aetherflow_storage::{AgentId, ChannelId, SessionAssociation, SessionId};
+use anyhow::Result;
 use clap::{Args as ClapArgs, Parser, Subcommand};
-use rivetkit::{
-    TypedClientExt,
-    client::{Client, ClientConfig, GetOrCreateOptions},
-};
-use std::path::{Path, PathBuf};
-use tokio::sync::mpsc;
-
-const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:6420";
-const DEFAULT_TOKEN: &str = "dev";
-const DEFAULT_NAMESPACE: &str = "default";
-const DEFAULT_POOL: &str = "rivetkit-rust";
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "af")]
@@ -29,6 +20,9 @@ struct Args {
     namespace: String,
     #[arg(long, default_value = DEFAULT_POOL)]
     pool: String,
+    /// Isolates session discovery within a Rivet namespace.
+    #[arg(long, default_value = DEFAULT_SESSION_DIRECTORY_KEY, hide = true)]
+    session_directory_key: String,
     #[command(subcommand)]
     command: Command,
 }
@@ -59,6 +53,8 @@ enum PiCommand {
 enum SessionCommand {
     /// Create a durable session actor and its persistent Pi session.
     Create(CreateSessionArgs),
+    /// List every durable session known to this Aetherflow namespace.
+    List,
     /// Read the durable state for a session actor.
     State { session_id: SessionId },
     /// Prompt a session and print its unrendered Pi event stream.
@@ -92,12 +88,13 @@ async fn main() -> Result<()> {
             command,
         } => run_direct_pi(executable, command).await,
         Command::Session { command } => {
-            let client = Client::new(
-                ClientConfig::new(args.endpoint)
-                    .token(args.token)
-                    .namespace(args.namespace)
-                    .pool_name(args.pool),
-            );
+            let client = AetherflowClient::connect(AetherflowClientOptions {
+                endpoint: args.endpoint,
+                token: args.token,
+                namespace: args.namespace,
+                pool: args.pool,
+                session_directory_key: args.session_directory_key,
+            });
             run_session_command(&client, command).await
         }
     }
@@ -127,14 +124,18 @@ async fn run_direct_pi(executable: PathBuf, command: PiCommand) -> Result<()> {
     }
 }
 
-async fn run_session_command(client: &Client, command: SessionCommand) -> Result<()> {
+async fn run_session_command(client: &AetherflowClient, command: SessionCommand) -> Result<()> {
     match command {
         SessionCommand::Create(args) => create_session(client, args).await,
+        SessionCommand::List => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&client.list_sessions().await?)?
+            );
+            Ok(())
+        }
         SessionCommand::State { session_id } => {
-            let state = session_handle(client, session_id)
-                .send(GetSessionState)
-                .await
-                .with_context(|| format!("read session {session_id}"))?;
+            let state = client.session_state(session_id).await?;
             println!("{}", serde_json::to_string_pretty(&state)?);
             Ok(())
         }
@@ -145,131 +146,35 @@ async fn run_session_command(client: &Client, command: SessionCommand) -> Result
     }
 }
 
-async fn create_session(client: &Client, args: CreateSessionArgs) -> Result<()> {
-    let cwd = absolute_existing_directory(&args.cwd)?;
-    let session_dir = absolute_path(args.session_dir.unwrap_or(default_session_dir()?))?;
-    let executable = resolve_executable(args.pi)?;
-    let agent_id = args.agent_id.unwrap_or_else(|| Agent::new("local").id);
+async fn create_session(client: &AetherflowClient, args: CreateSessionArgs) -> Result<()> {
     let association = args
         .channel_id
         .map_or(SessionAssociation::Standalone, |channel_id| {
             SessionAssociation::Channel { channel_id }
         });
-    let session = Session::new(agent_id, association);
-    let mut pi = PiOptions::persistent(cwd, session_dir, session.id);
-    pi.executable = executable;
-    let config = SessionActorConfig {
-        session: session.clone(),
-        pi,
-    };
-    let handle = client.get_or_create_typed::<SessionActor>(
-        SESSION_ACTOR_NAME,
-        [session.id.to_string()],
-        GetOrCreateOptions {
-            create_with_input: Some(serde_json::to_value(config)?),
-            ..GetOrCreateOptions::default()
-        },
-    )?;
-
-    handle
-        .send(GetSessionState)
-        .await
-        .context("create session actor")?;
+    let session = client
+        .create_session(CreateSessionOptions {
+            agent_id: args.agent_id,
+            association,
+            cwd: args.cwd,
+            pi_session_directory: args.session_dir,
+            pi_executable: args.pi,
+        })
+        .await?;
     println!("{}", session.id);
     Ok(())
 }
 
-async fn prompt_session(client: &Client, session_id: SessionId, message: String) -> Result<()> {
-    let connection = session_handle(client, session_id).connect();
-    let (events, mut event_rx) = mpsc::unbounded_channel();
-    let subscription = connection
-        .on::<SessionEvent>(move |event| {
-            let _ = events.send(event);
-        })
-        .await;
-
-    connection
-        .send(SendSessionCommand {
-            command: RpcCommand::prompt("prompt", message),
-        })
-        .await
-        .with_context(|| format!("prompt session {session_id}"))?;
-
-    while let Some(event) = event_rx.recv().await {
-        println!("{}", serde_json::to_string(&event)?);
-        let done = match &event.payload {
-            SessionEventPayload::Pi { message } => {
-                matches!(message.event(), PiEvent::AgentEnd(_))
-            }
-            SessionEventPayload::Stopped { .. } => true,
-        };
-        if done {
-            subscription.unsubscribe().await;
-            connection.disconnect().await;
-            return Ok(());
-        }
-    }
-
-    bail!("session {session_id} event stream closed before the prompt completed")
-}
-
-fn session_handle(
-    client: &Client,
+async fn prompt_session(
+    client: &AetherflowClient,
     session_id: SessionId,
-) -> rivetkit::TypedActorHandle<SessionActor> {
-    client
-        .get_typed_default::<SessionActor>(SESSION_ACTOR_NAME, [session_id.to_string()])
-        .expect("session actor key is valid")
-}
-
-fn default_session_dir() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("AETHERFLOW_DATA_DIR") {
-        return Ok(PathBuf::from(path).join("pi-sessions"));
+    message: String,
+) -> Result<()> {
+    let mut events = client.prompt_session(session_id, message).await?;
+    while let Some(event) = events.next().await? {
+        println!("{}", serde_json::to_string(&event)?);
     }
-    let home = std::env::var_os("HOME")
-        .context("HOME is not set; pass --session-dir or set AETHERFLOW_DATA_DIR")?;
-    Ok(PathBuf::from(home).join(".aetherflow/pi-sessions"))
-}
-
-fn absolute_existing_directory(path: &Path) -> Result<PathBuf> {
-    let path = absolute_path(path)?;
-    let metadata = path
-        .metadata()
-        .with_context(|| format!("read working directory {}", path.display()))?;
-    if !metadata.is_dir() {
-        bail!("working directory {} is not a directory", path.display());
-    }
-    path.canonicalize()
-        .with_context(|| format!("resolve working directory {}", path.display()))
-}
-
-fn resolve_executable(path: PathBuf) -> Result<PathBuf> {
-    let has_directory = path
-        .parent()
-        .is_some_and(|parent| !parent.as_os_str().is_empty());
-    if !has_directory {
-        return Ok(path);
-    }
-
-    let path = absolute_path(path)?;
-    let metadata = path
-        .metadata()
-        .with_context(|| format!("read Pi executable {}", path.display()))?;
-    if !metadata.is_file() {
-        bail!("Pi executable {} is not a file", path.display());
-    }
-    path.canonicalize()
-        .with_context(|| format!("resolve Pi executable {}", path.display()))
-}
-
-fn absolute_path(path: impl AsRef<Path>) -> Result<PathBuf> {
-    let path = path.as_ref();
-    if path.is_absolute() {
-        return Ok(path.to_owned());
-    }
-    Ok(std::env::current_dir()
-        .context("read current working directory")?
-        .join(path))
+    Ok(())
 }
 
 async fn print_until(pi: &mut PiRpc, done: impl Fn(&PiMessage) -> bool) -> Result<()> {

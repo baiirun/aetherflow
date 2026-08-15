@@ -253,7 +253,20 @@ async fn run_io_loop(
 
 pub fn rivet_registry() -> Registry {
     let mut registry = Registry::new();
-    registry.register_actor::<SessionActor>(SESSION_ACTOR_NAME);
+    registry.register_actor_with::<SessionActor>(
+        SESSION_ACTOR_NAME,
+        rivetkit::ActorConfig {
+            has_state: true,
+            ..rivetkit::ActorConfig::default()
+        },
+    );
+    registry.register_actor_with::<crate::SessionDirectoryActor>(
+        crate::SESSION_DIRECTORY_ACTOR_NAME,
+        rivetkit::ActorConfig {
+            has_database: true,
+            ..rivetkit::ActorConfig::default()
+        },
+    );
     registry
 }
 

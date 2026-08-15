@@ -17,10 +17,25 @@ Run the checks with `cargo test --workspace`. Launch the desktop shell with
 `cargo run -p aetherflow-desktop`. Probe Pi directly without its TUI with
 `af pi state`.
 
-Start the local Rivet Engine and Aetherflow daemon in separate terminals:
+Run the current session lifecycle acceptance test directly from the checkout:
 
 ```sh
-npx -y @rivetkit/cli@latest dev --provider none
+scripts/smoke-session-lifecycle.sh
+```
+
+The smoke test builds the current binaries, starts an isolated daemon, creates
+and lists a real headless Pi session, restarts the daemon, and verifies that the
+same session is still listed and resumable. Pass a prompt to include a real
+model turn:
+
+```sh
+scripts/smoke-session-lifecycle.sh "Reply with the word aubergine"
+```
+
+Start the Aetherflow daemon. It installs and starts the bundled Rivet Engine
+automatically:
+
+```sh
 aetherflowd
 ```
 
@@ -28,6 +43,7 @@ In another terminal, create and prompt a persistent session:
 
 ```sh
 af session create
+af session list
 af session prompt <SESSION_ID> "Hello"
 af session state <SESSION_ID>
 ```

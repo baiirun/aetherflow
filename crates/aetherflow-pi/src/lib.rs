@@ -7,8 +7,15 @@ use tokio::{
     process::{Child, ChildStdin, Command},
 };
 
+mod client;
 pub mod protocol;
 mod session_actor;
+mod session_directory;
+
+pub use client::{
+    AetherflowClient, AetherflowClientOptions, CreateSessionOptions, DEFAULT_ENDPOINT,
+    DEFAULT_NAMESPACE, DEFAULT_POOL, DEFAULT_TOKEN, SessionEventStream,
+};
 
 pub use protocol::{
     AssistantMessageEvent, CompactionReason, ExtensionError, ExtensionUiRequest, NotifyType,
@@ -18,6 +25,10 @@ pub use protocol::{
 pub use session_actor::{
     GetSessionState, SESSION_ACTOR_NAME, SendSessionCommand, SessionActor, SessionActorConfig,
     SessionActorState, SessionEvent, SessionEventPayload, rivet_registry,
+};
+pub use session_directory::{
+    DEFAULT_SESSION_DIRECTORY_KEY, SESSION_DIRECTORY_ACTOR_NAME, SessionDescriptor,
+    SessionDirectoryActor,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
