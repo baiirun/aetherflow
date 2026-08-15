@@ -1,4 +1,4 @@
-use aetherflow_storage::{Agent, Channel, Session};
+use aetherflow_storage::{Agent, Channel, Session, SessionAssociation};
 use gpui::{
     App, Application, Bounds, Context, Window, WindowBounds, WindowOptions, div, prelude::*, px,
     rgb, size,
@@ -14,7 +14,12 @@ impl DesktopShell {
     fn new() -> Self {
         let channel = Channel::new("Aetherflow");
         let agent = Agent::new("local-agent");
-        let session = Session::new(agent.id, Some(channel.id));
+        let session = Session::new(
+            agent.id,
+            SessionAssociation::Channel {
+                channel_id: channel.id,
+            },
+        );
         Self {
             channel,
             agent,

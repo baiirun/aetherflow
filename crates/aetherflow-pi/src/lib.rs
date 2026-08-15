@@ -1,5 +1,6 @@
+use aetherflow_storage::SessionId;
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, process::Stdio};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -7,16 +8,19 @@ use tokio::{
 };
 
 pub mod protocol;
-mod registry;
+mod session_actor;
 
 pub use protocol::{
     AssistantMessageEvent, CompactionReason, ExtensionError, ExtensionUiRequest, NotifyType,
     PiEvent, PiMessage, QueueMode, RpcResponse, SummarizationRetrySource, ThinkingLevel, ToolCall,
     WidgetPlacement,
 };
-pub use registry::{DaemonRegistry, RegistryError, SessionEvent, SessionEventPayload};
+pub use session_actor::{
+    GetSessionState, SESSION_ACTOR_NAME, SendSessionCommand, SessionActor, SessionActorConfig,
+    SessionActorState, SessionEvent, SessionEventPayload, rivet_registry,
+};
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RpcCommand {
     Prompt {
@@ -86,7 +90,7 @@ impl RpcCommand {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub enum StreamingBehavior {
     #[serde(rename = "steer")]
     Steer,
@@ -94,17 +98,53 @@ pub enum StreamingBehavior {
     FollowUp,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PiOptions {
     pub executable: PathBuf,
-    pub no_session: bool,
+    pub cwd: PathBuf,
+    pub storage: PiSessionStorage,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum PiSessionStorage {
+    Ephemeral,
+    Persistent {
+        directory: PathBuf,
+        session_id: SessionId,
+    },
 }
 
 impl Default for PiOptions {
     fn default() -> Self {
         Self {
             executable: PathBuf::from("pi"),
-            no_session: false,
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            storage: PiSessionStorage::Ephemeral,
+        }
+    }
+}
+
+impl PiOptions {
+    pub fn persistent(
+        cwd: impl Into<PathBuf>,
+        directory: impl Into<PathBuf>,
+        session_id: SessionId,
+    ) -> Self {
+        Self {
+            executable: PathBuf::from("pi"),
+            cwd: cwd.into(),
+            storage: PiSessionStorage::Persistent {
+                directory: directory.into(),
+                session_id,
+            },
+        }
+    }
+
+    pub fn ephemeral(cwd: impl Into<PathBuf>) -> Self {
+        Self {
+            cwd: cwd.into(),
+            ..Self::default()
         }
     }
 }
@@ -122,13 +162,26 @@ impl PiRpc {
         command
             .arg("--mode")
             .arg("rpc")
+            .current_dir(&options.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true);
 
-        if options.no_session {
-            command.arg("--no-session");
+        match &options.storage {
+            PiSessionStorage::Ephemeral => {
+                command.arg("--no-session");
+            }
+            PiSessionStorage::Persistent {
+                directory,
+                session_id,
+            } => {
+                command
+                    .arg("--session-dir")
+                    .arg(directory)
+                    .arg("--session-id")
+                    .arg(session_id.to_string());
+            }
         }
 
         let mut child = command
@@ -259,5 +312,55 @@ mod tests {
         let error = reader.next().await.unwrap_err();
 
         assert!(error.to_string().contains("unterminated JSONL record"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn persistent_process_uses_explicit_cwd_directory_and_session_id() {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        use tokio::time::{Duration, timeout};
+
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = directory.path().join("worktree");
+        let session_directory = directory.path().join("sessions");
+        let executable = directory.path().join("fake-pi");
+        fs::create_dir(&cwd).unwrap();
+        fs::write(
+            &executable,
+            "#!/bin/sh\npwd > \"$0.pwd\"\nprintf '%s\\n' \"$@\" > \"$0.args\"\nwhile IFS= read -r _; do :; done\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+
+        let session_id = SessionId::new();
+        let mut options = PiOptions::persistent(&cwd, &session_directory, session_id);
+        options.executable = executable.clone();
+        let process = PiRpc::spawn(options).unwrap();
+
+        timeout(Duration::from_secs(2), async {
+            while !executable.with_extension("args").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fake Pi did not record its arguments");
+        drop(process);
+
+        assert_eq!(
+            fs::read_to_string(executable.with_extension("pwd"))
+                .unwrap()
+                .trim(),
+            cwd.canonicalize().unwrap().to_string_lossy()
+        );
+        assert_eq!(
+            fs::read_to_string(executable.with_extension("args")).unwrap(),
+            format!(
+                "--mode\nrpc\n--session-dir\n{}\n--session-id\n{}\n",
+                session_directory.display(),
+                session_id
+            )
+        );
     }
 }

@@ -1,17 +1,7 @@
-use aetherflow_pi::DaemonRegistry;
-use anyhow::{Context, Result};
+use aetherflow_pi::rivet_registry;
+use anyhow::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let registry = DaemonRegistry::new();
-    println!(
-        "aetherflowd ready: {} agents, {} channels, {} sessions",
-        registry.agents().len(),
-        registry.channels().len(),
-        registry.sessions().len()
-    );
-
-    tokio::signal::ctrl_c()
-        .await
-        .context("failed to listen for shutdown signal")
+    rivet_registry().start().await
 }
