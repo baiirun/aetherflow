@@ -1,0 +1,5 @@
+/target/
+/.aetherflow/
+/.pi-subagents/
+/.worktrees/
+.DS_Store
