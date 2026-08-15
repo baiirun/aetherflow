@@ -1,11 +1,20 @@
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde::Serialize;
 use std::{path::PathBuf, process::Stdio};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
 };
+
+pub mod protocol;
+mod registry;
+
+pub use protocol::{
+    AssistantMessageEvent, CompactionReason, ExtensionError, ExtensionUiRequest, NotifyType,
+    PiEvent, PiMessage, QueueMode, RpcResponse, SummarizationRetrySource, ThinkingLevel, ToolCall,
+    WidgetPlacement,
+};
+pub use registry::{DaemonRegistry, RegistryError, SessionEvent, SessionEventPayload};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -35,6 +44,16 @@ pub enum RpcCommand {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
     },
+    SetSteeringMode {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        mode: QueueMode,
+    },
+    SetFollowUpMode {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        mode: QueueMode,
+    },
 }
 
 impl RpcCommand {
@@ -51,6 +70,20 @@ impl RpcCommand {
             id: Some(id.into()),
         }
     }
+
+    pub fn set_steering_mode(id: impl Into<String>, mode: QueueMode) -> Self {
+        Self::SetSteeringMode {
+            id: Some(id.into()),
+            mode,
+        }
+    }
+
+    pub fn set_follow_up_mode(id: impl Into<String>, mode: QueueMode) -> Self {
+        Self::SetFollowUpMode {
+            id: Some(id.into()),
+            mode,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -59,24 +92,6 @@ pub enum StreamingBehavior {
     Steer,
     #[serde(rename = "followUp")]
     FollowUp,
-}
-
-/// A forward-compatible Pi message. `kind` is the JSON `type`; all protocol
-/// fields remain available without requiring this crate to mirror every Pi event.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RpcMessage {
-    #[serde(rename = "type")]
-    pub kind: String,
-    #[serde(flatten)]
-    pub fields: Map<String, Value>,
-}
-
-impl RpcMessage {
-    pub fn is_response_to(&self, id: &str, command: &str) -> bool {
-        self.kind == "response"
-            && self.fields.get("id").and_then(Value::as_str) == Some(id)
-            && self.fields.get("command").and_then(Value::as_str) == Some(command)
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -137,7 +152,7 @@ impl PiRpc {
         Ok(())
     }
 
-    pub async fn next_message(&mut self) -> Result<Option<RpcMessage>> {
+    pub async fn next_message(&mut self) -> Result<Option<PiMessage>> {
         self.stdout.next().await
     }
 }
@@ -156,7 +171,7 @@ impl<R: AsyncBufRead + Unpin> JsonlReader<R> {
     }
 
     /// Splits only on LF, preserving U+2028 and U+2029 inside JSON strings.
-    pub async fn next(&mut self) -> Result<Option<RpcMessage>> {
+    pub async fn next(&mut self) -> Result<Option<PiMessage>> {
         self.buffer.clear();
         let read = self.reader.read_until(b'\n', &mut self.buffer).await?;
         if read == 0 {
@@ -189,6 +204,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn queue_mode_commands_match_pi_shapes() {
+        let cases = [
+            (
+                RpcCommand::set_steering_mode("steering", QueueMode::All),
+                serde_json::json!({
+                    "id": "steering",
+                    "type": "set_steering_mode",
+                    "mode": "all"
+                }),
+            ),
+            (
+                RpcCommand::set_follow_up_mode("follow-up", QueueMode::OneAtATime),
+                serde_json::json!({
+                    "id": "follow-up",
+                    "type": "set_follow_up_mode",
+                    "mode": "one-at-a-time"
+                }),
+            ),
+        ];
+
+        for (command, expected) in cases {
+            assert_eq!(serde_json::to_value(command).unwrap(), expected);
+        }
+    }
+
     #[tokio::test]
     async fn reader_preserves_unicode_line_separators() {
         let input = b"{\"type\":\"event\",\"text\":\"before\xE2\x80\xA8after\"}\n";
@@ -196,18 +237,18 @@ mod tests {
 
         let message = reader.next().await.unwrap().unwrap();
 
-        assert_eq!(message.kind, "event");
-        assert_eq!(message.fields["text"], "before\u{2028}after");
+        assert!(matches!(message.event(), PiEvent::Unknown { kind } if kind == "event"));
+        assert_eq!(message.raw()["text"], "before\u{2028}after");
     }
 
     #[tokio::test]
     async fn reader_accepts_crlf_records() {
-        let input = b"{\"type\":\"response\"}\r\n";
+        let input = b"{\"type\":\"agent_start\"}\r\n";
         let mut reader = JsonlReader::new(BufReader::new(&input[..]));
 
         let message = reader.next().await.unwrap().unwrap();
 
-        assert_eq!(message.kind, "response");
+        assert!(matches!(message.event(), PiEvent::AgentStart));
     }
 
     #[tokio::test]

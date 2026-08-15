@@ -1,4 +1,4 @@
-use aetherflow_pi::{PiOptions, PiRpc, RpcCommand};
+use aetherflow_pi::{PiEvent, PiMessage, PiOptions, PiRpc, RpcCommand};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -38,15 +38,15 @@ async fn main() -> Result<()> {
         }
         Command::Prompt { message } => {
             pi.send(&RpcCommand::prompt("prompt", message)).await?;
-            print_until(&mut pi, |message| message.kind == "agent_end").await
+            print_until(&mut pi, |message| {
+                matches!(message.event(), PiEvent::AgentEnd(_))
+            })
+            .await
         }
     }
 }
 
-async fn print_until(
-    pi: &mut PiRpc,
-    done: impl Fn(&aetherflow_pi::RpcMessage) -> bool,
-) -> Result<()> {
+async fn print_until(pi: &mut PiRpc, done: impl Fn(&PiMessage) -> bool) -> Result<()> {
     while let Some(message) = pi.next_message().await? {
         println!("{}", serde_json::to_string(&message)?);
         if done(&message) {
