@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use rivetkit::{EngineSpawnMode, ServeConfig};
 use std::{
+    fmt,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -8,6 +9,40 @@ use std::{
 use url::Url;
 
 const ENGINE_VERSION: &str = "2.3.10";
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum EngineConfiguration {
+    Bundled {
+        version: &'static str,
+        binary_path: PathBuf,
+        asset_action: EngineAssetAction,
+    },
+    Configured {
+        binary_path: PathBuf,
+    },
+    External,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineAssetAction {
+    Installed,
+    Reused,
+}
+
+impl fmt::Display for EngineAssetAction {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Installed => "installed",
+            Self::Reused => "reused",
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct InstalledAsset {
+    path: PathBuf,
+    action: EngineAssetAction,
+}
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const ENGINE_TARGET: &str = "aarch64-apple-darwin";
@@ -18,14 +53,25 @@ const ENGINE_BYTES: &[u8] = include_bytes!(concat!(
     "/../../vendor/rivet-engine/2.3.10/aarch64-apple-darwin/rivet-engine"
 ));
 
-pub fn configure(config: &mut ServeConfig) -> Result<()> {
-    if config.engine_binary_path.is_some() || !manages_local_engine(config)? {
-        return Ok(());
+pub fn configure(config: &mut ServeConfig) -> Result<EngineConfiguration> {
+    if let Some(binary_path) = &config.engine_binary_path {
+        return Ok(EngineConfiguration::Configured {
+            binary_path: binary_path.clone(),
+        });
     }
 
-    config.engine_binary_path = Some(install()?);
+    if !manages_local_engine(config)? {
+        return Ok(EngineConfiguration::External);
+    }
+
+    let installed = install()?;
+    config.engine_binary_path = Some(installed.path.clone());
     config.engine_auto_download = false;
-    Ok(())
+    Ok(EngineConfiguration::Bundled {
+        version: ENGINE_VERSION,
+        binary_path: installed.path,
+        asset_action: installed.action,
+    })
 }
 
 fn manages_local_engine(config: &ServeConfig) -> Result<bool> {
@@ -52,7 +98,7 @@ fn manages_local_engine(config: &ServeConfig) -> Result<bool> {
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn install() -> Result<PathBuf> {
+fn install() -> Result<InstalledAsset> {
     let destination = runtime_root()?.join(format!(
         "rivet-engine/{ENGINE_VERSION}/{ENGINE_TARGET}/rivet-engine"
     ));
@@ -60,7 +106,7 @@ fn install() -> Result<PathBuf> {
 }
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-fn install() -> Result<PathBuf> {
+fn install() -> Result<InstalledAsset> {
     bail!(
         "Aetherflow does not vendor Rivet Engine {ENGINE_VERSION} for {}-{}",
         std::env::consts::ARCH,
@@ -78,13 +124,16 @@ fn runtime_root() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".aetherflow/runtime"))
 }
 
-fn install_asset(destination: &Path, bytes: &[u8]) -> Result<PathBuf> {
+fn install_asset(destination: &Path, bytes: &[u8]) -> Result<InstalledAsset> {
     if destination
         .metadata()
         .is_ok_and(|metadata| metadata.is_file() && metadata.len() == bytes.len() as u64)
     {
         make_executable(destination)?;
-        return Ok(destination.to_owned());
+        return Ok(InstalledAsset {
+            path: destination.to_owned(),
+            action: EngineAssetAction::Reused,
+        });
     }
 
     let parent = destination
@@ -111,7 +160,10 @@ fn install_asset(destination: &Path, bytes: &[u8]) -> Result<PathBuf> {
             destination.display()
         )
     })?;
-    Ok(destination.to_owned())
+    Ok(InstalledAsset {
+        path: destination.to_owned(),
+        action: EngineAssetAction::Installed,
+    })
 }
 
 #[cfg(unix)]
@@ -142,11 +194,25 @@ mod tests {
         let temp = TempDir::new()?;
         let destination = temp.path().join("nested/rivet-engine");
 
-        assert_eq!(install_asset(&destination, b"engine")?, destination.clone());
+        assert_eq!(
+            install_asset(&destination, b"engine")?,
+            InstalledAsset {
+                path: destination.clone(),
+                action: EngineAssetAction::Installed,
+            }
+        );
         assert_eq!(fs::read(&destination)?, b"engine");
 
+        assert_eq!(
+            install_asset(&destination, b"engine")?.action,
+            EngineAssetAction::Reused
+        );
+
         fs::write(&destination, b"bad")?;
-        install_asset(&destination, b"engine")?;
+        assert_eq!(
+            install_asset(&destination, b"engine")?.action,
+            EngineAssetAction::Installed
+        );
         assert_eq!(fs::read(&destination)?, b"engine");
         Ok(())
     }

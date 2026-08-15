@@ -39,6 +39,11 @@ automatically:
 aetherflowd
 ```
 
+Startup and shutdown events include the daemon version, process ID, Rivet
+endpoint, namespace, pool, Engine source and path, actor types, outcome, and
+duration. Set `RUST_LOG` to adjust verbosity, for example
+`RUST_LOG=aetherflowd=debug,rivetkit=info aetherflowd`.
+
 In another terminal, create and prompt a persistent session:
 
 ```sh
