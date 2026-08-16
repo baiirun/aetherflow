@@ -8,7 +8,7 @@ use aetherflow_storage::SessionId;
 use gpui::{
     Animation, AnimationExt as _, App, Application, Bounds, Context, Div, Entity, Pixels,
     ScrollHandle, SharedString, Subscription, TitlebarOptions, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowOptions, div, ease_out_quint, prelude::*, px, rgb, rgba, size,
+    WindowBounds, WindowOptions, div, ease_out_quint, point, prelude::*, px, rgb, rgba, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::text::{TextView, TextViewStyle};
@@ -16,7 +16,7 @@ use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::runtime::Runtime;
 use transcript::{
@@ -26,6 +26,16 @@ use transcript::{
 
 const SIDEBAR_WIDTH: f32 = 280.;
 const BOTTOM_FOLLOW_THRESHOLD: f32 = 32.;
+const CONTENT_SHIFT_TIME_CONSTANT: Duration = Duration::from_millis(55);
+const CONTENT_SHIFT_SETTLE_DISTANCE: f32 = 0.5;
+
+#[derive(Default)]
+struct BottomFollowAnimation {
+    measured_max_offset: Option<Pixels>,
+    content_offset_y: Pixels,
+    last_frame_at: Option<Instant>,
+    frame_scheduled: bool,
+}
 
 enum SessionLoadState {
     Loading,
@@ -55,6 +65,7 @@ struct DesktopShell {
     creating_new_session: bool,
     conversations: HashMap<SessionId, Vec<ConversationItem>>,
     conversation_scrolls: HashMap<SessionId, ScrollHandle>,
+    bottom_follow_animations: HashMap<SessionId, BottomFollowAnimation>,
     previous_stream_texts: HashMap<SessionId, String>,
     tool_group_expansion: HashMap<String, bool>,
     expanded_tool_calls: HashSet<String>,
@@ -90,6 +101,7 @@ impl DesktopShell {
             creating_new_session: false,
             conversations: HashMap::new(),
             conversation_scrolls: HashMap::new(),
+            bottom_follow_animations: HashMap::new(),
             previous_stream_texts: HashMap::new(),
             tool_group_expansion: HashMap::new(),
             expanded_tool_calls: HashSet::new(),
@@ -199,9 +211,12 @@ impl DesktopShell {
                 shell.loading_conversations.remove(&session_id);
                 match result {
                     Ok(messages) => {
-                        let follow = shell.conversation_is_at_bottom(session_id);
                         shell.conversations.insert(session_id, messages);
-                        shell.follow_conversation_if(session_id, follow);
+                        shell
+                            .conversation_scrolls
+                            .get(&session_id)
+                            .expect("loaded conversations have a scroll handle")
+                            .scroll_to_bottom();
                     }
                     Err(error) => {
                         shell.conversation_errors.insert(session_id, error);
@@ -219,13 +234,95 @@ impl DesktopShell {
             .is_none_or(scroll_handle_is_at_bottom)
     }
 
-    fn follow_conversation_if(&self, session_id: SessionId, follow: bool) {
+    fn follow_conversation_if(&mut self, session_id: SessionId, follow: bool) {
         if follow {
-            self.conversation_scrolls
+            let previous_max_offset = self
+                .conversation_scrolls
                 .get(&session_id)
                 .expect("selected conversations have a scroll handle")
-                .scroll_to_bottom();
+                .max_offset()
+                .height;
+            self.bottom_follow_animations
+                .entry(session_id)
+                .or_default()
+                .measured_max_offset
+                .get_or_insert(previous_max_offset);
         }
+    }
+
+    fn schedule_bottom_follow(
+        &mut self,
+        session_id: SessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(animation) = self.bottom_follow_animations.get_mut(&session_id) else {
+            return;
+        };
+        if animation.frame_scheduled {
+            return;
+        }
+        animation.frame_scheduled = true;
+        cx.on_next_frame(window, move |shell, _, cx| {
+            shell.advance_bottom_follow(session_id, cx);
+        });
+    }
+
+    fn advance_bottom_follow(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
+        let Some(scroll_handle) = self.conversation_scrolls.get(&session_id).cloned() else {
+            self.bottom_follow_animations.remove(&session_id);
+            return;
+        };
+        let current_offset = scroll_handle.offset();
+        let now = Instant::now();
+        let Some(animation) = self.bottom_follow_animations.get_mut(&session_id) else {
+            return;
+        };
+        animation.frame_scheduled = false;
+
+        if let Some(previous_max_offset) = animation.measured_max_offset.take() {
+            if !is_near_bottom(current_offset.y, previous_max_offset) {
+                self.bottom_follow_animations.remove(&session_id);
+                cx.notify();
+                return;
+            }
+            let new_max_offset = scroll_handle.max_offset().height;
+            let (scroll_y, content_offset_y) = pinned_bottom_offsets(
+                previous_max_offset,
+                new_max_offset,
+                animation.content_offset_y,
+            );
+            scroll_handle.set_offset(point(current_offset.x, scroll_y));
+            animation.content_offset_y = content_offset_y;
+            animation.last_frame_at = Some(now);
+            cx.notify();
+            return;
+        }
+
+        if !scroll_handle_is_at_bottom(&scroll_handle) {
+            self.bottom_follow_animations.remove(&session_id);
+            cx.notify();
+            return;
+        }
+
+        let frame_duration =
+            animation
+                .last_frame_at
+                .map_or(Duration::from_millis(16), |last_frame| {
+                    now.saturating_duration_since(last_frame)
+                        .min(Duration::from_millis(50))
+                });
+        let next_offset_y = next_content_shift_offset(animation.content_offset_y, frame_duration);
+
+        if next_offset_y == px(0.) {
+            self.bottom_follow_animations.remove(&session_id);
+            cx.notify();
+            return;
+        }
+
+        animation.content_offset_y = next_offset_y;
+        animation.last_frame_at = Some(now);
+        cx.notify();
     }
 
     fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -667,7 +764,7 @@ impl DesktopShell {
             .child(list)
     }
 
-    fn render_main_panel(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn render_main_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let panel = div()
             .flex_1()
             .min_w_0()
@@ -733,29 +830,31 @@ impl DesktopShell {
     }
 
     fn render_conversation(
-        &self,
+        &mut self,
         session_id: SessionId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        self.schedule_bottom_follow(session_id, window, cx);
+        let content_offset_y = self
+            .bottom_follow_animations
+            .get(&session_id)
+            .map_or(px(0.), |animation| animation.content_offset_y);
         let scroll_handle = self
             .conversation_scrolls
             .get(&session_id)
-            .expect("selected conversations have a scroll handle");
-        if scroll_handle_is_at_bottom(scroll_handle) {
-            scroll_handle.scroll_to_bottom();
-        }
-        let mut conversation = div()
+            .expect("selected conversations have a scroll handle")
+            .clone();
+        let conversation = div()
             .id("conversation")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .track_scroll(scroll_handle)
+            .track_scroll(&scroll_handle)
             .px_8()
             .py_6()
             .flex()
-            .flex_col()
-            .gap_5();
+            .flex_col();
 
         if self.loading_conversations.contains(&session_id) {
             return conversation
@@ -792,8 +891,15 @@ impl DesktopShell {
 
         let messages = messages.expect("non-empty conversations were checked above");
         let session_has_active_turn = self.active_turn_session_id == Some(session_id);
+        let mut transcript = div()
+            .relative()
+            .top(content_offset_y)
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_5();
         for (index, item) in messages.iter().enumerate() {
-            conversation = match item {
+            transcript = match item {
                 ConversationItem::Message(message) => {
                     let is_empty_assistant =
                         message.role == ConversationRole::Assistant && message.text.is_empty();
@@ -808,7 +914,7 @@ impl DesktopShell {
                     }
 
                     match message.role {
-                        ConversationRole::User => conversation.child(
+                        ConversationRole::User => transcript.child(
                             div()
                                 .id(("user-message", index))
                                 .w_full()
@@ -853,7 +959,7 @@ impl DesktopShell {
                                     cx,
                                 )
                             };
-                            conversation.child(
+                            transcript.child(
                                 div()
                                     .id(("assistant-message", index))
                                     .w_full()
@@ -865,12 +971,12 @@ impl DesktopShell {
                     }
                 }
                 ConversationItem::ToolGroup(group) => {
-                    conversation.child(self.render_tool_group(group, window, cx))
+                    transcript.child(self.render_tool_group(group, window, cx))
                 }
             };
         }
 
-        conversation
+        conversation.child(transcript)
     }
 
     fn render_tool_group(
@@ -1453,6 +1559,28 @@ fn trailing_assistant_text(conversation: &[ConversationItem]) -> Option<&str> {
         .then_some(message.text.as_str())
 }
 
+fn pinned_bottom_offsets(
+    previous_max_offset: Pixels,
+    new_max_offset: Pixels,
+    current_content_offset: Pixels,
+) -> (Pixels, Pixels) {
+    (
+        -new_max_offset,
+        current_content_offset + new_max_offset - previous_max_offset,
+    )
+}
+
+fn next_content_shift_offset(current: Pixels, elapsed: Duration) -> Pixels {
+    if current.abs() <= px(CONTENT_SHIFT_SETTLE_DISTANCE) {
+        return px(0.);
+    }
+
+    let elapsed_seconds = elapsed.max(Duration::from_millis(1)).as_secs_f32();
+    let time_constant_seconds = CONTENT_SHIFT_TIME_CONSTANT.as_secs_f32();
+    let progress = 1. - (-elapsed_seconds / time_constant_seconds).exp();
+    current * (1. - progress)
+}
+
 fn scroll_handle_is_at_bottom(scroll_handle: &ScrollHandle) -> bool {
     is_near_bottom(scroll_handle.offset().y, scroll_handle.max_offset().height)
 }
@@ -1666,6 +1794,27 @@ mod tests {
         assert!(is_near_bottom(px(-175.), px(200.)));
         assert!(!is_near_bottom(px(-150.), px(200.)));
         assert!(is_near_bottom(px(0.), px(0.)));
+    }
+
+    #[test]
+    fn content_shift_moves_toward_zero_without_snapping() {
+        let next = next_content_shift_offset(px(100.), Duration::from_millis(16));
+
+        assert!(next < px(100.));
+        assert!(next > px(0.));
+        assert_eq!(
+            next_content_shift_offset(px(0.25), Duration::from_millis(16)),
+            px(0.)
+        );
+    }
+
+    #[test]
+    fn bottom_follow_keeps_the_scroll_position_pinned() {
+        let (scroll_y, content_offset_y) = pinned_bottom_offsets(px(100.), px(140.), px(0.));
+
+        assert_eq!(scroll_y, px(-140.));
+        assert_eq!(content_offset_y, px(40.));
+        assert_eq!(scroll_y + content_offset_y, px(-100.));
     }
 
     #[test]
