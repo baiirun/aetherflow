@@ -2,7 +2,7 @@ use crate::{JsonlReader, PiMessage, PiOptions, PiRpc, PiSessionStorage, RpcComma
 use aetherflow_storage::{AgentId, Session, SessionAssociation, SessionId, SessionStatus};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
-use rivetkit::prelude::*;
+use rivetkit::{BindParam, ColumnValue, prelude::*};
 use serde::{Deserialize, Serialize};
 use std::{future::Future, pin::Pin, sync::Arc};
 use tokio::{
@@ -12,12 +12,15 @@ use tokio::{
 };
 
 pub const SESSION_ACTOR_NAME: &str = "session";
+pub const DEFAULT_SESSION_EVENT_PAGE_SIZE: u32 = 100;
+pub const MAX_SESSION_EVENT_PAGE_SIZE: u32 = 1_000;
 const COMMAND_BUFFER_CAPACITY: usize = 32;
 
 type BoxActionFuture<T> = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SessionEvent {
+    pub sequence: u64,
     pub session_id: SessionId,
     pub agent_id: AgentId,
     pub association: SessionAssociation,
@@ -94,6 +97,33 @@ impl Action for GetSessionState {
     const NAME: &'static str = "get_state";
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct ReadSessionEvents {
+    pub after_sequence: u64,
+    pub limit: u32,
+}
+
+impl ReadSessionEvents {
+    pub fn validate(&self) -> Result<()> {
+        if self.limit == 0 {
+            bail!("session event limit must be greater than zero");
+        }
+        if self.limit > MAX_SESSION_EVENT_PAGE_SIZE {
+            bail!(
+                "session event limit {} exceeds maximum {MAX_SESSION_EVENT_PAGE_SIZE}",
+                self.limit
+            );
+        }
+        Ok(())
+    }
+}
+
+impl Action for ReadSessionEvents {
+    type Output = Vec<SessionEvent>;
+
+    const NAME: &'static str = "read_events";
+}
+
 impl Event for SessionEvent {
     const NAME: &'static str = "session_event";
 }
@@ -112,12 +142,14 @@ pub struct SessionActor {
 impl Actor for SessionActor {
     type State = SessionActorState;
     type Input = Option<SessionActorConfig>;
-    type Actions = (SendSessionCommand, GetSessionState);
+    type Actions = (SendSessionCommand, GetSessionState, ReadSessionEvents);
     type Events = (SessionEvent,);
     type Queue = ();
     type ConnParams = ();
     type ConnState = ();
     type Action = rivetkit::action::Raw;
+
+    const HAS_DATABASE: bool = true;
 
     async fn create_state(_ctx: &Ctx<Self>, input: Self::Input) -> Result<Self::State> {
         let config = input.context("Session actor creation input is required")?;
@@ -134,6 +166,15 @@ impl Actor for SessionActor {
             pi: ctx.state().pi.clone(),
         }
         .validate()?;
+        ctx.sql()
+            .execute(
+                "CREATE TABLE IF NOT EXISTS session_events (\
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT, \
+                    payload TEXT NOT NULL\
+                )",
+                None,
+            )
+            .await?;
         let pi = PiRpc::spawn(ctx.state().pi.clone()).context("start persistent Pi session")?;
         let (commands, command_rx) = mpsc::channel(COMMAND_BUFFER_CAPACITY);
         ctx.state_mut().session.status = SessionStatus::Running;
@@ -161,14 +202,14 @@ impl Actor for SessionActor {
             .map(|error| format!("{error:#}"));
 
         ctx.state_mut().session.status = SessionStatus::Stopped;
-        ctx.emit(SessionEvent {
-            session_id: session.id,
-            agent_id: session.agent_id,
-            association: session.association,
-            payload: SessionEventPayload::Stopped {
+        append_session_event(
+            &ctx,
+            &session,
+            SessionEventPayload::Stopped {
                 error: error.clone(),
             },
-        })?;
+        )
+        .await?;
 
         if let Some(error) = error {
             bail!(error);
@@ -208,6 +249,35 @@ impl Handles<GetSessionState> for SessionActor {
     }
 }
 
+impl Handles<ReadSessionEvents> for SessionActor {
+    type Future = BoxActionFuture<Vec<SessionEvent>>;
+
+    fn handle(self: Arc<Self>, ctx: Ctx<Self>, action: ReadSessionEvents) -> Self::Future {
+        Box::pin(async move {
+            action.validate()?;
+            let after_sequence = i64::try_from(action.after_sequence)
+                .context("session event cursor exceeds SQLite integer range")?;
+            let result = ctx
+                .sql()
+                .query(
+                    "SELECT sequence, payload FROM session_events \
+                     WHERE sequence > ?1 ORDER BY sequence ASC LIMIT ?2",
+                    Some(vec![
+                        BindParam::Integer(after_sequence),
+                        BindParam::Integer(i64::from(action.limit)),
+                    ]),
+                )
+                .await?;
+
+            result
+                .rows
+                .into_iter()
+                .map(|row| decode_session_event_row(&ctx.state().session, row))
+                .collect()
+        })
+    }
+}
+
 async fn run_session_loop(
     runtime: SessionRuntime,
     session: &Session,
@@ -240,15 +310,60 @@ async fn run_io_loop(
             }
             message = stdout.next() => {
                 let message: PiMessage = message?.context("Pi closed its RPC stream")?;
-                ctx.emit(SessionEvent {
-                    session_id: session.id,
-                    agent_id: session.agent_id,
-                    association: session.association,
-                    payload: SessionEventPayload::Pi { message: Box::new(message) },
-                })?;
+                append_session_event(
+                    ctx,
+                    session,
+                    SessionEventPayload::Pi { message: Box::new(message) },
+                )
+                .await?;
             }
         }
     }
+}
+
+async fn append_session_event(
+    ctx: &Ctx<SessionActor>,
+    session: &Session,
+    payload: SessionEventPayload,
+) -> Result<SessionEvent> {
+    let result = ctx
+        .sql()
+        .query(
+            "INSERT INTO session_events (payload) VALUES (?1) RETURNING sequence",
+            Some(vec![BindParam::Text(serde_json::to_string(&payload)?)]),
+        )
+        .await?;
+    let sequence = result
+        .rows
+        .first()
+        .and_then(|row| row.first())
+        .context("session event insert did not return a sequence")?;
+    let ColumnValue::Integer(sequence) = sequence else {
+        bail!("session event insert returned a non-integer sequence");
+    };
+    let sequence = u64::try_from(*sequence).context("session event sequence was negative")?;
+    let event = SessionEvent {
+        sequence,
+        session_id: session.id,
+        agent_id: session.agent_id,
+        association: session.association,
+        payload,
+    };
+    ctx.emit(event.clone())?;
+    Ok(event)
+}
+
+fn decode_session_event_row(session: &Session, row: Vec<ColumnValue>) -> Result<SessionEvent> {
+    let [ColumnValue::Integer(sequence), ColumnValue::Text(payload)] = row.as_slice() else {
+        bail!("session event row has an invalid shape");
+    };
+    Ok(SessionEvent {
+        sequence: u64::try_from(*sequence).context("session event sequence was negative")?,
+        session_id: session.id,
+        agent_id: session.agent_id,
+        association: session.association,
+        payload: serde_json::from_str(payload)?,
+    })
 }
 
 pub fn rivet_registry() -> Registry {
@@ -257,6 +372,7 @@ pub fn rivet_registry() -> Registry {
         SESSION_ACTOR_NAME,
         rivetkit::ActorConfig {
             has_state: true,
+            has_database: true,
             ..rivetkit::ActorConfig::default()
         },
     );
@@ -309,6 +425,57 @@ mod tests {
         let error = config.validate().unwrap_err();
 
         assert!(error.to_string().contains("require persistent"));
+    }
+
+    #[test]
+    fn event_page_limit_is_bounded() {
+        assert!(
+            ReadSessionEvents {
+                after_sequence: 0,
+                limit: 1,
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            ReadSessionEvents {
+                after_sequence: 0,
+                limit: 0,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            ReadSessionEvents {
+                after_sequence: 0,
+                limit: MAX_SESSION_EVENT_PAGE_SIZE + 1,
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn persisted_event_rows_recover_their_sequence() -> Result<()> {
+        let agent = Agent::new("test");
+        let session = Session::new(agent.id, SessionAssociation::Standalone);
+        let payload = SessionEventPayload::Stopped { error: None };
+
+        let event = decode_session_event_row(
+            &session,
+            vec![
+                ColumnValue::Integer(42),
+                ColumnValue::Text(serde_json::to_string(&payload)?),
+            ],
+        )?;
+
+        assert_eq!(event.sequence, 42);
+        assert_eq!(event.session_id, session.id);
+        assert!(matches!(
+            event.payload,
+            SessionEventPayload::Stopped { error: None }
+        ));
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -387,7 +554,24 @@ done
         .await??;
 
         assert_eq!(end.session_id, session_id);
+        assert!(end.sequence > 0);
         assert_eq!(actor.send(GetSessionState).await?.session.id, session_id);
+        let all_events = actor
+            .send(ReadSessionEvents {
+                after_sequence: 0,
+                limit: DEFAULT_SESSION_EVENT_PAGE_SIZE,
+            })
+            .await?;
+        assert_eq!(all_events.len(), 2);
+        assert_eq!(all_events[0].sequence + 1, all_events[1].sequence);
+        let after_first = actor
+            .send(ReadSessionEvents {
+                after_sequence: all_events[0].sequence,
+                limit: DEFAULT_SESSION_EVENT_PAGE_SIZE,
+            })
+            .await?;
+        assert_eq!(after_first.len(), 1);
+        assert_eq!(after_first[0].sequence, all_events[1].sequence);
         let persisted = fs::read_to_string(
             temp.path()
                 .join("sessions")

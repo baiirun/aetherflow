@@ -1,5 +1,5 @@
 use crate::{
-    GetSessionState, PiEvent, PiOptions, RpcCommand, SESSION_ACTOR_NAME,
+    GetSessionState, PiEvent, PiOptions, ReadSessionEvents, RpcCommand, SESSION_ACTOR_NAME,
     SESSION_DIRECTORY_ACTOR_NAME, SendSessionCommand, SessionActor, SessionActorConfig,
     SessionActorState, SessionDescriptor, SessionDirectoryActor, SessionEvent, SessionEventPayload,
     session_directory::{DEFAULT_SESSION_DIRECTORY_KEY, ListSessions, RegisterSession},
@@ -10,7 +10,10 @@ use rivetkit::{
     TypedActorConnection, TypedClientExt,
     client::{Client, ClientConfig, GetOrCreateOptions, connection::SubscriptionHandle},
 };
-use std::path::{Path, PathBuf};
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+};
 use tokio::sync::mpsc;
 
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:6420";
@@ -155,6 +158,64 @@ impl AetherflowClient {
             .with_context(|| format!("read session {session_id}"))
     }
 
+    pub async fn session_events(
+        &self,
+        session_id: SessionId,
+        after_sequence: u64,
+        limit: u32,
+    ) -> Result<Vec<SessionEvent>> {
+        self.session_handle(session_id)
+            .send(ReadSessionEvents {
+                after_sequence,
+                limit,
+            })
+            .await
+            .with_context(|| format!("read events for session {session_id}"))
+    }
+
+    pub async fn follow_session_events(
+        &self,
+        session_id: SessionId,
+        after_sequence: u64,
+        limit: u32,
+    ) -> Result<SessionEventSubscription> {
+        let connection = self.session_handle(session_id).connect();
+        let (events, event_rx) = mpsc::unbounded_channel();
+        let subscription = connection
+            .on::<SessionEvent>(move |event| {
+                let _ = events.send(event);
+            })
+            .await;
+        let mut replay = Vec::new();
+        let mut replay_after = after_sequence;
+        loop {
+            let page = connection
+                .send(ReadSessionEvents {
+                    after_sequence: replay_after,
+                    limit,
+                })
+                .await
+                .with_context(|| format!("read events for session {session_id}"))?;
+            let page_len = page.len();
+            if let Some(event) = page.last() {
+                replay_after = event.sequence;
+            }
+            replay.extend(page);
+            if page_len < limit as usize {
+                break;
+            }
+        }
+
+        Ok(SessionEventSubscription {
+            session_id,
+            connection,
+            subscription,
+            replay: replay.into(),
+            live: event_rx,
+            last_sequence: after_sequence,
+        })
+    }
+
     pub async fn prompt_session(
         &self,
         session_id: SessionId,
@@ -206,6 +267,43 @@ pub struct SessionEventStream {
     subscription: SubscriptionHandle,
     events: mpsc::UnboundedReceiver<SessionEvent>,
     finished: bool,
+}
+
+pub struct SessionEventSubscription {
+    session_id: SessionId,
+    connection: TypedActorConnection<SessionActor>,
+    subscription: SubscriptionHandle,
+    replay: VecDeque<SessionEvent>,
+    live: mpsc::UnboundedReceiver<SessionEvent>,
+    last_sequence: u64,
+}
+
+impl SessionEventSubscription {
+    pub async fn next(&mut self) -> Result<Option<SessionEvent>> {
+        if let Some(event) = self.replay.pop_front() {
+            self.last_sequence = event.sequence;
+            return Ok(Some(event));
+        }
+
+        while let Some(event) = self.live.recv().await {
+            if event.sequence <= self.last_sequence {
+                continue;
+            }
+            self.last_sequence = event.sequence;
+            return Ok(Some(event));
+        }
+
+        bail!(
+            "session {} event subscription closed after sequence {}",
+            self.session_id,
+            self.last_sequence
+        )
+    }
+
+    pub async fn close(self) {
+        self.subscription.unsubscribe().await;
+        self.connection.disconnect().await;
+    }
 }
 
 impl SessionEventStream {

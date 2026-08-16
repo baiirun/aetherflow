@@ -14,7 +14,7 @@ mod session_directory;
 
 pub use client::{
     AetherflowClient, AetherflowClientOptions, CreateSessionOptions, DEFAULT_ENDPOINT,
-    DEFAULT_NAMESPACE, DEFAULT_POOL, DEFAULT_TOKEN, SessionEventStream,
+    DEFAULT_NAMESPACE, DEFAULT_POOL, DEFAULT_TOKEN, SessionEventStream, SessionEventSubscription,
 };
 
 pub use protocol::{
@@ -23,7 +23,8 @@ pub use protocol::{
     WidgetPlacement,
 };
 pub use session_actor::{
-    GetSessionState, SESSION_ACTOR_NAME, SendSessionCommand, SessionActor, SessionActorConfig,
+    DEFAULT_SESSION_EVENT_PAGE_SIZE, GetSessionState, MAX_SESSION_EVENT_PAGE_SIZE,
+    ReadSessionEvents, SESSION_ACTOR_NAME, SendSessionCommand, SessionActor, SessionActorConfig,
     SessionActorState, SessionEvent, SessionEventPayload, rivet_registry,
 };
 pub use session_directory::{

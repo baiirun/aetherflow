@@ -1,6 +1,7 @@
 use aetherflow_pi::{
     AetherflowClient, AetherflowClientOptions, CreateSessionOptions, DEFAULT_ENDPOINT,
-    DEFAULT_NAMESPACE, DEFAULT_POOL, DEFAULT_SESSION_DIRECTORY_KEY, DEFAULT_TOKEN, PiEvent,
+    DEFAULT_NAMESPACE, DEFAULT_POOL, DEFAULT_SESSION_DIRECTORY_KEY,
+    DEFAULT_SESSION_EVENT_PAGE_SIZE, DEFAULT_TOKEN, MAX_SESSION_EVENT_PAGE_SIZE, PiEvent,
     PiMessage, PiOptions, PiRpc, RpcCommand, SessionEventStream,
 };
 use aetherflow_storage::{AgentId, ChannelId, SessionAssociation, SessionId};
@@ -61,6 +62,23 @@ enum SessionCommand {
     Prompt {
         session_id: SessionId,
         message: String,
+    },
+    /// Read the durable, sequenced event log for a session.
+    Events {
+        session_id: SessionId,
+        /// Return events whose sequence is greater than this cursor.
+        #[arg(long, default_value_t = 0)]
+        after: u64,
+        /// Maximum snapshot size, or page size while following.
+        #[arg(
+            long,
+            default_value_t = DEFAULT_SESSION_EVENT_PAGE_SIZE,
+            value_parser = clap::value_parser!(u32).range(1..=MAX_SESSION_EVENT_PAGE_SIZE as i64)
+        )]
+        limit: u32,
+        /// Continue printing events after replay catches up.
+        #[arg(long)]
+        follow: bool,
     },
 }
 
@@ -148,7 +166,48 @@ async fn run_session_command(client: &AetherflowClient, command: SessionCommand)
             session_id,
             message,
         } => prompt_session(client, session_id, message).await,
+        SessionCommand::Events {
+            session_id,
+            after,
+            limit,
+            follow,
+        } => session_events(client, session_id, after, limit, follow).await,
     }
+}
+
+async fn session_events(
+    client: &AetherflowClient,
+    session_id: SessionId,
+    after: u64,
+    limit: u32,
+    follow: bool,
+) -> Result<()> {
+    if !follow {
+        for event in client.session_events(session_id, after, limit).await? {
+            println!("{}", serde_json::to_string(&event)?);
+        }
+        return Ok(());
+    }
+
+    let mut events = client
+        .follow_session_events(session_id, after, limit)
+        .await?;
+    loop {
+        tokio::select! {
+            event = events.next() => {
+                let Some(event) = event? else {
+                    break;
+                };
+                println!("{}", serde_json::to_string(&event)?);
+            }
+            signal = tokio::signal::ctrl_c() => {
+                signal?;
+                break;
+            }
+        }
+    }
+    events.close().await;
+    Ok(())
 }
 
 async fn create_session(client: &AetherflowClient, args: CreateSessionArgs) -> Result<()> {
@@ -266,5 +325,54 @@ mod tests {
 
         assert_eq!(create.prompt.as_deref(), Some("start here"));
         assert!(create.attach);
+    }
+
+    #[test]
+    fn session_events_accepts_cursor_limit_and_follow() {
+        let args = Args::try_parse_from([
+            "af",
+            "session",
+            "events",
+            "00000000-0000-0000-0000-000000000001",
+            "--after",
+            "42",
+            "--limit",
+            "25",
+            "--follow",
+        ])
+        .unwrap();
+
+        let Command::Session {
+            command:
+                SessionCommand::Events {
+                    after,
+                    limit,
+                    follow,
+                    ..
+                },
+        } = args.command
+        else {
+            panic!("expected session events command");
+        };
+
+        assert_eq!(after, 42);
+        assert_eq!(limit, 25);
+        assert!(follow);
+    }
+
+    #[test]
+    fn session_events_rejects_an_unbounded_page() {
+        let error = Args::try_parse_from([
+            "af",
+            "session",
+            "events",
+            "00000000-0000-0000-0000-000000000001",
+            "--limit",
+            "1001",
+        ])
+        .err()
+        .expect("an oversized event page should fail");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
     }
 }

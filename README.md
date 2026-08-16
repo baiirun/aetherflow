@@ -51,6 +51,7 @@ af session create "Hello"
 af session list
 af session prompt <SESSION_ID> "Hello"
 af session state <SESSION_ID>
+af session events <SESSION_ID>
 ```
 
 The prompt on `session create` is optional. Creation prints only the new session
@@ -60,6 +61,19 @@ unrendered Pi event stream as `session prompt`:
 ```sh
 af session create "Hello" --attach
 ```
+
+Every daemon-backed session event has a durable, monotonically increasing
+`sequence`. Read a bounded snapshot, resume after the last sequence you saw, or
+catch up and continue following the live stream:
+
+```sh
+af session events <SESSION_ID> --limit 100
+af session events <SESSION_ID> --after 42
+af session events <SESSION_ID> --after 42 --follow
+```
+
+`--after` is exclusive. While following, `--limit` is the catch-up page size;
+without `--follow`, it is the maximum number of events returned.
 
 Session actors persist their Pi JSONL under `~/.aetherflow/pi-sessions` by
 default. Override it with `--session-dir` during creation or by setting
