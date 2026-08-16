@@ -9,4 +9,5 @@ license.workspace = true
 aetherflow-pi = { path = "../aetherflow-pi" }
 aetherflow-storage = { path = "../aetherflow-storage" }
 gpui.workspace = true
+gpui-component.workspace = true
 tokio.workspace = true

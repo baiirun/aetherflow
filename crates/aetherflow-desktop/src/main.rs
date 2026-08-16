@@ -1,11 +1,16 @@
-use aetherflow_pi::{AetherflowClient, AetherflowClientOptions, SessionDescriptor};
+use aetherflow_pi::{
+    AetherflowClient, AetherflowClientOptions, AssistantMessageEvent, CreateSessionOptions,
+    PiEvent, SessionDescriptor, SessionEvent, SessionEventPayload,
+};
 use aetherflow_storage::SessionId;
 use gpui::{
-    App, Application, Bounds, Context, Div, TitlebarOptions, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowOptions, div, prelude::*, px, rgb, rgba, size,
+    App, Application, Bounds, Context, Div, Entity, Subscription, TitlebarOptions, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowOptions, div, prelude::*, px, rgb, rgba, size,
 };
+use gpui_component::input::{Input, InputEvent, InputState};
 use std::{
     cmp::Reverse,
+    collections::HashMap,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -19,24 +24,68 @@ enum SessionLoadState {
     Failed(String),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConversationRole {
+    User,
+    Assistant,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ConversationMessage {
+    role: ConversationRole,
+    text: String,
+}
+
+enum PromptUpdate {
+    Created(SessionId),
+    TextDelta {
+        session_id: SessionId,
+        delta: String,
+    },
+    Finished,
+    Failed(String),
+}
+
 struct DesktopShell {
     runtime: Arc<Runtime>,
     client: AetherflowClient,
     sessions: Vec<SessionDescriptor>,
     selected_session_id: Option<SessionId>,
+    creating_new_session: bool,
+    conversations: HashMap<SessionId, Vec<ConversationMessage>>,
+    new_session_messages: Vec<ConversationMessage>,
+    composer: Entity<InputState>,
+    is_sending: bool,
     load_state: SessionLoadState,
     action_error: Option<String>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl DesktopShell {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let composer = cx.new(|cx| InputState::new(window, cx).placeholder("Message Aetherflow"));
+        let input_subscription = cx.subscribe_in(
+            &composer,
+            window,
+            |shell, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    shell.submit_prompt(window, cx);
+                }
+            },
+        );
         let mut shell = Self {
             runtime: Arc::new(Runtime::new().expect("failed to start desktop async runtime")),
             client: AetherflowClient::connect(AetherflowClientOptions::default()),
             sessions: Vec::new(),
             selected_session_id: None,
+            creating_new_session: false,
+            conversations: HashMap::new(),
+            new_session_messages: Vec::new(),
+            composer,
+            is_sending: false,
             load_state: SessionLoadState::Loading,
             action_error: None,
+            _subscriptions: vec![input_subscription],
         };
         shell.load_sessions(cx);
         shell
@@ -70,14 +119,169 @@ impl DesktopShell {
 
     fn replace_sessions(&mut self, sessions: Vec<SessionDescriptor>) {
         self.selected_session_id = selection_after_refresh(self.selected_session_id, &sessions);
+        if sessions.is_empty() {
+            self.creating_new_session = true;
+        }
         self.sessions = sessions;
         self.load_state = SessionLoadState::Loaded;
-        self.action_error = None;
     }
 
     fn selected_session(&self) -> Option<&SessionDescriptor> {
         let selected = self.selected_session_id?;
         self.sessions.iter().find(|session| session.id == selected)
+    }
+
+    fn open_new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_sending {
+            return;
+        }
+        self.creating_new_session = true;
+        self.selected_session_id = None;
+        self.new_session_messages.clear();
+        self.action_error = None;
+        self.composer.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_sending {
+            return;
+        }
+
+        let prompt = self.composer.read(cx).value().trim().to_owned();
+        if prompt.is_empty() {
+            return;
+        }
+
+        let create_new = self.creating_new_session;
+        let session_id = if create_new {
+            None
+        } else {
+            self.selected_session_id
+        };
+        let messages = vec![
+            ConversationMessage {
+                role: ConversationRole::User,
+                text: prompt.clone(),
+            },
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                text: String::new(),
+            },
+        ];
+        if let Some(session_id) = session_id {
+            self.conversations
+                .entry(session_id)
+                .or_default()
+                .extend(messages);
+        } else if create_new {
+            self.new_session_messages.extend(messages);
+        } else {
+            return;
+        }
+
+        self.composer
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.is_sending = true;
+        self.action_error = None;
+
+        let client = self.client.clone();
+        let (updates, mut update_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.runtime.spawn(async move {
+            let session_id = match session_id {
+                Some(session_id) => session_id,
+                None => match client.create_session(CreateSessionOptions::default()).await {
+                    Ok(session_id) => {
+                        let _ = updates.send(PromptUpdate::Created(session_id));
+                        session_id
+                    }
+                    Err(error) => {
+                        let _ = updates.send(PromptUpdate::Failed(format!(
+                            "Could not create session: {error:#}"
+                        )));
+                        return;
+                    }
+                },
+            };
+
+            let mut stream = match client.prompt_session(session_id, prompt).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    let _ = updates.send(PromptUpdate::Failed(format!(
+                        "Could not prompt session: {error:#}"
+                    )));
+                    return;
+                }
+            };
+
+            loop {
+                match stream.next().await {
+                    Ok(Some(event)) => {
+                        if let Some(error) = stopped_error(&event) {
+                            let _ = updates.send(PromptUpdate::Failed(error));
+                            return;
+                        }
+                        if let Some(delta) = assistant_text_delta(&event) {
+                            let _ = updates.send(PromptUpdate::TextDelta {
+                                session_id,
+                                delta: delta.to_owned(),
+                            });
+                        }
+                    }
+                    Ok(None) => {
+                        let _ = updates.send(PromptUpdate::Finished);
+                        return;
+                    }
+                    Err(error) => {
+                        let _ = updates.send(PromptUpdate::Failed(format!(
+                            "Session stream failed: {error:#}"
+                        )));
+                        return;
+                    }
+                }
+            }
+        });
+
+        cx.spawn(async move |shell, cx| {
+            while let Some(update) = update_rx.recv().await {
+                let finished = matches!(update, PromptUpdate::Finished | PromptUpdate::Failed(_));
+                let _ = shell.update(cx, |shell, cx| {
+                    shell.apply_prompt_update(update, cx);
+                    cx.notify();
+                });
+                if finished {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn apply_prompt_update(&mut self, update: PromptUpdate, cx: &mut Context<Self>) {
+        match update {
+            PromptUpdate::Created(session_id) => {
+                self.selected_session_id = Some(session_id);
+                self.creating_new_session = false;
+                let messages = std::mem::take(&mut self.new_session_messages);
+                self.conversations.insert(session_id, messages);
+                self.load_sessions(cx);
+            }
+            PromptUpdate::TextDelta { session_id, delta } => {
+                append_assistant_delta(self.conversations.entry(session_id).or_default(), &delta);
+            }
+            PromptUpdate::Finished => {
+                self.is_sending = false;
+                self.load_sessions(cx);
+            }
+            PromptUpdate::Failed(error) => {
+                self.is_sending = false;
+                self.action_error = Some(error);
+            }
+        }
     }
 
     fn set_session_archived(
@@ -146,7 +350,9 @@ impl DesktopShell {
             .when(selected, |style| style.bg(rgb(0x2b2d2f)))
             .hover(|style| style.bg(rgb(0x252729)))
             .on_click(cx.listener(move |shell, _, _, cx| {
+                shell.creating_new_session = false;
                 shell.selected_session_id = Some(session.id);
+                shell.action_error = None;
                 cx.notify();
             }))
             .child(
@@ -299,25 +505,50 @@ impl DesktopShell {
                     .child(div().text_sm().text_color(rgb(0x74777a)).child("Sessions"))
                     .child(
                         div()
-                            .id("refresh-sessions")
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_sm()
-                            .text_color(rgb(0x74777a))
-                            .hover(|style| style.bg(rgb(0x252729)).text_color(rgb(0xd6d7d9)))
-                            .child("↻")
-                            .on_click(cx.listener(|shell, _, _, cx| {
-                                shell.load_sessions(cx);
-                                cx.notify();
-                            })),
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .id("new-session")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_base()
+                                    .text_color(rgb(0x74777a))
+                                    .hover(|style| {
+                                        style.bg(rgb(0x252729)).text_color(rgb(0xd6d7d9))
+                                    })
+                                    .child("+")
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.open_new_session(window, cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("refresh-sessions")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_sm()
+                                    .text_color(rgb(0x74777a))
+                                    .hover(|style| {
+                                        style.bg(rgb(0x252729)).text_color(rgb(0xd6d7d9))
+                                    })
+                                    .child("↻")
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.load_sessions(cx);
+                                        cx.notify();
+                                    })),
+                            ),
                     ),
             )
             .child(list)
     }
 
-    fn render_main_panel(&self) -> Div {
+    fn render_main_panel(&self, cx: &mut Context<Self>) -> Div {
         let panel = div()
             .flex_1()
             .min_w_0()
@@ -326,7 +557,23 @@ impl DesktopShell {
             .flex_col()
             .bg(rgba(0x101318d9));
 
-        let Some(session) = self.selected_session() else {
+        if self.creating_new_session {
+            return panel
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .text_color(rgb(0x74777a))
+                        .child("Send a message to start a new session."),
+                )
+                .child(self.render_composer(cx));
+        }
+
+        let Some(session_id) = self.selected_session_id else {
             return panel.child(
                 div()
                     .flex_1()
@@ -346,6 +593,11 @@ impl DesktopShell {
             );
         };
 
+        let title = self
+            .selected_session()
+            .map(session_title)
+            .unwrap_or_else(|| format!("Session {}", short_id(session_id)));
+
         panel
             .child(
                 div()
@@ -355,21 +607,141 @@ impl DesktopShell {
                     .items_center()
                     .border_b_1()
                     .border_color(rgb(0x2a303b))
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(session_title(session)),
-                    ),
+                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(title)),
             )
+            .child(self.render_conversation(session_id))
+            .child(self.render_composer(cx))
+    }
+
+    fn render_conversation(&self, session_id: SessionId) -> impl IntoElement {
+        let mut conversation = div()
+            .id("conversation")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_8()
+            .py_6()
+            .flex()
+            .flex_col()
+            .gap_5();
+
+        let messages = self.conversations.get(&session_id);
+        if messages.is_none_or(Vec::is_empty) {
+            return conversation
+                .items_center()
+                .justify_center()
+                .text_color(rgb(0x74777a))
+                .child("Send a message to continue this session.");
+        }
+
+        for (index, message) in messages.into_iter().flatten().enumerate() {
+            let is_empty_assistant =
+                message.role == ConversationRole::Assistant && message.text.is_empty();
+            if is_empty_assistant && !self.is_sending {
+                continue;
+            }
+
+            conversation = match message.role {
+                ConversationRole::User => conversation.child(
+                    div()
+                        .id(("user-message", index))
+                        .w_full()
+                        .flex()
+                        .justify_end()
+                        .child(
+                            div()
+                                .max_w(px(640.))
+                                .px_4()
+                                .py_3()
+                                .rounded_xl()
+                                .bg(rgb(0x25282d))
+                                .whitespace_normal()
+                                .child(message.text.clone()),
+                        ),
+                ),
+                ConversationRole::Assistant => conversation.child(
+                    div()
+                        .id(("assistant-message", index))
+                        .max_w(px(720.))
+                        .whitespace_normal()
+                        .text_color(rgb(0xd6d7d9))
+                        .child(if is_empty_assistant {
+                            "Working…".to_owned()
+                        } else {
+                            message.text.clone()
+                        }),
+                ),
+            };
+        }
+
+        conversation
+    }
+
+    fn render_composer(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .w_full()
+            .px_8()
+            .pb_6()
             .child(
                 div()
-                    .flex_1()
+                    .w_full()
+                    .max_w(px(760.))
+                    .mx_auto()
+                    .h(px(52.))
+                    .pl_3()
+                    .pr_2()
                     .flex()
                     .items_center()
-                    .justify_center()
-                    .text_color(rgb(0x74777a))
-                    .child("Transcript coming next."),
+                    .gap_2()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(rgb(0x30343a))
+                    .bg(rgba(0x1d2025f2))
+                    .child(
+                        Input::new(&self.composer)
+                            .appearance(false)
+                            .bordered(false)
+                            .focus_bordered(false)
+                            .disabled(self.is_sending)
+                            .flex_1(),
+                    )
+                    .child(
+                        div()
+                            .id("send-prompt")
+                            .size(px(34.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_lg()
+                            .text_base()
+                            .when(self.is_sending, |style| {
+                                style.bg(rgb(0x303238)).text_color(rgb(0x777a80))
+                            })
+                            .when(!self.is_sending, |style| {
+                                style
+                                    .bg(rgb(0xe7eaf0))
+                                    .text_color(rgb(0x17191d))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0xffffff)))
+                            })
+                            .child("↑")
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.submit_prompt(window, cx);
+                            })),
+                    ),
             )
+            .when_some(self.action_error.clone(), |composer, error| {
+                composer.child(
+                    div()
+                        .w_full()
+                        .max_w(px(760.))
+                        .mx_auto()
+                        .pt_2()
+                        .text_xs()
+                        .text_color(rgb(0xf29b9b))
+                        .child(truncate(&error, 180)),
+                )
+            })
     }
 }
 
@@ -382,7 +754,7 @@ impl Render for DesktopShell {
             .font_family("Inter Variable")
             .text_color(rgb(0xe7eaf0))
             .child(self.render_sidebar(cx))
-            .child(self.render_main_panel())
+            .child(self.render_main_panel(cx))
     }
 }
 
@@ -439,8 +811,51 @@ fn selection_after_refresh(
         .or_else(|| sessions.first().map(|session| session.id))
 }
 
+fn assistant_text_delta(event: &SessionEvent) -> Option<&str> {
+    let SessionEventPayload::Pi { message } = &event.payload else {
+        return None;
+    };
+    let PiEvent::MessageUpdate(update) = message.event() else {
+        return None;
+    };
+    let AssistantMessageEvent::TextDelta { delta, .. } = &update.assistant_message_event else {
+        return None;
+    };
+    Some(delta)
+}
+
+fn stopped_error(event: &SessionEvent) -> Option<String> {
+    let SessionEventPayload::Stopped { error } = &event.payload else {
+        return None;
+    };
+    Some(
+        error
+            .clone()
+            .unwrap_or_else(|| "The session stopped before completing the response.".to_owned()),
+    )
+}
+
+fn append_assistant_delta(messages: &mut Vec<ConversationMessage>, delta: &str) {
+    if let Some(message) = messages
+        .iter_mut()
+        .rev()
+        .find(|message| message.role == ConversationRole::Assistant)
+    {
+        message.text.push_str(delta);
+    } else {
+        messages.push(ConversationMessage {
+            role: ConversationRole::Assistant,
+            text: delta.to_owned(),
+        });
+    }
+}
+
 fn main() {
     Application::new().run(|cx: &mut App| {
+        gpui_component::init(cx);
+        let theme = gpui_component::Theme::global_mut(cx);
+        theme.background = gpui::transparent_black();
+        theme.font_family = "Inter Variable".into();
         let bounds = Bounds::centered(None, size(px(1040.), px(700.)), cx);
         cx.open_window(
             WindowOptions {
@@ -452,7 +867,10 @@ fn main() {
                 window_background: WindowBackgroundAppearance::Transparent,
                 ..Default::default()
             },
-            |_, cx| cx.new(DesktopShell::new),
+            |window, cx| {
+                let shell = cx.new(|cx| DesktopShell::new(window, cx));
+                cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+            },
         )
         .expect("failed to open the Aetherflow window");
         cx.activate(true);
@@ -517,5 +935,32 @@ mod tests {
         assert_eq!(relative_time(now, now), "now");
         assert_eq!(relative_time(now - 120_000, now), "2m");
         assert_eq!(relative_time(now - 7_200_000, now), "2h");
+    }
+
+    #[test]
+    fn assistant_deltas_append_to_the_current_response() {
+        let mut messages = vec![ConversationMessage {
+            role: ConversationRole::Assistant,
+            text: "Hello".to_owned(),
+        }];
+
+        append_assistant_delta(&mut messages, ", world");
+
+        assert_eq!(messages[0].text, "Hello, world");
+    }
+
+    #[test]
+    fn assistant_delta_creates_a_response_when_needed() {
+        let mut messages = Vec::new();
+
+        append_assistant_delta(&mut messages, "Hello");
+
+        assert_eq!(
+            messages,
+            vec![ConversationMessage {
+                role: ConversationRole::Assistant,
+                text: "Hello".to_owned(),
+            }]
+        );
     }
 }
