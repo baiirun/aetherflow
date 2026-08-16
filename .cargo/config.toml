@@ -1,0 +1,4 @@
+[env]
+# Rivet's local SQLite VFS requires this SQLite compile-time capability. This
+# matches the configuration used by the upstream Rivet monorepo.
+LIBSQLITE3_FLAGS = "SQLITE_ENABLE_BATCH_ATOMIC_WRITE"

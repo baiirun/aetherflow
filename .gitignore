@@ -1,36 +1,5 @@
-# Binaries
-/af
-*.exe
-*.dll
-*.so
-*.dylib
-
-# Test binaries
-*.test
-
-# Output of go coverage tool
-*.out
-coverage.html
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# OS
+/target/
+/.aetherflow/
+/.pi-subagents/
+/.worktrees/
 .DS_Store
-Thumbs.db
-
-# Runtime / test data
-.aetherflow/
-
-# Build
-/dist/
-/macos/*/.build/
-/macos/*/.swiftpm/
-/macos/*/build/
-*.xcodeproj/xcuserdata/
-*.xcuserstate
-.worktrees
