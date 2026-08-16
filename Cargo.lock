@@ -28,6 +28,7 @@ dependencies = [
  "aetherflow-storage",
  "gpui",
  "gpui-component",
+ "serde_json",
  "tokio",
 ]
 

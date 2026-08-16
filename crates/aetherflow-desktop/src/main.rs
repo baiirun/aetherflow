@@ -1,6 +1,6 @@
 use aetherflow_pi::{
     AetherflowClient, AetherflowClientOptions, AssistantMessageEvent, CreateSessionOptions,
-    PiEvent, SessionDescriptor, SessionEvent, SessionEventPayload,
+    MAX_SESSION_EVENT_PAGE_SIZE, PiEvent, SessionDescriptor, SessionEvent, SessionEventPayload,
 };
 use aetherflow_storage::SessionId;
 use gpui::{
@@ -10,7 +10,7 @@ use gpui::{
 use gpui_component::input::{Input, InputEvent, InputState};
 use std::{
     cmp::Reverse,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -53,6 +53,8 @@ struct DesktopShell {
     selected_session_id: Option<SessionId>,
     creating_new_session: bool,
     conversations: HashMap<SessionId, Vec<ConversationMessage>>,
+    loading_conversations: HashSet<SessionId>,
+    conversation_errors: HashMap<SessionId, String>,
     new_session_messages: Vec<ConversationMessage>,
     composer: Entity<InputState>,
     is_sending: bool,
@@ -80,6 +82,8 @@ impl DesktopShell {
             selected_session_id: None,
             creating_new_session: false,
             conversations: HashMap::new(),
+            loading_conversations: HashSet::new(),
+            conversation_errors: HashMap::new(),
             new_session_messages: Vec::new(),
             composer,
             is_sending: false,
@@ -108,7 +112,12 @@ impl DesktopShell {
                 .and_then(|result| result);
             let _ = shell.update(cx, |shell, cx| {
                 match result {
-                    Ok(sessions) => shell.replace_sessions(sessions),
+                    Ok(sessions) => {
+                        shell.replace_sessions(sessions);
+                        if let Some(session_id) = shell.selected_session_id {
+                            shell.load_conversation(session_id, cx);
+                        }
+                    }
                     Err(error) => shell.load_state = SessionLoadState::Failed(error),
                 }
                 cx.notify();
@@ -131,8 +140,69 @@ impl DesktopShell {
         self.sessions.iter().find(|session| session.id == selected)
     }
 
+    fn select_session(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
+        self.creating_new_session = false;
+        self.selected_session_id = Some(session_id);
+        self.action_error = None;
+        self.load_conversation(session_id, cx);
+    }
+
+    fn load_conversation(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
+        if self.conversations.contains_key(&session_id)
+            || !self.loading_conversations.insert(session_id)
+        {
+            return;
+        }
+        self.conversation_errors.remove(&session_id);
+
+        let client = self.client.clone();
+        let request = self.runtime.spawn(async move {
+            let mut after_sequence = 0;
+            let mut events = Vec::new();
+            loop {
+                let page = client
+                    .session_events(session_id, after_sequence, MAX_SESSION_EVENT_PAGE_SIZE)
+                    .await
+                    .map_err(|error| format!("Could not load session messages: {error:#}"))?;
+                let page_len = page.len();
+                if let Some(event) = page.last() {
+                    after_sequence = event.sequence;
+                }
+                events.extend(page);
+                if page_len < MAX_SESSION_EVENT_PAGE_SIZE as usize {
+                    break;
+                }
+            }
+            Ok::<_, String>(conversation_from_events(&events))
+        });
+
+        cx.spawn(async move |shell, cx| {
+            let result = request
+                .await
+                .map_err(|error| format!("session message task failed: {error}"))
+                .and_then(|result| result);
+            let _ = shell.update(cx, |shell, cx| {
+                shell.loading_conversations.remove(&session_id);
+                match result {
+                    Ok(messages) => {
+                        shell.conversations.insert(session_id, messages);
+                    }
+                    Err(error) => {
+                        shell.conversation_errors.insert(session_id, error);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_sending {
+        if self.is_sending
+            || self
+                .selected_session_id
+                .is_some_and(|session_id| self.loading_conversations.contains(&session_id))
+        {
             return;
         }
 
@@ -335,9 +405,7 @@ impl DesktopShell {
             .when(selected, |style| style.bg(rgb(0x2b2d2f)))
             .hover(|style| style.bg(rgb(0x252729)))
             .on_click(cx.listener(move |shell, _, _, cx| {
-                shell.creating_new_session = false;
-                shell.selected_session_id = Some(session.id);
-                shell.action_error = None;
+                shell.select_session(session.id, cx);
                 cx.notify();
             }))
             .child(
@@ -568,6 +636,30 @@ impl DesktopShell {
             .flex_col()
             .gap_5();
 
+        if self.loading_conversations.contains(&session_id) {
+            return conversation
+                .items_center()
+                .justify_center()
+                .text_color(rgb(0x74777a))
+                .child("Loading messages…");
+        }
+
+        if let Some(error) = self.conversation_errors.get(&session_id) {
+            return conversation
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .text_color(rgb(0xf29b9b))
+                .child("Could not load messages")
+                .child(
+                    div()
+                        .max_w(px(520.))
+                        .text_xs()
+                        .text_color(rgb(0x8b93a1))
+                        .child(truncate(error, 180)),
+                );
+        }
+
         let messages = self.conversations.get(&session_id);
         if messages.is_none_or(Vec::is_empty) {
             return conversation
@@ -621,6 +713,10 @@ impl DesktopShell {
     }
 
     fn render_composer(&self, cx: &mut Context<Self>) -> Div {
+        let disabled = self.is_sending
+            || self
+                .selected_session_id
+                .is_some_and(|session_id| self.loading_conversations.contains(&session_id));
         div()
             .w_full()
             .px_8()
@@ -645,7 +741,7 @@ impl DesktopShell {
                             .appearance(false)
                             .bordered(false)
                             .focus_bordered(false)
-                            .disabled(self.is_sending)
+                            .disabled(disabled)
                             .flex_1(),
                     )
                     .child(
@@ -657,10 +753,10 @@ impl DesktopShell {
                             .justify_center()
                             .rounded_lg()
                             .text_base()
-                            .when(self.is_sending, |style| {
+                            .when(disabled, |style| {
                                 style.bg(rgb(0x303238)).text_color(rgb(0x777a80))
                             })
-                            .when(!self.is_sending, |style| {
+                            .when(!disabled, |style| {
                                 style
                                     .bg(rgb(0xe7eaf0))
                                     .text_color(rgb(0x17191d))
@@ -767,6 +863,41 @@ fn assistant_text_delta(event: &SessionEvent) -> Option<&str> {
     Some(delta)
 }
 
+fn conversation_from_events(events: &[SessionEvent]) -> Vec<ConversationMessage> {
+    events
+        .iter()
+        .filter_map(completed_conversation_message)
+        .collect()
+}
+
+fn completed_conversation_message(event: &SessionEvent) -> Option<ConversationMessage> {
+    let SessionEventPayload::Pi { message } = &event.payload else {
+        return None;
+    };
+    let PiEvent::MessageEnd(completed) = message.event() else {
+        return None;
+    };
+
+    let role = match completed.message.get("role")?.as_str()? {
+        "user" => ConversationRole::User,
+        "assistant" => ConversationRole::Assistant,
+        _ => return None,
+    };
+    let text = completed
+        .message
+        .get("content")?
+        .as_array()?
+        .iter()
+        .filter(|content| content.get("type").and_then(|kind| kind.as_str()) == Some("text"))
+        .filter_map(|content| content.get("text").and_then(|text| text.as_str()))
+        .collect::<String>();
+    if text.is_empty() {
+        return None;
+    }
+
+    Some(ConversationMessage { role, text })
+}
+
 fn stopped_error(event: &SessionEvent) -> Option<String> {
     let SessionEventPayload::Stopped { error } = &event.payload else {
         return None;
@@ -823,7 +954,23 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aetherflow_pi::PiMessage;
     use aetherflow_storage::{AgentId, SessionAssociation};
+    use serde_json::json;
+
+    fn session_event(message: serde_json::Value) -> SessionEvent {
+        SessionEvent {
+            sequence: 1,
+            session_id: SessionId::new(),
+            agent_id: AgentId::new(),
+            association: SessionAssociation::Standalone,
+            payload: SessionEventPayload::Pi {
+                message: Box::new(
+                    serde_json::from_value::<PiMessage>(message).expect("valid Pi event"),
+                ),
+            },
+        }
+    }
 
     #[test]
     fn truncation_is_unicode_safe() {
@@ -904,6 +1051,52 @@ mod tests {
                 role: ConversationRole::Assistant,
                 text: "Hello".to_owned(),
             }]
+        );
+    }
+
+    #[test]
+    fn completed_pi_messages_rebuild_a_conversation() {
+        let events = [
+            session_event(json!({
+                "type": "message_end",
+                "message": {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "Where are we?" }]
+                }
+            })),
+            session_event(json!({
+                "type": "message_update",
+                "assistantMessageEvent": {
+                    "type": "text_delta",
+                    "contentIndex": 0,
+                    "delta": "In the archive."
+                }
+            })),
+            session_event(json!({
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "thinking", "thinking": "Recall context" },
+                        { "type": "text", "text": "In the " },
+                        { "type": "text", "text": "archive." }
+                    ]
+                }
+            })),
+        ];
+
+        assert_eq!(
+            conversation_from_events(&events),
+            vec![
+                ConversationMessage {
+                    role: ConversationRole::User,
+                    text: "Where are we?".to_owned(),
+                },
+                ConversationMessage {
+                    role: ConversationRole::Assistant,
+                    text: "In the archive.".to_owned(),
+                },
+            ]
         );
     }
 }
