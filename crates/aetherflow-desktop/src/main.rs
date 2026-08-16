@@ -4,10 +4,12 @@ use aetherflow_pi::{
 };
 use aetherflow_storage::SessionId;
 use gpui::{
-    App, Application, Bounds, Context, Div, Entity, Subscription, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowOptions, div, prelude::*, px, rgb, rgba, size,
+    App, Application, Bounds, Context, Div, Entity, Pixels, ScrollHandle, Subscription,
+    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div,
+    prelude::*, px, rgb, rgba, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::text::{TextView, TextViewStyle};
 use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
@@ -17,6 +19,7 @@ use std::{
 use tokio::runtime::Runtime;
 
 const SIDEBAR_WIDTH: f32 = 280.;
+const BOTTOM_FOLLOW_THRESHOLD: f32 = 32.;
 
 enum SessionLoadState {
     Loading,
@@ -53,6 +56,7 @@ struct DesktopShell {
     selected_session_id: Option<SessionId>,
     creating_new_session: bool,
     conversations: HashMap<SessionId, Vec<ConversationMessage>>,
+    conversation_scrolls: HashMap<SessionId, ScrollHandle>,
     loading_conversations: HashSet<SessionId>,
     conversation_errors: HashMap<SessionId, String>,
     new_session_messages: Vec<ConversationMessage>,
@@ -82,6 +86,7 @@ impl DesktopShell {
             selected_session_id: None,
             creating_new_session: false,
             conversations: HashMap::new(),
+            conversation_scrolls: HashMap::new(),
             loading_conversations: HashSet::new(),
             conversation_errors: HashMap::new(),
             new_session_messages: Vec::new(),
@@ -148,6 +153,7 @@ impl DesktopShell {
     }
 
     fn load_conversation(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
+        self.conversation_scrolls.entry(session_id).or_default();
         if self.conversations.contains_key(&session_id)
             || !self.loading_conversations.insert(session_id)
         {
@@ -185,7 +191,9 @@ impl DesktopShell {
                 shell.loading_conversations.remove(&session_id);
                 match result {
                     Ok(messages) => {
+                        let follow = shell.conversation_is_at_bottom(session_id);
                         shell.conversations.insert(session_id, messages);
+                        shell.follow_conversation_if(session_id, follow);
                     }
                     Err(error) => {
                         shell.conversation_errors.insert(session_id, error);
@@ -195,6 +203,21 @@ impl DesktopShell {
             });
         })
         .detach();
+    }
+
+    fn conversation_is_at_bottom(&self, session_id: SessionId) -> bool {
+        self.conversation_scrolls
+            .get(&session_id)
+            .is_none_or(scroll_handle_is_at_bottom)
+    }
+
+    fn follow_conversation_if(&self, session_id: SessionId, follow: bool) {
+        if follow {
+            self.conversation_scrolls
+                .get(&session_id)
+                .expect("selected conversations have a scroll handle")
+                .scroll_to_bottom();
+        }
     }
 
     fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -228,10 +251,12 @@ impl DesktopShell {
             },
         ];
         if let Some(session_id) = session_id {
+            let follow = self.conversation_is_at_bottom(session_id);
             self.conversations
                 .entry(session_id)
                 .or_default()
                 .extend(messages);
+            self.follow_conversation_if(session_id, follow);
         } else if create_new {
             self.new_session_messages.extend(messages);
         } else {
@@ -323,10 +348,16 @@ impl DesktopShell {
                 self.creating_new_session = false;
                 let messages = std::mem::take(&mut self.new_session_messages);
                 self.conversations.insert(session_id, messages);
+                self.conversation_scrolls
+                    .entry(session_id)
+                    .or_default()
+                    .scroll_to_bottom();
                 self.load_sessions(cx);
             }
             PromptUpdate::TextDelta { session_id, delta } => {
+                let follow = self.conversation_is_at_bottom(session_id);
                 append_assistant_delta(self.conversations.entry(session_id).or_default(), &delta);
+                self.follow_conversation_if(session_id, follow);
             }
             PromptUpdate::Finished => {
                 self.is_sending = false;
@@ -559,7 +590,7 @@ impl DesktopShell {
             .child(list)
     }
 
-    fn render_main_panel(&self, cx: &mut Context<Self>) -> Div {
+    fn render_main_panel(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let panel = div()
             .flex_1()
             .min_w_0()
@@ -620,16 +651,29 @@ impl DesktopShell {
                     .border_color(rgb(0x2a303b))
                     .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(title)),
             )
-            .child(self.render_conversation(session_id))
+            .child(self.render_conversation(session_id, window, cx))
             .child(self.render_composer(cx))
     }
 
-    fn render_conversation(&self, session_id: SessionId) -> impl IntoElement {
+    fn render_conversation(
+        &self,
+        session_id: SessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let scroll_handle = self
+            .conversation_scrolls
+            .get(&session_id)
+            .expect("selected conversations have a scroll handle");
+        if scroll_handle_is_at_bottom(scroll_handle) {
+            scroll_handle.scroll_to_bottom();
+        }
         let mut conversation = div()
             .id("conversation")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(scroll_handle)
             .px_8()
             .py_6()
             .flex()
@@ -690,22 +734,43 @@ impl DesktopShell {
                                 .py_3()
                                 .rounded_xl()
                                 .bg(rgb(0x25282d))
-                                .whitespace_normal()
-                                .child(message.text.clone()),
+                                .child(
+                                    TextView::markdown(
+                                        ("user-markdown", index),
+                                        message.text.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                    .style(conversation_markdown_style(cx))
+                                    .selectable(true)
+                                    .w_full(),
+                                ),
                         ),
                 ),
-                ConversationRole::Assistant => conversation.child(
-                    div()
-                        .id(("assistant-message", index))
-                        .max_w(px(720.))
-                        .whitespace_normal()
-                        .text_color(rgb(0xd6d7d9))
-                        .child(if is_empty_assistant {
-                            "Working…".to_owned()
-                        } else {
-                            message.text.clone()
-                        }),
-                ),
+                ConversationRole::Assistant => {
+                    let content = if is_empty_assistant {
+                        div().child("Working…").into_any_element()
+                    } else {
+                        TextView::markdown(
+                            ("assistant-markdown", index),
+                            message.text.clone(),
+                            window,
+                            cx,
+                        )
+                        .style(conversation_markdown_style(cx))
+                        .selectable(true)
+                        .w_full()
+                        .into_any_element()
+                    };
+                    conversation.child(
+                        div()
+                            .id(("assistant-message", index))
+                            .w_full()
+                            .max_w(px(720.))
+                            .text_color(rgb(0xd6d7d9))
+                            .child(content),
+                    )
+                }
             };
         }
 
@@ -785,7 +850,7 @@ impl DesktopShell {
 }
 
 impl Render for DesktopShell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
             .flex()
@@ -793,7 +858,7 @@ impl Render for DesktopShell {
             .font_family("Inter Variable")
             .text_color(rgb(0xe7eaf0))
             .child(self.render_sidebar(cx))
-            .child(self.render_main_panel(cx))
+            .child(self.render_main_panel(window, cx))
     }
 }
 
@@ -911,9 +976,8 @@ fn stopped_error(event: &SessionEvent) -> Option<String> {
 
 fn append_assistant_delta(messages: &mut Vec<ConversationMessage>, delta: &str) {
     if let Some(message) = messages
-        .iter_mut()
-        .rev()
-        .find(|message| message.role == ConversationRole::Assistant)
+        .last_mut()
+        .filter(|message| message.role == ConversationRole::Assistant)
     {
         message.text.push_str(delta);
     } else {
@@ -922,6 +986,22 @@ fn append_assistant_delta(messages: &mut Vec<ConversationMessage>, delta: &str) 
             text: delta.to_owned(),
         });
     }
+}
+
+fn conversation_markdown_style(cx: &App) -> TextViewStyle {
+    let theme = gpui_component::Theme::global(cx);
+    let mut style = TextViewStyle::default().paragraph_gap(gpui::rems(0.75));
+    style.highlight_theme = theme.highlight_theme.clone();
+    style.is_dark = theme.is_dark();
+    style
+}
+
+fn scroll_handle_is_at_bottom(scroll_handle: &ScrollHandle) -> bool {
+    is_near_bottom(scroll_handle.offset().y, scroll_handle.max_offset().height)
+}
+
+fn is_near_bottom(offset_y: Pixels, max_offset: Pixels) -> bool {
+    max_offset + offset_y <= px(BOTTOM_FOLLOW_THRESHOLD)
 }
 
 fn main() {
@@ -1052,6 +1132,35 @@ mod tests {
                 text: "Hello".to_owned(),
             }]
         );
+    }
+
+    #[test]
+    fn assistant_delta_does_not_merge_across_a_user_message() {
+        let mut messages = vec![
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                text: "First response.".to_owned(),
+            },
+            ConversationMessage {
+                role: ConversationRole::User,
+                text: "Continue.".to_owned(),
+            },
+        ];
+
+        append_assistant_delta(&mut messages, "Second response.");
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].text, "First response.");
+        assert_eq!(messages[2].role, ConversationRole::Assistant);
+        assert_eq!(messages[2].text, "Second response.");
+    }
+
+    #[test]
+    fn bottom_following_stops_after_scrolling_away() {
+        assert!(is_near_bottom(px(-200.), px(200.)));
+        assert!(is_near_bottom(px(-175.), px(200.)));
+        assert!(!is_near_bottom(px(-150.), px(200.)));
+        assert!(is_near_bottom(px(0.), px(0.)));
     }
 
     #[test]
