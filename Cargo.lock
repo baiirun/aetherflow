@@ -24,8 +24,10 @@ dependencies = [
 name = "aetherflow-desktop"
 version = "0.1.0"
 dependencies = [
+ "aetherflow-pi",
  "aetherflow-storage",
  "gpui",
+ "tokio",
 ]
 
 [[package]]

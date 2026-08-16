@@ -6,5 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+aetherflow-pi = { path = "../aetherflow-pi" }
 aetherflow-storage = { path = "../aetherflow-storage" }
 gpui.workspace = true
+tokio.workspace = true
