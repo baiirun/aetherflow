@@ -6,9 +6,10 @@ use aetherflow_pi::{
 };
 use aetherflow_storage::SessionId;
 use gpui::{
-    Animation, AnimationExt as _, App, Application, Bounds, Context, Div, Entity, Pixels,
-    ScrollHandle, SharedString, Subscription, TitlebarOptions, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowOptions, div, ease_out_quint, point, prelude::*, px, rgb, rgba, size,
+    Animation, AnimationExt as _, App, Application, Bounds, Context, Div, Entity, KeyBinding,
+    Pixels, ScrollHandle, SharedString, Subscription, TitlebarOptions, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowOptions, div, ease_out_quint, point,
+    prelude::*, px, rgb, rgba, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::text::{TextView, TextViewStyle};
@@ -28,6 +29,8 @@ const SIDEBAR_WIDTH: f32 = 280.;
 const BOTTOM_FOLLOW_THRESHOLD: f32 = 32.;
 const CONTENT_SHIFT_TIME_CONSTANT: Duration = Duration::from_millis(55);
 const CONTENT_SHIFT_SETTLE_DISTANCE: f32 = 0.5;
+
+gpui::actions!(aetherflow, [NewSession]);
 
 #[derive(Default)]
 struct BottomFollowAnimation {
@@ -53,8 +56,11 @@ enum PromptUpdate {
         session_id: SessionId,
         event: Box<PiEvent>,
     },
-    Finished,
-    Failed(String),
+    Finished(SessionId),
+    Failed {
+        session_id: Option<SessionId>,
+        error: String,
+    },
 }
 
 struct DesktopShell {
@@ -73,9 +79,9 @@ struct DesktopShell {
     conversation_errors: HashMap<SessionId, String>,
     new_session_messages: Vec<ConversationItem>,
     composer: Entity<InputState>,
-    is_sending: bool,
-    active_turn_session_id: Option<SessionId>,
-    is_cancelling: bool,
+    active_turn_session_ids: HashSet<SessionId>,
+    is_creating_session: bool,
+    cancelling_turn_session_ids: HashSet<SessionId>,
     load_state: SessionLoadState,
     action_error: Option<String>,
     _subscriptions: Vec<Subscription>,
@@ -109,9 +115,9 @@ impl DesktopShell {
             conversation_errors: HashMap::new(),
             new_session_messages: Vec::new(),
             composer,
-            is_sending: false,
-            active_turn_session_id: None,
-            is_cancelling: false,
+            active_turn_session_ids: HashSet::new(),
+            is_creating_session: false,
+            cancelling_turn_session_ids: HashSet::new(),
             load_state: SessionLoadState::Loading,
             action_error: None,
             _subscriptions: vec![input_subscription],
@@ -170,6 +176,30 @@ impl DesktopShell {
         self.selected_session_id = Some(session_id);
         self.action_error = None;
         self.load_conversation(session_id, cx);
+    }
+
+    fn start_new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.creating_new_session && self.is_creating_session {
+            return;
+        }
+        self.creating_new_session = true;
+        self.selected_session_id = None;
+        self.new_session_messages.clear();
+        self.action_error = None;
+        self.composer.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn composer_is_sending(&self) -> bool {
+        composer_is_sending(
+            self.creating_new_session,
+            self.is_creating_session,
+            self.selected_session_id,
+            &self.active_turn_session_ids,
+        )
     }
 
     fn load_conversation(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
@@ -326,7 +356,7 @@ impl DesktopShell {
     }
 
     fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_sending
+        if self.composer_is_sending()
             || self
                 .selected_session_id
                 .is_some_and(|session_id| self.loading_conversations.contains(&session_id))
@@ -370,9 +400,12 @@ impl DesktopShell {
 
         self.composer
             .update(cx, |input, cx| input.set_value("", window, cx));
-        self.is_sending = true;
-        self.active_turn_session_id = session_id;
-        self.is_cancelling = false;
+        if let Some(session_id) = session_id {
+            self.active_turn_session_ids.insert(session_id);
+            self.cancelling_turn_session_ids.remove(&session_id);
+        } else {
+            self.is_creating_session = true;
+        }
         self.action_error = None;
 
         let client = self.client.clone();
@@ -386,9 +419,10 @@ impl DesktopShell {
                         session_id
                     }
                     Err(error) => {
-                        let _ = updates.send(PromptUpdate::Failed(format!(
-                            "Could not create session: {error:#}"
-                        )));
+                        let _ = updates.send(PromptUpdate::Failed {
+                            session_id: None,
+                            error: format!("Could not create session: {error:#}"),
+                        });
                         return;
                     }
                 },
@@ -397,9 +431,10 @@ impl DesktopShell {
             let mut stream = match client.prompt_session(session_id, prompt).await {
                 Ok(stream) => stream,
                 Err(error) => {
-                    let _ = updates.send(PromptUpdate::Failed(format!(
-                        "Could not prompt session: {error:#}"
-                    )));
+                    let _ = updates.send(PromptUpdate::Failed {
+                        session_id: Some(session_id),
+                        error: format!("Could not prompt session: {error:#}"),
+                    });
                     return;
                 }
             };
@@ -408,7 +443,10 @@ impl DesktopShell {
                 match stream.next().await {
                     Ok(Some(event)) => {
                         if let Some(error) = stopped_error(&event) {
-                            let _ = updates.send(PromptUpdate::Failed(error));
+                            let _ = updates.send(PromptUpdate::Failed {
+                                session_id: Some(session_id),
+                                error,
+                            });
                             return;
                         }
                         if let Some(delta) = assistant_text_delta(&event) {
@@ -428,13 +466,14 @@ impl DesktopShell {
                         }
                     }
                     Ok(None) => {
-                        let _ = updates.send(PromptUpdate::Finished);
+                        let _ = updates.send(PromptUpdate::Finished(session_id));
                         return;
                     }
                     Err(error) => {
-                        let _ = updates.send(PromptUpdate::Failed(format!(
-                            "Session stream failed: {error:#}"
-                        )));
+                        let _ = updates.send(PromptUpdate::Failed {
+                            session_id: Some(session_id),
+                            error: format!("Session stream failed: {error:#}"),
+                        });
                         return;
                     }
                 }
@@ -443,7 +482,10 @@ impl DesktopShell {
 
         cx.spawn(async move |shell, cx| {
             while let Some(update) = update_rx.recv().await {
-                let finished = matches!(update, PromptUpdate::Finished | PromptUpdate::Failed(_));
+                let finished = matches!(
+                    update,
+                    PromptUpdate::Finished(_) | PromptUpdate::Failed { .. }
+                );
                 let _ = shell.update(cx, |shell, cx| {
                     shell.apply_prompt_update(update, cx);
                     cx.notify();
@@ -461,8 +503,9 @@ impl DesktopShell {
         match update {
             PromptUpdate::Created(session_id) => {
                 self.selected_session_id = Some(session_id);
-                self.active_turn_session_id = Some(session_id);
                 self.creating_new_session = false;
+                self.is_creating_session = false;
+                self.active_turn_session_ids.insert(session_id);
                 let messages = std::mem::take(&mut self.new_session_messages);
                 self.conversations.insert(session_id, messages);
                 self.conversation_scrolls
@@ -488,36 +531,36 @@ impl DesktopShell {
                 apply_tool_event(self.conversations.entry(session_id).or_default(), &event);
                 self.follow_conversation_if(session_id, follow);
             }
-            PromptUpdate::Finished => {
-                if let Some(session_id) = self.active_turn_session_id {
-                    self.previous_stream_texts.remove(&session_id);
-                }
-                self.is_sending = false;
-                self.active_turn_session_id = None;
-                self.is_cancelling = false;
+            PromptUpdate::Finished(session_id) => {
+                self.previous_stream_texts.remove(&session_id);
+                self.active_turn_session_ids.remove(&session_id);
+                self.cancelling_turn_session_ids.remove(&session_id);
                 self.load_sessions(cx);
             }
-            PromptUpdate::Failed(error) => {
-                if let Some(session_id) = self.active_turn_session_id {
+            PromptUpdate::Failed { session_id, error } => {
+                if let Some(session_id) = session_id {
                     self.previous_stream_texts.remove(&session_id);
+                    self.active_turn_session_ids.remove(&session_id);
+                    self.cancelling_turn_session_ids.remove(&session_id);
+                } else {
+                    self.is_creating_session = false;
                 }
-                self.is_sending = false;
-                self.active_turn_session_id = None;
-                self.is_cancelling = false;
                 self.action_error = Some(error);
             }
         }
     }
 
     fn cancel_turn(&mut self, cx: &mut Context<Self>) {
-        let Some(session_id) = self.active_turn_session_id else {
+        let Some(session_id) = self
+            .selected_session_id
+            .filter(|session_id| self.active_turn_session_ids.contains(session_id))
+        else {
             return;
         };
-        if self.is_cancelling {
+        if !self.cancelling_turn_session_ids.insert(session_id) {
             return;
         }
 
-        self.is_cancelling = true;
         self.action_error = None;
         let client = self.client.clone();
         let request = self.runtime.spawn(async move {
@@ -534,7 +577,7 @@ impl DesktopShell {
                 .and_then(|result| result);
             let _ = shell.update(cx, |shell, cx| {
                 if let Err(error) = result {
-                    shell.is_cancelling = false;
+                    shell.cancelling_turn_session_ids.remove(&session_id);
                     shell.action_error = Some(error);
                 }
                 cx.notify();
@@ -890,7 +933,7 @@ impl DesktopShell {
         }
 
         let messages = messages.expect("non-empty conversations were checked above");
-        let session_has_active_turn = self.active_turn_session_id == Some(session_id);
+        let session_has_active_turn = self.active_turn_session_ids.contains(&session_id);
         let mut transcript = div()
             .relative()
             .top(content_offset_y)
@@ -907,7 +950,6 @@ impl DesktopShell {
                         item,
                         index,
                         messages.len(),
-                        self.is_sending,
                         session_has_active_turn,
                     ) {
                         continue;
@@ -1208,12 +1250,16 @@ impl DesktopShell {
     }
 
     fn render_composer(&self, cx: &mut Context<Self>) -> Div {
-        let disabled = self.is_sending
+        let is_sending = self.composer_is_sending();
+        let disabled = is_sending
             || self
                 .selected_session_id
                 .is_some_and(|session_id| self.loading_conversations.contains(&session_id));
-        let action = if self.is_sending {
-            let cancel_enabled = self.active_turn_session_id.is_some() && !self.is_cancelling;
+        let action = if is_sending {
+            let cancel_enabled = self.selected_session_id.is_some_and(|session_id| {
+                self.active_turn_session_ids.contains(&session_id)
+                    && !self.cancelling_turn_session_ids.contains(&session_id)
+            });
             div()
                 .id("stop-turn")
                 .size(px(34.))
@@ -1307,6 +1353,9 @@ impl DesktopShell {
 impl Render for DesktopShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .on_action(cx.listener(|shell, _: &NewSession, window, cx| {
+                shell.start_new_session(window, cx);
+            }))
             .size_full()
             .flex()
             .bg(rgba(0x00000000))
@@ -1383,11 +1432,23 @@ fn assistant_text_delta(event: &SessionEvent) -> Option<&str> {
     Some(delta)
 }
 
+fn composer_is_sending(
+    creating_new_session: bool,
+    is_creating_session: bool,
+    selected_session_id: Option<SessionId>,
+    active_turn_session_ids: &HashSet<SessionId>,
+) -> bool {
+    if creating_new_session {
+        is_creating_session
+    } else {
+        selected_session_id.is_some_and(|session_id| active_turn_session_ids.contains(&session_id))
+    }
+}
+
 fn should_render_conversation_item(
     item: &ConversationItem,
     index: usize,
     item_count: usize,
-    is_sending: bool,
     session_has_active_turn: bool,
 ) -> bool {
     let is_empty_assistant = matches!(
@@ -1397,8 +1458,7 @@ fn should_render_conversation_item(
             text,
         }) if text.is_empty()
     );
-    !is_empty_assistant
-        || (is_sending && session_has_active_turn && index.checked_add(1) == Some(item_count))
+    !is_empty_assistant || (session_has_active_turn && index.checked_add(1) == Some(item_count))
 }
 
 fn is_tool_event(event: &SessionEvent) -> bool {
@@ -1592,6 +1652,7 @@ fn is_near_bottom(offset_y: Pixels, max_offset: Pixels) -> bool {
 fn main() {
     Application::new().run(|cx: &mut App| {
         gpui_component::init(cx);
+        cx.bind_keys([KeyBinding::new("cmd-n", NewSession, None)]);
         let theme = gpui_component::Theme::global_mut(cx);
         theme.background = gpui::transparent_black();
         theme.font_family = "Inter Variable".into();
@@ -1774,7 +1835,7 @@ mod tests {
             .iter()
             .enumerate()
             .filter(|(index, item)| {
-                should_render_conversation_item(item, *index, messages.len(), true, true)
+                should_render_conversation_item(item, *index, messages.len(), true)
                     && matches!(
                         item,
                         ConversationItem::Message(ConversationMessage {
@@ -1815,6 +1876,28 @@ mod tests {
         assert_eq!(scroll_y, px(-140.));
         assert_eq!(content_offset_y, px(40.));
         assert_eq!(scroll_y + content_offset_y, px(-100.));
+    }
+
+    #[test]
+    fn another_sessions_active_turn_does_not_disable_a_new_session_composer() {
+        let active_session_id = SessionId::new();
+        let inactive_session_id = SessionId::new();
+        let active_turn_session_ids = HashSet::from([active_session_id]);
+        let disabled = composer_is_sending(true, false, None, &active_turn_session_ids);
+
+        assert!(!disabled);
+        assert!(!composer_is_sending(
+            false,
+            false,
+            Some(inactive_session_id),
+            &active_turn_session_ids,
+        ));
+        assert!(composer_is_sending(
+            false,
+            false,
+            Some(active_session_id),
+            &active_turn_session_ids,
+        ));
     }
 
     #[test]
