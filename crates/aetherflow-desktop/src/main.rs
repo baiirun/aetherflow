@@ -1,12 +1,14 @@
+mod transcript;
+
 use aetherflow_pi::{
     AetherflowClient, AetherflowClientOptions, AssistantMessageEvent, CreateSessionOptions,
     MAX_SESSION_EVENT_PAGE_SIZE, PiEvent, SessionDescriptor, SessionEvent, SessionEventPayload,
 };
 use aetherflow_storage::SessionId;
 use gpui::{
-    App, Application, Bounds, Context, Div, Entity, Pixels, ScrollHandle, Subscription,
-    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div,
-    prelude::*, px, rgb, rgba, size,
+    Animation, AnimationExt as _, App, Application, Bounds, Context, Div, Entity, Pixels,
+    ScrollHandle, SharedString, Subscription, TitlebarOptions, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowOptions, div, ease_out_quint, prelude::*, px, rgb, rgba, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::text::{TextView, TextViewStyle};
@@ -14,9 +16,13 @@ use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::runtime::Runtime;
+use transcript::{
+    ConversationItem, ConversationMessage, ConversationRole, ToolCallView, ToolGroup, ToolStatus,
+    append_assistant_delta, apply_tool_event, conversation_from_events,
+};
 
 const SIDEBAR_WIDTH: f32 = 280.;
 const BOTTOM_FOLLOW_THRESHOLD: f32 = 32.;
@@ -27,23 +33,15 @@ enum SessionLoadState {
     Failed(String),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ConversationRole {
-    User,
-    Assistant,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ConversationMessage {
-    role: ConversationRole,
-    text: String,
-}
-
 enum PromptUpdate {
     Created(SessionId),
     TextDelta {
         session_id: SessionId,
         delta: String,
+    },
+    ToolEvent {
+        session_id: SessionId,
+        event: Box<PiEvent>,
     },
     Finished,
     Failed(String),
@@ -55,13 +53,18 @@ struct DesktopShell {
     sessions: Vec<SessionDescriptor>,
     selected_session_id: Option<SessionId>,
     creating_new_session: bool,
-    conversations: HashMap<SessionId, Vec<ConversationMessage>>,
+    conversations: HashMap<SessionId, Vec<ConversationItem>>,
     conversation_scrolls: HashMap<SessionId, ScrollHandle>,
+    previous_stream_texts: HashMap<SessionId, String>,
+    tool_group_expansion: HashMap<String, bool>,
+    expanded_tool_calls: HashSet<String>,
     loading_conversations: HashSet<SessionId>,
     conversation_errors: HashMap<SessionId, String>,
-    new_session_messages: Vec<ConversationMessage>,
+    new_session_messages: Vec<ConversationItem>,
     composer: Entity<InputState>,
     is_sending: bool,
+    active_turn_session_id: Option<SessionId>,
+    is_cancelling: bool,
     load_state: SessionLoadState,
     action_error: Option<String>,
     _subscriptions: Vec<Subscription>,
@@ -87,11 +90,16 @@ impl DesktopShell {
             creating_new_session: false,
             conversations: HashMap::new(),
             conversation_scrolls: HashMap::new(),
+            previous_stream_texts: HashMap::new(),
+            tool_group_expansion: HashMap::new(),
+            expanded_tool_calls: HashSet::new(),
             loading_conversations: HashSet::new(),
             conversation_errors: HashMap::new(),
             new_session_messages: Vec::new(),
             composer,
             is_sending: false,
+            active_turn_session_id: None,
+            is_cancelling: false,
             load_state: SessionLoadState::Loading,
             action_error: None,
             _subscriptions: vec![input_subscription],
@@ -240,15 +248,15 @@ impl DesktopShell {
         } else {
             self.selected_session_id
         };
-        let messages = vec![
-            ConversationMessage {
+        let messages = [
+            ConversationItem::Message(ConversationMessage {
                 role: ConversationRole::User,
                 text: prompt.clone(),
-            },
-            ConversationMessage {
+            }),
+            ConversationItem::Message(ConversationMessage {
                 role: ConversationRole::Assistant,
                 text: String::new(),
-            },
+            }),
         ];
         if let Some(session_id) = session_id {
             let follow = self.conversation_is_at_bottom(session_id);
@@ -266,6 +274,8 @@ impl DesktopShell {
         self.composer
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.is_sending = true;
+        self.active_turn_session_id = session_id;
+        self.is_cancelling = false;
         self.action_error = None;
 
         let client = self.client.clone();
@@ -310,6 +320,15 @@ impl DesktopShell {
                                 delta: delta.to_owned(),
                             });
                         }
+                        if is_tool_event(&event) {
+                            let SessionEventPayload::Pi { message } = event.payload else {
+                                unreachable!("tool events are Pi events")
+                            };
+                            let _ = updates.send(PromptUpdate::ToolEvent {
+                                session_id,
+                                event: Box::new(message.event().clone()),
+                            });
+                        }
                     }
                     Ok(None) => {
                         let _ = updates.send(PromptUpdate::Finished);
@@ -345,6 +364,7 @@ impl DesktopShell {
         match update {
             PromptUpdate::Created(session_id) => {
                 self.selected_session_id = Some(session_id);
+                self.active_turn_session_id = Some(session_id);
                 self.creating_new_session = false;
                 let messages = std::mem::take(&mut self.new_session_messages);
                 self.conversations.insert(session_id, messages);
@@ -356,18 +376,75 @@ impl DesktopShell {
             }
             PromptUpdate::TextDelta { session_id, delta } => {
                 let follow = self.conversation_is_at_bottom(session_id);
-                append_assistant_delta(self.conversations.entry(session_id).or_default(), &delta);
+                let conversation = self.conversations.entry(session_id).or_default();
+                if let Some(previous) = trailing_assistant_text(conversation) {
+                    self.previous_stream_texts
+                        .insert(session_id, previous.to_owned());
+                } else {
+                    self.previous_stream_texts.remove(&session_id);
+                }
+                append_assistant_delta(conversation, &delta);
+                self.follow_conversation_if(session_id, follow);
+            }
+            PromptUpdate::ToolEvent { session_id, event } => {
+                let follow = self.conversation_is_at_bottom(session_id);
+                apply_tool_event(self.conversations.entry(session_id).or_default(), &event);
                 self.follow_conversation_if(session_id, follow);
             }
             PromptUpdate::Finished => {
+                if let Some(session_id) = self.active_turn_session_id {
+                    self.previous_stream_texts.remove(&session_id);
+                }
                 self.is_sending = false;
+                self.active_turn_session_id = None;
+                self.is_cancelling = false;
                 self.load_sessions(cx);
             }
             PromptUpdate::Failed(error) => {
+                if let Some(session_id) = self.active_turn_session_id {
+                    self.previous_stream_texts.remove(&session_id);
+                }
                 self.is_sending = false;
+                self.active_turn_session_id = None;
+                self.is_cancelling = false;
                 self.action_error = Some(error);
             }
         }
+    }
+
+    fn cancel_turn(&mut self, cx: &mut Context<Self>) {
+        let Some(session_id) = self.active_turn_session_id else {
+            return;
+        };
+        if self.is_cancelling {
+            return;
+        }
+
+        self.is_cancelling = true;
+        self.action_error = None;
+        let client = self.client.clone();
+        let request = self.runtime.spawn(async move {
+            client
+                .cancel_turn(session_id)
+                .await
+                .map_err(|error| format!("Could not cancel turn: {error:#}"))
+        });
+
+        cx.spawn(async move |shell, cx| {
+            let result = request
+                .await
+                .map_err(|error| format!("cancel request task failed: {error}"))
+                .and_then(|result| result);
+            let _ = shell.update(cx, |shell, cx| {
+                if let Err(error) = result {
+                    shell.is_cancelling = false;
+                    shell.action_error = Some(error);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn set_session_archived(
@@ -713,63 +790,82 @@ impl DesktopShell {
                 .child("Send a message to continue this session.");
         }
 
-        for (index, message) in messages.into_iter().flatten().enumerate() {
-            let is_empty_assistant =
-                message.role == ConversationRole::Assistant && message.text.is_empty();
-            if is_empty_assistant && !self.is_sending {
-                continue;
-            }
+        let messages = messages.expect("non-empty conversations were checked above");
+        let session_has_active_turn = self.active_turn_session_id == Some(session_id);
+        for (index, item) in messages.iter().enumerate() {
+            conversation = match item {
+                ConversationItem::Message(message) => {
+                    let is_empty_assistant =
+                        message.role == ConversationRole::Assistant && message.text.is_empty();
+                    if !should_render_conversation_item(
+                        item,
+                        index,
+                        messages.len(),
+                        self.is_sending,
+                        session_has_active_turn,
+                    ) {
+                        continue;
+                    }
 
-            conversation = match message.role {
-                ConversationRole::User => conversation.child(
-                    div()
-                        .id(("user-message", index))
-                        .w_full()
-                        .flex()
-                        .justify_end()
-                        .child(
+                    match message.role {
+                        ConversationRole::User => conversation.child(
                             div()
-                                .max_w(px(640.))
-                                .px_4()
-                                .py_3()
-                                .rounded_xl()
-                                .bg(rgb(0x25282d))
+                                .id(("user-message", index))
+                                .w_full()
+                                .flex()
+                                .justify_end()
                                 .child(
-                                    TextView::markdown(
-                                        ("user-markdown", index),
-                                        message.text.clone(),
-                                        window,
-                                        cx,
-                                    )
-                                    .style(conversation_markdown_style(cx))
-                                    .selectable(true)
-                                    .w_full(),
+                                    div()
+                                        .max_w(px(640.))
+                                        .px_4()
+                                        .py_3()
+                                        .rounded_xl()
+                                        .bg(rgb(0x25282d))
+                                        .child(
+                                            TextView::markdown(
+                                                ("user-markdown", index),
+                                                message.text.clone(),
+                                                window,
+                                                cx,
+                                            )
+                                            .style(conversation_markdown_style(cx))
+                                            .selectable(true)
+                                            .w_full(),
+                                        ),
                                 ),
                         ),
-                ),
-                ConversationRole::Assistant => {
-                    let content = if is_empty_assistant {
-                        div().child("Working…").into_any_element()
-                    } else {
-                        TextView::markdown(
-                            ("assistant-markdown", index),
-                            message.text.clone(),
-                            window,
-                            cx,
-                        )
-                        .style(conversation_markdown_style(cx))
-                        .selectable(true)
-                        .w_full()
-                        .into_any_element()
-                    };
-                    conversation.child(
-                        div()
-                            .id(("assistant-message", index))
-                            .w_full()
-                            .max_w(px(720.))
-                            .text_color(rgb(0xd6d7d9))
-                            .child(content),
-                    )
+                        ConversationRole::Assistant => {
+                            let content = if is_empty_assistant {
+                                div().child("Working…").into_any_element()
+                            } else {
+                                let is_live_tail = session_has_active_turn
+                                    && index == messages.len().saturating_sub(1);
+                                render_assistant_markdown(
+                                    session_id,
+                                    index,
+                                    message,
+                                    is_live_tail,
+                                    self.previous_stream_texts
+                                        .get(&session_id)
+                                        .filter(|_| is_live_tail)
+                                        .map(String::as_str),
+                                    window,
+                                    cx,
+                                )
+                            };
+                            conversation.child(
+                                div()
+                                    .id(("assistant-message", index))
+                                    .w_full()
+                                    .max_w(px(720.))
+                                    .text_color(rgb(0xd6d7d9))
+                                    .child(content),
+                            )
+                        }
+                    }
+                }
+                ConversationItem::ToolGroup(group) => {
+                    conversation.child(self.render_tool_group(group, window, cx))
                 }
             };
         }
@@ -777,11 +873,287 @@ impl DesktopShell {
         conversation
     }
 
+    fn render_tool_group(
+        &self,
+        group: &ToolGroup,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let group_key = group.key().to_owned();
+        let open = self
+            .tool_group_expansion
+            .get(&group_key)
+            .copied()
+            .unwrap_or_else(|| group.should_open_by_default());
+        let icon = if group
+            .calls
+            .iter()
+            .any(|call| call.status == ToolStatus::Running)
+        {
+            "◌"
+        } else if group
+            .calls
+            .iter()
+            .any(|call| call.status == ToolStatus::Failed)
+        {
+            "!"
+        } else {
+            "✓"
+        };
+        let toggle_group_key = group_key.clone();
+        let mut container = div().w_full().max_w(px(720.)).text_sm().child(
+            div()
+                .id(SharedString::from(format!("tool-group-{group_key}")))
+                .h(px(30.))
+                .flex()
+                .items_center()
+                .gap_2()
+                .cursor_pointer()
+                .text_color(rgb(0x85898f))
+                .hover(|style| style.text_color(rgb(0xb5b8bd)))
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell
+                        .tool_group_expansion
+                        .insert(toggle_group_key.clone(), !open);
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .size(px(18.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .bg(rgb(0x25282d))
+                        .text_xs()
+                        .child(if open { "▾" } else { "▸" }),
+                )
+                .child(icon)
+                .child(group.summary()),
+        );
+
+        if open {
+            container = container.child(
+                div()
+                    .ml(px(8.))
+                    .pl_4()
+                    .border_l_1()
+                    .border_color(rgb(0x2c3036))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .children(
+                        group
+                            .calls
+                            .iter()
+                            .map(|call| self.render_tool_call(call, window, cx)),
+                    ),
+            );
+        }
+
+        container
+            .relative()
+            .with_animation(
+                SharedString::from(format!("tool-group-reveal-{group_key}")),
+                transcript_reveal_animation(),
+                |group, delta| group.top(px(4.) - delta * px(4.)).opacity(delta),
+            )
+            .into_any_element()
+    }
+
+    fn render_tool_call(
+        &self,
+        call: &ToolCallView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let expanded = self.expanded_tool_calls.contains(&call.id);
+        let call_id = call.id.clone();
+        let status_color = match call.status {
+            ToolStatus::Running => rgb(0x8f96d9),
+            ToolStatus::Succeeded => rgb(0x7f858b),
+            ToolStatus::Failed => rgb(0xe28b8b),
+        };
+        let status_icon = match call.status {
+            ToolStatus::Running => "◌",
+            ToolStatus::Succeeded => "✓",
+            ToolStatus::Failed => "!",
+        };
+        let mut tool = div().w_full().child(
+            div()
+                .id(SharedString::from(format!("tool-call-{}", call.id)))
+                .min_h(px(30.))
+                .py_1()
+                .flex()
+                .items_center()
+                .gap_2()
+                .cursor_pointer()
+                .text_color(rgb(0xaeb1b5))
+                .hover(|style| style.text_color(rgb(0xd6d7d9)))
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    if !shell.expanded_tool_calls.remove(&call_id) {
+                        shell.expanded_tool_calls.insert(call_id.clone());
+                    }
+                    cx.notify();
+                }))
+                .child(div().text_color(status_color).child(status_icon))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(truncate(&call.label(), 110)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(rgb(0x696d73))
+                        .child(if expanded { "Hide" } else { "Details" }),
+                ),
+        );
+
+        if expanded {
+            tool = tool.child(self.render_tool_details(call, window, cx));
+        }
+        tool.relative()
+            .with_animation(
+                SharedString::from(format!("tool-call-reveal-{}", call.id)),
+                transcript_reveal_animation(),
+                |tool, delta| tool.top(px(2.) - delta * px(2.)).opacity(delta),
+            )
+            .into_any_element()
+    }
+
+    fn render_tool_details(
+        &self,
+        call: &ToolCallView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let mut details = div()
+            .ml_6()
+            .mb_2()
+            .p_3()
+            .rounded_lg()
+            .bg(rgb(0x171a1f))
+            .border_1()
+            .border_color(rgb(0x292d33))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(tool_detail_block("Invocation", call.invocation_text()));
+
+        let subagents = call.subagent_runs();
+        if !subagents.is_empty() {
+            for (index, run) in subagents.into_iter().enumerate() {
+                let icon = match run.status {
+                    ToolStatus::Running => "◌",
+                    ToolStatus::Succeeded => "✓",
+                    ToolStatus::Failed => "!",
+                };
+                details = details.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_color(rgb(0xbec1c6))
+                                .child(icon)
+                                .child(run.agent),
+                        )
+                        .when(!run.task.is_empty(), |item| {
+                            item.child(div().text_xs().text_color(rgb(0x85898f)).child(run.task))
+                        })
+                        .when_some(run.output, |item, output| {
+                            item.child(
+                                TextView::markdown(
+                                    SharedString::from(format!(
+                                        "subagent-output-{}-{index}",
+                                        call.id
+                                    )),
+                                    output,
+                                    window,
+                                    cx,
+                                )
+                                .style(conversation_markdown_style(cx))
+                                .selectable(true)
+                                .w_full(),
+                            )
+                        }),
+                );
+            }
+        } else if let Some(output) = call.output_text() {
+            details = details.child(tool_detail_block("Output", output));
+        }
+
+        details
+            .relative()
+            .with_animation(
+                SharedString::from(format!("tool-details-reveal-{}", call.id)),
+                transcript_reveal_animation(),
+                |details, delta| details.top(px(3.) - delta * px(3.)).opacity(delta),
+            )
+            .into_any_element()
+    }
+
     fn render_composer(&self, cx: &mut Context<Self>) -> Div {
         let disabled = self.is_sending
             || self
                 .selected_session_id
                 .is_some_and(|session_id| self.loading_conversations.contains(&session_id));
+        let action = if self.is_sending {
+            let cancel_enabled = self.active_turn_session_id.is_some() && !self.is_cancelling;
+            div()
+                .id("stop-turn")
+                .size(px(34.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_lg()
+                .text_xs()
+                .when(cancel_enabled, |style| {
+                    style
+                        .bg(rgb(0xe7eaf0))
+                        .text_color(rgb(0x17191d))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(0xffffff)))
+                })
+                .when(!cancel_enabled, |style| {
+                    style.bg(rgb(0x303238)).text_color(rgb(0x777a80))
+                })
+                .child("■")
+                .on_click(cx.listener(|shell, _, _, cx| {
+                    shell.cancel_turn(cx);
+                }))
+        } else {
+            div()
+                .id("send-prompt")
+                .size(px(34.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_lg()
+                .text_base()
+                .when(disabled, |style| {
+                    style.bg(rgb(0x303238)).text_color(rgb(0x777a80))
+                })
+                .when(!disabled, |style| {
+                    style
+                        .bg(rgb(0xe7eaf0))
+                        .text_color(rgb(0x17191d))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(0xffffff)))
+                })
+                .child("↑")
+                .on_click(cx.listener(|shell, _, window, cx| {
+                    shell.submit_prompt(window, cx);
+                }))
+        };
         div()
             .w_full()
             .px_8()
@@ -809,30 +1181,7 @@ impl DesktopShell {
                             .disabled(disabled)
                             .flex_1(),
                     )
-                    .child(
-                        div()
-                            .id("send-prompt")
-                            .size(px(34.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_lg()
-                            .text_base()
-                            .when(disabled, |style| {
-                                style.bg(rgb(0x303238)).text_color(rgb(0x777a80))
-                            })
-                            .when(!disabled, |style| {
-                                style
-                                    .bg(rgb(0xe7eaf0))
-                                    .text_color(rgb(0x17191d))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(0xffffff)))
-                            })
-                            .child("↑")
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.submit_prompt(window, cx);
-                            })),
-                    ),
+                    .child(action),
             )
             .when_some(self.action_error.clone(), |composer, error| {
                 composer.child(
@@ -928,39 +1277,34 @@ fn assistant_text_delta(event: &SessionEvent) -> Option<&str> {
     Some(delta)
 }
 
-fn conversation_from_events(events: &[SessionEvent]) -> Vec<ConversationMessage> {
-    events
-        .iter()
-        .filter_map(completed_conversation_message)
-        .collect()
+fn should_render_conversation_item(
+    item: &ConversationItem,
+    index: usize,
+    item_count: usize,
+    is_sending: bool,
+    session_has_active_turn: bool,
+) -> bool {
+    let is_empty_assistant = matches!(
+        item,
+        ConversationItem::Message(ConversationMessage {
+            role: ConversationRole::Assistant,
+            text,
+        }) if text.is_empty()
+    );
+    !is_empty_assistant
+        || (is_sending && session_has_active_turn && index.checked_add(1) == Some(item_count))
 }
 
-fn completed_conversation_message(event: &SessionEvent) -> Option<ConversationMessage> {
+fn is_tool_event(event: &SessionEvent) -> bool {
     let SessionEventPayload::Pi { message } = &event.payload else {
-        return None;
+        return false;
     };
-    let PiEvent::MessageEnd(completed) = message.event() else {
-        return None;
-    };
-
-    let role = match completed.message.get("role")?.as_str()? {
-        "user" => ConversationRole::User,
-        "assistant" => ConversationRole::Assistant,
-        _ => return None,
-    };
-    let text = completed
-        .message
-        .get("content")?
-        .as_array()?
-        .iter()
-        .filter(|content| content.get("type").and_then(|kind| kind.as_str()) == Some("text"))
-        .filter_map(|content| content.get("text").and_then(|text| text.as_str()))
-        .collect::<String>();
-    if text.is_empty() {
-        return None;
-    }
-
-    Some(ConversationMessage { role, text })
+    matches!(
+        message.event(),
+        PiEvent::ToolExecutionStart(_)
+            | PiEvent::ToolExecutionUpdate(_)
+            | PiEvent::ToolExecutionEnd(_)
+    )
 }
 
 fn stopped_error(event: &SessionEvent) -> Option<String> {
@@ -974,17 +1318,38 @@ fn stopped_error(event: &SessionEvent) -> Option<String> {
     )
 }
 
-fn append_assistant_delta(messages: &mut Vec<ConversationMessage>, delta: &str) {
-    if let Some(message) = messages
-        .last_mut()
-        .filter(|message| message.role == ConversationRole::Assistant)
-    {
-        message.text.push_str(delta);
+fn tool_detail_block(label: &'static str, text: String) -> Div {
+    let text = truncate_lines(&text, 24);
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(div().text_xs().text_color(rgb(0x696d73)).child(label))
+        .child(
+            div()
+                .w_full()
+                .p_2()
+                .rounded_md()
+                .bg(rgb(0x111419))
+                .font_family("SF Mono")
+                .text_xs()
+                .text_color(rgb(0xaeb1b5))
+                .child(text),
+        )
+}
+
+fn truncate_lines(value: &str, max_lines: usize) -> String {
+    let mut lines = value.lines();
+    let visible = lines
+        .by_ref()
+        .take(max_lines)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let hidden = lines.count();
+    if hidden == 0 {
+        visible
     } else {
-        messages.push(ConversationMessage {
-            role: ConversationRole::Assistant,
-            text: delta.to_owned(),
-        });
+        format!("{visible}\n… {hidden} more lines")
     }
 }
 
@@ -994,6 +1359,98 @@ fn conversation_markdown_style(cx: &App) -> TextViewStyle {
     style.highlight_theme = theme.highlight_theme.clone();
     style.is_dark = theme.is_dark();
     style
+}
+
+fn transcript_reveal_animation() -> Animation {
+    Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint())
+}
+
+fn stream_delta_animation() -> Animation {
+    Animation::new(Duration::from_millis(120)).with_easing(ease_out_quint())
+}
+
+fn render_assistant_markdown(
+    session_id: SessionId,
+    index: usize,
+    message: &ConversationMessage,
+    is_live_tail: bool,
+    previous_text: Option<&str>,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui::AnyElement {
+    let current = TextView::markdown(
+        assistant_markdown_id(session_id, index, message.text.len(), is_live_tail),
+        message.text.clone(),
+        window,
+        cx,
+    )
+    .style(conversation_markdown_style(cx))
+    .selectable(true)
+    .w_full();
+
+    if !is_live_tail {
+        return current.into_any_element();
+    }
+
+    let Some(previous_text) = previous_text.filter(|text| !text.is_empty()) else {
+        return current
+            .relative()
+            .with_animation(
+                SharedString::from(format!("assistant-reveal-{session_id}-{index}")),
+                transcript_reveal_animation(),
+                |text, delta| text.top(px(3.) - delta * px(3.)).opacity(delta),
+            )
+            .into_any_element();
+    };
+
+    let update_key = format!("{session_id}-{index}-{}", message.text.len());
+    let previous = TextView::markdown(
+        SharedString::from(format!(
+            "assistant-markdown-{session_id}-{index}-previous-{}",
+            previous_text.len()
+        )),
+        previous_text.to_owned(),
+        window,
+        cx,
+    )
+    .style(conversation_markdown_style(cx))
+    .w_full()
+    .absolute()
+    .top_0()
+    .left_0();
+    let current = current.relative().with_animation(
+        SharedString::from(format!("assistant-stream-new-{update_key}")),
+        stream_delta_animation(),
+        |text, delta| text.opacity(delta),
+    );
+
+    div()
+        .relative()
+        .w_full()
+        .child(previous)
+        .child(current)
+        .into_any_element()
+}
+
+fn assistant_markdown_id(
+    session_id: SessionId,
+    index: usize,
+    text_bytes: usize,
+    is_live_tail: bool,
+) -> SharedString {
+    if is_live_tail {
+        format!("assistant-markdown-{session_id}-{index}-live-{text_bytes}").into()
+    } else {
+        format!("assistant-markdown-{session_id}-{index}").into()
+    }
+}
+
+fn trailing_assistant_text(conversation: &[ConversationItem]) -> Option<&str> {
+    let ConversationItem::Message(message) = conversation.last()? else {
+        return None;
+    };
+    (message.role == ConversationRole::Assistant && !message.text.is_empty())
+        .then_some(message.text.as_str())
 }
 
 fn scroll_handle_is_at_bottom(scroll_handle: &ScrollHandle) -> bool {
@@ -1109,14 +1566,17 @@ mod tests {
 
     #[test]
     fn assistant_deltas_append_to_the_current_response() {
-        let mut messages = vec![ConversationMessage {
+        let mut messages = vec![ConversationItem::Message(ConversationMessage {
             role: ConversationRole::Assistant,
             text: "Hello".to_owned(),
-        }];
+        })];
 
         append_assistant_delta(&mut messages, ", world");
 
-        assert_eq!(messages[0].text, "Hello, world");
+        let ConversationItem::Message(message) = &messages[0] else {
+            panic!("message expected")
+        };
+        assert_eq!(message.text, "Hello, world");
     }
 
     #[test]
@@ -1127,32 +1587,77 @@ mod tests {
 
         assert_eq!(
             messages,
-            vec![ConversationMessage {
+            vec![ConversationItem::Message(ConversationMessage {
                 role: ConversationRole::Assistant,
                 text: "Hello".to_owned(),
-            }]
+            })]
         );
     }
 
     #[test]
     fn assistant_delta_does_not_merge_across_a_user_message() {
         let mut messages = vec![
-            ConversationMessage {
+            ConversationItem::Message(ConversationMessage {
                 role: ConversationRole::Assistant,
                 text: "First response.".to_owned(),
-            },
-            ConversationMessage {
+            }),
+            ConversationItem::Message(ConversationMessage {
                 role: ConversationRole::User,
                 text: "Continue.".to_owned(),
-            },
+            }),
         ];
 
         append_assistant_delta(&mut messages, "Second response.");
 
         assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].text, "First response.");
-        assert_eq!(messages[2].role, ConversationRole::Assistant);
-        assert_eq!(messages[2].text, "Second response.");
+        let ConversationItem::Message(first) = &messages[0] else {
+            panic!("message expected")
+        };
+        let ConversationItem::Message(last) = &messages[2] else {
+            panic!("message expected")
+        };
+        assert_eq!(first.text, "First response.");
+        assert_eq!(last.role, ConversationRole::Assistant);
+        assert_eq!(last.text, "Second response.");
+    }
+
+    #[test]
+    fn only_the_active_turn_shows_a_working_placeholder_after_cancellation() {
+        let messages = [
+            ConversationItem::Message(ConversationMessage {
+                role: ConversationRole::User,
+                text: "First turn".to_owned(),
+            }),
+            ConversationItem::Message(ConversationMessage {
+                role: ConversationRole::Assistant,
+                text: String::new(),
+            }),
+            ConversationItem::Message(ConversationMessage {
+                role: ConversationRole::User,
+                text: "Try again".to_owned(),
+            }),
+            ConversationItem::Message(ConversationMessage {
+                role: ConversationRole::Assistant,
+                text: String::new(),
+            }),
+        ];
+
+        let visible_working_placeholders = messages
+            .iter()
+            .enumerate()
+            .filter(|(index, item)| {
+                should_render_conversation_item(item, *index, messages.len(), true, true)
+                    && matches!(
+                        item,
+                        ConversationItem::Message(ConversationMessage {
+                            role: ConversationRole::Assistant,
+                            text,
+                        }) if text.is_empty()
+                    )
+            })
+            .count();
+
+        assert_eq!(visible_working_placeholders, 1);
     }
 
     #[test]
@@ -1197,15 +1702,29 @@ mod tests {
         assert_eq!(
             conversation_from_events(&events),
             vec![
-                ConversationMessage {
+                ConversationItem::Message(ConversationMessage {
                     role: ConversationRole::User,
                     text: "Where are we?".to_owned(),
-                },
-                ConversationMessage {
+                }),
+                ConversationItem::Message(ConversationMessage {
                     role: ConversationRole::Assistant,
                     text: "In the archive.".to_owned(),
-                },
+                }),
             ]
+        );
+    }
+
+    #[test]
+    fn live_markdown_updates_bypass_the_debounced_view_state() {
+        let session_id = SessionId::new();
+
+        assert_ne!(
+            assistant_markdown_id(session_id, 2, 1, true),
+            assistant_markdown_id(session_id, 2, 80, true),
+        );
+        assert_eq!(
+            assistant_markdown_id(session_id, 2, 1, false),
+            assistant_markdown_id(session_id, 2, 80, false),
         );
     }
 }

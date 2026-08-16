@@ -283,6 +283,15 @@ impl AetherflowClient {
         })
     }
 
+    pub async fn cancel_turn(&self, session_id: SessionId) -> Result<()> {
+        self.session_handle(session_id)
+            .send(SendSessionCommand {
+                command: RpcCommand::abort("abort"),
+            })
+            .await
+            .with_context(|| format!("cancel active turn for session {session_id}"))
+    }
+
     fn session_directory(&self) -> rivetkit::TypedActorHandle<SessionDirectoryActor> {
         self.client
             .get_or_create_typed_default::<SessionDirectoryActor>(

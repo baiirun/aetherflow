@@ -81,6 +81,12 @@ impl RpcCommand {
         }
     }
 
+    pub fn abort(id: impl Into<String>) -> Self {
+        Self::Abort {
+            id: Some(id.into()),
+        }
+    }
+
     pub fn get_state(id: impl Into<String>) -> Self {
         Self::GetState {
             id: Some(id.into()),
@@ -266,6 +272,17 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({"id": "request-1", "type": "prompt", "message": "hello"})
+        );
+    }
+
+    #[test]
+    fn command_matches_pi_abort_shape() {
+        let command = RpcCommand::abort("request-2");
+        let value = serde_json::to_value(command).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({"id": "request-2", "type": "abort"})
         );
     }
 
