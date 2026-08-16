@@ -1,8 +1,8 @@
 use aetherflow_pi::{AetherflowClient, AetherflowClientOptions, SessionDescriptor};
 use aetherflow_storage::SessionId;
 use gpui::{
-    App, Application, Bounds, Context, Div, TitlebarOptions, Window, WindowBounds, WindowOptions,
-    div, prelude::*, px, rgb, size,
+    App, Application, Bounds, Context, Div, TitlebarOptions, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowOptions, div, prelude::*, px, rgb, rgba, size,
 };
 use std::sync::Arc;
 use tokio::runtime::Runtime;
@@ -165,7 +165,7 @@ impl DesktopShell {
             .h_full()
             .flex()
             .flex_col()
-            .bg(rgb(0x1d1f20))
+            .bg(rgba(0x1d1f20d9))
             .child(
                 div()
                     .h(px(88.))
@@ -202,7 +202,7 @@ impl DesktopShell {
             .h_full()
             .flex()
             .flex_col()
-            .bg(rgb(0x101318));
+            .bg(rgba(0x101318d9));
 
         let Some(session) = self.selected_session() else {
             return panel.child(
@@ -256,7 +256,7 @@ impl Render for DesktopShell {
         div()
             .size_full()
             .flex()
-            .bg(rgb(0x101318))
+            .bg(rgba(0x00000000))
             .text_color(rgb(0xe7eaf0))
             .child(self.render_sidebar(cx))
             .child(self.render_main_panel())
@@ -300,6 +300,7 @@ fn main() {
                     appears_transparent: true,
                     ..Default::default()
                 }),
+                window_background: WindowBackgroundAppearance::Transparent,
                 ..Default::default()
             },
             |_, cx| cx.new(DesktopShell::new),
