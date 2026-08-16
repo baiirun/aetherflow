@@ -257,6 +257,7 @@ impl Render for DesktopShell {
             .size_full()
             .flex()
             .bg(rgba(0x00000000))
+            .font_family("Inter Variable")
             .text_color(rgb(0xe7eaf0))
             .child(self.render_sidebar(cx))
             .child(self.render_main_panel())
