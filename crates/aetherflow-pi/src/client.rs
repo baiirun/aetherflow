@@ -2,7 +2,10 @@ use crate::{
     GetSessionState, PiEvent, PiOptions, ReadSessionEvents, RpcCommand, SESSION_ACTOR_NAME,
     SESSION_DIRECTORY_ACTOR_NAME, SendSessionCommand, SessionActor, SessionActorConfig,
     SessionActorState, SessionDescriptor, SessionDirectoryActor, SessionEvent, SessionEventPayload,
-    session_directory::{DEFAULT_SESSION_DIRECTORY_KEY, ListSessions, RegisterSession},
+    session_directory::{
+        DEFAULT_SESSION_DIRECTORY_KEY, ListSessions, RecordSessionActivity, RegisterSession,
+        SetSessionArchived,
+    },
 };
 use aetherflow_storage::{Agent, AgentId, Session, SessionAssociation, SessionId};
 use anyhow::{Context, Result, bail};
@@ -13,13 +16,16 @@ use rivetkit::{
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::mpsc;
+use tokio::time::{Duration, timeout};
 
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:6420";
 pub const DEFAULT_TOKEN: &str = "dev";
 pub const DEFAULT_NAMESPACE: &str = "default";
 pub const DEFAULT_POOL: &str = "rivetkit-rust";
+const SESSION_LIST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
 pub struct AetherflowClientOptions {
@@ -106,6 +112,8 @@ impl AetherflowClient {
         let executable = resolve_executable(pi_executable)?;
         let agent_id = agent_id.unwrap_or_else(|| Agent::new("local").id);
         let session = Session::new(agent_id, association);
+        let updated_at_ms = current_time_ms()?;
+        let title = initial_prompt.as_deref().and_then(session_title);
         let mut pi = PiOptions::persistent(cwd, session_directory, session.id);
         pi.executable = executable;
 
@@ -127,7 +135,7 @@ impl AetherflowClient {
 
         self.session_directory()
             .send(RegisterSession {
-                session: SessionDescriptor::from(&session),
+                session: SessionDescriptor::new(&session, title, updated_at_ms),
             })
             .await
             .context("register session")?;
@@ -145,10 +153,30 @@ impl AetherflowClient {
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<SessionDescriptor>> {
+        timeout(
+            SESSION_LIST_TIMEOUT,
+            self.session_directory().send(ListSessions),
+        )
+        .await
+        .context("session directory did not respond within 10 seconds")?
+        .context("list sessions")
+    }
+
+    pub async fn set_session_archived(
+        &self,
+        session_id: SessionId,
+        archived: bool,
+    ) -> Result<SessionDescriptor> {
         self.session_directory()
-            .send(ListSessions)
+            .send(SetSessionArchived {
+                session_id,
+                archived,
+            })
             .await
-            .context("list sessions")
+            .with_context(|| {
+                let action = if archived { "archive" } else { "unarchive" };
+                format!("{action} session {session_id}")
+            })
     }
 
     pub async fn session_state(&self, session_id: SessionId) -> Result<SessionActorState> {
@@ -221,6 +249,16 @@ impl AetherflowClient {
         session_id: SessionId,
         message: impl Into<String>,
     ) -> Result<SessionEventStream> {
+        let message = message.into();
+        self.session_directory()
+            .send(RecordSessionActivity {
+                session_id,
+                title: session_title(&message),
+                updated_at_ms: current_time_ms()?,
+            })
+            .await
+            .with_context(|| format!("record activity for session {session_id}"))?;
+
         let connection = self.session_handle(session_id).connect();
         let (events, event_rx) = mpsc::unbounded_channel();
         let subscription = connection
@@ -258,6 +296,32 @@ impl AetherflowClient {
         self.client
             .get_typed_default::<SessionActor>(SESSION_ACTOR_NAME, [session_id.to_string()])
             .expect("session actor key is valid")
+    }
+}
+
+fn current_time_ms() -> Result<u64> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?;
+    Ok(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+}
+
+fn session_title(prompt: &str) -> Option<String> {
+    let title = prompt
+        .split_whitespace()
+        .take(7)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if title.is_empty() {
+        return None;
+    }
+
+    let mut characters = title.chars();
+    let shortened = characters.by_ref().take(47).collect::<String>();
+    if characters.next().is_some() {
+        Some(format!("{shortened}…"))
+    } else {
+        Some(shortened)
     }
 }
 
@@ -396,6 +460,19 @@ mod tests {
     use tokio::task::JoinHandle;
     use tokio_util::sync::CancellationToken;
 
+    #[test]
+    fn title_uses_a_short_prefix_of_the_first_prompt() {
+        assert_eq!(
+            session_title("Assess the Rust pi-mono agent loop in detail"),
+            Some("Assess the Rust pi-mono agent loop in".to_owned())
+        );
+        assert_eq!(session_title("  \n  "), None);
+        assert_eq!(
+            session_title("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"),
+            Some("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstu…".to_owned())
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     #[ignore = "requires a local Rivet Engine"]
@@ -429,19 +506,35 @@ mod tests {
 
         wait_for_persisted_prompt(&temp.path().join("sessions"), first, "during creation").await?;
 
-        assert_eq!(
+        let sessions = client.list_sessions().await?;
+        assert_eq!(sessions.len(), 2);
+        let first_descriptor = sessions
+            .iter()
+            .find(|session| session.id == first)
+            .expect("first session should be listed");
+        assert_eq!(first_descriptor.title.as_deref(), Some("during creation"));
+        assert!(!first_descriptor.archived);
+
+        client.set_session_archived(second, true).await?;
+        assert!(
             client
                 .list_sessions()
                 .await?
                 .iter()
-                .map(|session| session.id)
-                .collect::<Vec<_>>(),
-            [first, second]
+                .find(|session| session.id == second)
+                .is_some_and(|session| session.archived)
         );
         runner.crash().await;
 
         let (restarted, client) = TestRunner::start(&pool, &directory_key).await?;
-        assert_eq!(client.list_sessions().await?.len(), 2);
+        let sessions = client.list_sessions().await?;
+        assert_eq!(sessions.len(), 2);
+        assert!(
+            sessions
+                .iter()
+                .find(|session| session.id == second)
+                .is_some_and(|session| session.archived)
+        );
         assert_eq!(client.session_state(first).await?.session.id, first);
         prompt_to_completion(&client, first, "after restart").await?;
 

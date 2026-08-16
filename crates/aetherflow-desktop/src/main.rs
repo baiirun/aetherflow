@@ -4,7 +4,11 @@ use gpui::{
     App, Application, Bounds, Context, Div, TitlebarOptions, Window, WindowBackgroundAppearance,
     WindowBounds, WindowOptions, div, prelude::*, px, rgb, rgba, size,
 };
-use std::sync::Arc;
+use std::{
+    cmp::Reverse,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tokio::runtime::Runtime;
 
 const SIDEBAR_WIDTH: f32 = 280.;
@@ -21,6 +25,7 @@ struct DesktopShell {
     sessions: Vec<SessionDescriptor>,
     selected_session_id: Option<SessionId>,
     load_state: SessionLoadState,
+    action_error: Option<String>,
 }
 
 impl DesktopShell {
@@ -31,6 +36,7 @@ impl DesktopShell {
             sessions: Vec::new(),
             selected_session_id: None,
             load_state: SessionLoadState::Loading,
+            action_error: None,
         };
         shell.load_sessions(cx);
         shell
@@ -66,14 +72,121 @@ impl DesktopShell {
         self.selected_session_id = selection_after_refresh(self.selected_session_id, &sessions);
         self.sessions = sessions;
         self.load_state = SessionLoadState::Loaded;
+        self.action_error = None;
     }
 
-    fn selected_session(&self) -> Option<SessionDescriptor> {
+    fn selected_session(&self) -> Option<&SessionDescriptor> {
         let selected = self.selected_session_id?;
-        self.sessions
-            .iter()
-            .copied()
-            .find(|session| session.id == selected)
+        self.sessions.iter().find(|session| session.id == selected)
+    }
+
+    fn set_session_archived(
+        &mut self,
+        session_id: SessionId,
+        archived: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.action_error = None;
+        let client = self.client.clone();
+        let request = self.runtime.spawn(async move {
+            client
+                .set_session_archived(session_id, archived)
+                .await
+                .map_err(|error| format!("{error:#}"))
+        });
+
+        cx.spawn(async move |shell, cx| {
+            let result = request
+                .await
+                .map_err(|error| format!("session request task failed: {error}"))
+                .and_then(|result| result);
+            let _ = shell.update(cx, |shell, cx| {
+                match result {
+                    Ok(updated) => {
+                        if let Some(session) = shell
+                            .sessions
+                            .iter_mut()
+                            .find(|session| session.id == updated.id)
+                        {
+                            *session = updated;
+                        }
+                        shell
+                            .sessions
+                            .sort_by_key(|session| Reverse(session.updated_at_ms));
+                    }
+                    Err(error) => shell.action_error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn render_session_row(
+        &self,
+        session: SessionDescriptor,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = self.selected_session_id == Some(session.id);
+        let group = format!("session-row-{}", session.id);
+        let title = session_title(&session);
+        let activity = relative_time(session.updated_at_ms, current_time_ms());
+        let archived = session.archived;
+
+        div()
+            .group(group.clone())
+            .id(("session", index))
+            .relative()
+            .mb_1()
+            .px_3()
+            .py_2()
+            .rounded_lg()
+            .cursor_pointer()
+            .when(selected, |style| style.bg(rgb(0x2b2d2f)))
+            .hover(|style| style.bg(rgb(0x252729)))
+            .on_click(cx.listener(move |shell, _, _, cx| {
+                shell.selected_session_id = Some(session.id);
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .pr_12()
+                    .truncate()
+                    .text_sm()
+                    .text_color(rgb(0xd6d7d9))
+                    .child(title),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .right_3()
+                    .top(px(9.))
+                    .text_xs()
+                    .text_color(rgb(0x74777a))
+                    .group_hover(group.clone(), |style| style.opacity(0.))
+                    .child(activity),
+            )
+            .child(
+                div()
+                    .id(("archive-session", index))
+                    .absolute()
+                    .right_2()
+                    .top(px(5.))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .opacity(0.)
+                    .group_hover(group, |style| style.opacity(1.))
+                    .hover(|style| style.bg(rgb(0x343638)))
+                    .text_xs()
+                    .text_color(rgb(0xaeb1b5))
+                    .child(if archived { "Restore" } else { "Archive" })
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        cx.stop_propagation();
+                        shell.set_session_archived(session.id, !archived, cx);
+                    })),
+            )
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
@@ -133,30 +246,39 @@ impl DesktopShell {
                 );
             }
             SessionLoadState::Loaded => {
-                list = list.children(self.sessions.iter().copied().enumerate().map(
-                    |(index, session)| {
-                        let selected = self.selected_session_id == Some(session.id);
+                for (index, session) in self.sessions.iter().enumerate() {
+                    if !session.archived {
+                        list = list.child(self.render_session_row(session.clone(), index, cx));
+                    }
+                }
+
+                if self.sessions.iter().any(|session| session.archived) {
+                    list = list.child(
                         div()
-                            .id(("session", index))
-                            .mb_1()
-                            .px_4()
-                            .py_2()
-                            .rounded_lg()
-                            .cursor_pointer()
-                            .when(selected, |style| style.bg(rgb(0x2b2d2f)))
-                            .hover(|style| style.bg(rgb(0x252729)))
-                            .on_click(cx.listener(move |shell, _, _, cx| {
-                                shell.selected_session_id = Some(session.id);
-                                cx.notify();
-                            }))
-                            .child(
-                                div()
-                                    .text_base()
-                                    .text_color(rgb(0xd6d7d9))
-                                    .child(format!("Session {}", short_id(session.id))),
-                            )
-                    },
-                ));
+                            .mt_5()
+                            .px_3()
+                            .pb_2()
+                            .text_xs()
+                            .text_color(rgb(0x66696d))
+                            .child("Archived"),
+                    );
+                    for (index, session) in self.sessions.iter().enumerate() {
+                        if session.archived {
+                            list = list.child(self.render_session_row(session.clone(), index, cx));
+                        }
+                    }
+                }
+
+                if let Some(error) = &self.action_error {
+                    list = list.child(
+                        div()
+                            .mt_3()
+                            .px_3()
+                            .text_xs()
+                            .text_color(rgb(0xf29b9b))
+                            .child(truncate(error, 100)),
+                    );
+                }
             }
         }
 
@@ -236,7 +358,7 @@ impl DesktopShell {
                     .child(
                         div()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(format!("Session {}", short_id(session.id))),
+                            .child(session_title(session)),
                     ),
             )
             .child(
@@ -266,6 +388,32 @@ impl Render for DesktopShell {
 
 fn short_id(id: SessionId) -> String {
     short_uuid(&id.to_string())
+}
+
+fn session_title(session: &SessionDescriptor) -> String {
+    session
+        .title
+        .clone()
+        .unwrap_or_else(|| format!("Session {}", short_id(session.id)))
+}
+
+fn current_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+fn relative_time(timestamp_ms: u64, now_ms: u64) -> String {
+    let seconds = now_ms.saturating_sub(timestamp_ms) / 1_000;
+    match seconds {
+        0..=59 => "now".to_owned(),
+        60..=3_599 => format!("{}m", seconds / 60),
+        3_600..=86_399 => format!("{}h", seconds / 3_600),
+        86_400..=604_799 => format!("{}d", seconds / 86_400),
+        _ => format!("{}w", seconds / 604_800),
+    }
 }
 
 fn short_uuid(id: &str) -> String {
@@ -336,22 +484,38 @@ mod tests {
             id: SessionId::new(),
             agent_id: AgentId::new(),
             association: SessionAssociation::Standalone,
+            title: Some("First".to_owned()),
+            archived: false,
+            updated_at_ms: 2,
         };
         let second = SessionDescriptor {
             id: SessionId::new(),
             agent_id: AgentId::new(),
             association: SessionAssociation::Standalone,
+            title: Some("Second".to_owned()),
+            archived: false,
+            updated_at_ms: 1,
         };
+        let first_id = first.id;
+        let second_id = second.id;
         let sessions = [first, second];
 
         assert_eq!(
-            selection_after_refresh(Some(second.id), &sessions),
-            Some(second.id)
+            selection_after_refresh(Some(second_id), &sessions),
+            Some(second_id)
         );
         assert_eq!(
             selection_after_refresh(Some(SessionId::new()), &sessions),
-            Some(first.id)
+            Some(first_id)
         );
-        assert_eq!(selection_after_refresh(Some(first.id), &[]), None);
+        assert_eq!(selection_after_refresh(Some(first_id), &[]), None);
+    }
+
+    #[test]
+    fn relative_activity_time_stays_compact() {
+        let now = 10_000_000;
+        assert_eq!(relative_time(now, now), "now");
+        assert_eq!(relative_time(now - 120_000, now), "2m");
+        assert_eq!(relative_time(now - 7_200_000, now), "2h");
     }
 }

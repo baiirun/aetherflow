@@ -3,32 +3,38 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 use rivetkit::{BindParam, ColumnValue, prelude::*};
 use serde::{Deserialize, Serialize};
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{cmp::Reverse, future::Future, pin::Pin, sync::Arc};
 
 pub const SESSION_DIRECTORY_ACTOR_NAME: &str = "session_directory";
-pub const DEFAULT_SESSION_DIRECTORY_KEY: &str = "sessions";
+pub const DEFAULT_SESSION_DIRECTORY_KEY: &str = "sessions-v2";
 
 type BoxActionFuture<T> = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
 
-/// Durable session identity stored separately from the live Pi actor.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// Durable session list data stored separately from the live Pi actor.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SessionDescriptor {
     pub id: SessionId,
     pub agent_id: AgentId,
     pub association: SessionAssociation,
+    pub title: Option<String>,
+    pub archived: bool,
+    pub updated_at_ms: u64,
 }
 
-impl From<&Session> for SessionDescriptor {
-    fn from(session: &Session) -> Self {
+impl SessionDescriptor {
+    pub fn new(session: &Session, title: Option<String>, updated_at_ms: u64) -> Self {
         Self {
             id: session.id,
             agent_id: session.agent_id,
             association: session.association,
+            title,
+            archived: false,
+            updated_at_ms,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RegisterSession {
     pub session: SessionDescriptor,
 }
@@ -48,13 +54,43 @@ impl Action for ListSessions {
     const NAME: &'static str = "list_sessions";
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RecordSessionActivity {
+    pub session_id: SessionId,
+    pub title: Option<String>,
+    pub updated_at_ms: u64,
+}
+
+impl Action for RecordSessionActivity {
+    type Output = SessionDescriptor;
+
+    const NAME: &'static str = "record_session_activity";
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct SetSessionArchived {
+    pub session_id: SessionId,
+    pub archived: bool,
+}
+
+impl Action for SetSessionArchived {
+    type Output = SessionDescriptor;
+
+    const NAME: &'static str = "set_session_archived";
+}
+
 pub struct SessionDirectoryActor;
 
 #[async_trait]
 impl Actor for SessionDirectoryActor {
     type State = ();
     type Input = ();
-    type Actions = (RegisterSession, ListSessions);
+    type Actions = (
+        RegisterSession,
+        ListSessions,
+        RecordSessionActivity,
+        SetSessionArchived,
+    );
     type Events = ();
     type Queue = ();
     type ConnParams = ();
@@ -137,20 +173,87 @@ impl Handles<ListSessions> for SessionDirectoryActor {
                 .sql()
                 .query("SELECT descriptor FROM sessions ORDER BY sequence", None)
                 .await?;
-            result
+            let mut sessions = result
                 .rows
                 .into_iter()
                 .map(|row| match row.into_iter().next() {
                     Some(ColumnValue::Text(descriptor)) => {
-                        serde_json::from_str(&descriptor).map_err(Into::into)
+                        serde_json::from_str::<SessionDescriptor>(&descriptor).map_err(Into::into)
                     }
                     _ => Err(anyhow::anyhow!(
                         "session directory stored an invalid descriptor"
                     )),
                 })
-                .collect()
+                .collect::<Result<Vec<_>>>()?;
+            sessions.sort_by_key(|session| Reverse(session.updated_at_ms));
+            Ok(sessions)
         })
     }
+}
+
+impl Handles<RecordSessionActivity> for SessionDirectoryActor {
+    type Future = BoxActionFuture<SessionDescriptor>;
+
+    fn handle(self: Arc<Self>, ctx: Ctx<Self>, action: RecordSessionActivity) -> Self::Future {
+        Box::pin(async move {
+            let mut session = read_descriptor(&ctx, action.session_id).await?;
+            if session.title.is_none() {
+                session.title = action.title;
+            }
+            session.updated_at_ms = action.updated_at_ms;
+            write_descriptor(&ctx, &session).await?;
+            Ok(session)
+        })
+    }
+}
+
+impl Handles<SetSessionArchived> for SessionDirectoryActor {
+    type Future = BoxActionFuture<SessionDescriptor>;
+
+    fn handle(self: Arc<Self>, ctx: Ctx<Self>, action: SetSessionArchived) -> Self::Future {
+        Box::pin(async move {
+            let mut session = read_descriptor(&ctx, action.session_id).await?;
+            session.archived = action.archived;
+            write_descriptor(&ctx, &session).await?;
+            Ok(session)
+        })
+    }
+}
+
+async fn read_descriptor(
+    ctx: &Ctx<SessionDirectoryActor>,
+    session_id: SessionId,
+) -> Result<SessionDescriptor> {
+    let result = ctx
+        .sql()
+        .query(
+            "SELECT descriptor FROM sessions WHERE id = ?1",
+            Some(vec![BindParam::Text(session_id.to_string())]),
+        )
+        .await?;
+    let Some(row) = result.rows.first() else {
+        bail!("session {session_id} is not registered");
+    };
+    let Some(ColumnValue::Text(descriptor)) = row.first() else {
+        bail!("session directory stored an invalid descriptor for {session_id}");
+    };
+    Ok(serde_json::from_str(descriptor)?)
+}
+
+async fn write_descriptor(
+    ctx: &Ctx<SessionDirectoryActor>,
+    session: &SessionDescriptor,
+) -> Result<()> {
+    ctx.sql()
+        .execute(
+            "UPDATE sessions SET descriptor = ?1 WHERE id = ?2",
+            Some(vec![
+                BindParam::Text(serde_json::to_string(session)?),
+                BindParam::Text(session.id.to_string()),
+            ]),
+        )
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -159,16 +262,19 @@ mod tests {
     use aetherflow_storage::{Agent, SessionAssociation};
 
     #[test]
-    fn descriptor_excludes_transient_session_status() {
+    fn descriptor_contains_only_sidebar_state_beyond_session_identity() {
         let agent = Agent::new("test");
         let session = Session::new(agent.id, SessionAssociation::Standalone);
 
         assert_eq!(
-            SessionDescriptor::from(&session),
+            SessionDescriptor::new(&session, Some("Test session".to_owned()), 42),
             SessionDescriptor {
                 id: session.id,
                 agent_id: session.agent_id,
                 association: SessionAssociation::Standalone,
+                title: Some("Test session".to_owned()),
+                archived: false,
+                updated_at_ms: 42,
             }
         );
     }

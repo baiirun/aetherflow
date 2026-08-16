@@ -58,6 +58,10 @@ enum SessionCommand {
     List,
     /// Read the durable state for a session actor.
     State { session_id: SessionId },
+    /// Hide a session from the active desktop list.
+    Archive { session_id: SessionId },
+    /// Return a session to the active desktop list.
+    Unarchive { session_id: SessionId },
     /// Prompt a session and print its unrendered Pi event stream.
     Prompt {
         session_id: SessionId,
@@ -160,6 +164,16 @@ async fn run_session_command(client: &AetherflowClient, command: SessionCommand)
         SessionCommand::State { session_id } => {
             let state = client.session_state(session_id).await?;
             println!("{}", serde_json::to_string_pretty(&state)?);
+            Ok(())
+        }
+        SessionCommand::Archive { session_id } => {
+            client.set_session_archived(session_id, true).await?;
+            println!("{session_id}");
+            Ok(())
+        }
+        SessionCommand::Unarchive { session_id } => {
+            client.set_session_archived(session_id, false).await?;
+            println!("{session_id}");
             Ok(())
         }
         SessionCommand::Prompt {
@@ -374,5 +388,27 @@ mod tests {
         .expect("an oversized event page should fail");
 
         assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn session_archive_and_unarchive_accept_a_session_id() {
+        let id = "00000000-0000-0000-0000-000000000001";
+
+        let archive = Args::try_parse_from(["af", "session", "archive", id]).unwrap();
+        let Command::Session {
+            command: SessionCommand::Archive { session_id },
+        } = archive.command
+        else {
+            panic!("expected session archive command");
+        };
+        assert_eq!(session_id.to_string(), id);
+
+        let unarchive = Args::try_parse_from(["af", "session", "unarchive", id]).unwrap();
+        assert!(matches!(
+            unarchive.command,
+            Command::Session {
+                command: SessionCommand::Unarchive { .. }
+            }
+        ));
     }
 }
