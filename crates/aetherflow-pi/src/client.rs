@@ -46,6 +46,7 @@ pub struct CreateSessionOptions {
     pub cwd: PathBuf,
     pub pi_session_directory: Option<PathBuf>,
     pub pi_executable: PathBuf,
+    pub initial_prompt: Option<String>,
 }
 
 impl Default for CreateSessionOptions {
@@ -56,6 +57,7 @@ impl Default for CreateSessionOptions {
             cwd: PathBuf::from("."),
             pi_session_directory: None,
             pi_executable: PathBuf::from("pi"),
+            initial_prompt: None,
         }
     }
 }
@@ -86,16 +88,21 @@ impl AetherflowClient {
         }
     }
 
-    pub async fn create_session(&self, options: CreateSessionOptions) -> Result<Session> {
-        let cwd = absolute_existing_directory(&options.cwd)?;
-        let session_directory = absolute_path(
-            options
-                .pi_session_directory
-                .unwrap_or(default_pi_session_directory()?),
-        )?;
-        let executable = resolve_executable(options.pi_executable)?;
-        let agent_id = options.agent_id.unwrap_or_else(|| Agent::new("local").id);
-        let session = Session::new(agent_id, options.association);
+    pub async fn create_session(&self, options: CreateSessionOptions) -> Result<SessionId> {
+        let CreateSessionOptions {
+            agent_id,
+            association,
+            cwd,
+            pi_session_directory,
+            pi_executable,
+            initial_prompt,
+        } = options;
+        let cwd = absolute_existing_directory(&cwd)?;
+        let session_directory =
+            absolute_path(pi_session_directory.unwrap_or(default_pi_session_directory()?))?;
+        let executable = resolve_executable(pi_executable)?;
+        let agent_id = agent_id.unwrap_or_else(|| Agent::new("local").id);
+        let session = Session::new(agent_id, association);
         let mut pi = PiOptions::persistent(cwd, session_directory, session.id);
         pi.executable = executable;
 
@@ -122,7 +129,16 @@ impl AetherflowClient {
             .await
             .context("register session")?;
 
-        Ok(session)
+        if let Some(prompt) = initial_prompt {
+            self.session_handle(session.id)
+                .send(SendSessionCommand {
+                    command: RpcCommand::prompt("prompt", prompt),
+                })
+                .await
+                .with_context(|| format!("prompt new session {}", session.id))?;
+        }
+
+        Ok(session.id)
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<SessionDescriptor>> {
@@ -300,6 +316,7 @@ mod tests {
                 cwd: temp.path().to_owned(),
                 pi_session_directory: Some(temp.path().join("sessions")),
                 pi_executable: executable.clone(),
+                initial_prompt: Some("during creation".to_owned()),
                 ..CreateSessionOptions::default()
             })
             .await?;
@@ -312,6 +329,8 @@ mod tests {
             })
             .await?;
 
+        wait_for_persisted_prompt(&temp.path().join("sessions"), first, "during creation").await?;
+
         assert_eq!(
             client
                 .list_sessions()
@@ -319,22 +338,18 @@ mod tests {
                 .iter()
                 .map(|session| session.id)
                 .collect::<Vec<_>>(),
-            [first.id, second.id]
+            [first, second]
         );
-        prompt_to_completion(&client, first.id, "before restart").await?;
         runner.crash().await;
 
         let (restarted, client) = TestRunner::start(&pool, &directory_key).await?;
         assert_eq!(client.list_sessions().await?.len(), 2);
-        assert_eq!(client.session_state(first.id).await?.session.id, first.id);
-        prompt_to_completion(&client, first.id, "after restart").await?;
+        assert_eq!(client.session_state(first).await?.session.id, first);
+        prompt_to_completion(&client, first, "after restart").await?;
 
-        let persisted = fs::read_to_string(
-            temp.path()
-                .join("sessions")
-                .join(format!("{}.jsonl", first.id)),
-        )?;
-        assert!(persisted.contains("before restart"));
+        let persisted =
+            fs::read_to_string(temp.path().join("sessions").join(format!("{first}.jsonl")))?;
+        assert!(persisted.contains("during creation"));
         assert!(persisted.contains("after restart"));
         restarted.shutdown().await?;
         Ok(())
@@ -399,12 +414,36 @@ mod tests {
         session_id: SessionId,
         message: &str,
     ) -> Result<()> {
-        let mut events = client.prompt_session(session_id, message).await?;
+        let events = client.prompt_session(session_id, message).await?;
+        stream_to_completion(events).await
+    }
+
+    async fn stream_to_completion(mut events: SessionEventStream) -> Result<()> {
         tokio::time::timeout(Duration::from_secs(10), async {
             while events.next().await?.is_some() {}
             Ok::<_, anyhow::Error>(())
         })
         .await??;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_persisted_prompt(
+        directory: &Path,
+        session_id: SessionId,
+        prompt: &str,
+    ) -> Result<()> {
+        let record = directory.join(format!("{session_id}.jsonl"));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if fs::read_to_string(&record).is_ok_and(|contents| contents.contains(prompt)) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .with_context(|| format!("prompt was not persisted to {}", record.display()))?;
         Ok(())
     }
 

@@ -47,10 +47,18 @@ duration. Set `RUST_LOG` to adjust verbosity, for example
 In another terminal, create and prompt a persistent session:
 
 ```sh
-af session create
+af session create "Hello"
 af session list
 af session prompt <SESSION_ID> "Hello"
 af session state <SESSION_ID>
+```
+
+The prompt on `session create` is optional. Creation prints only the new session
+ID and lets the turn continue in the daemon. Pass `--attach` to print the same
+unrendered Pi event stream as `session prompt`:
+
+```sh
+af session create "Hello" --attach
 ```
 
 Session actors persist their Pi JSONL under `~/.aetherflow/pi-sessions` by

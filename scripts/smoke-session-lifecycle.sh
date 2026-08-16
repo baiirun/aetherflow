@@ -40,7 +40,11 @@ af() {
 }
 
 start_daemon
-session_id=$(af session create --session-dir "$smoke_dir/pi-sessions")
+if [ "$#" -gt 0 ]; then
+    session_id=$(af session create "$1" --session-dir "$smoke_dir/pi-sessions")
+else
+    session_id=$(af session create --session-dir "$smoke_dir/pi-sessions")
+fi
 af session list | grep -F "\"id\": \"$session_id\"" >/dev/null
 
 kill -TERM "$daemon_pid"
@@ -50,9 +54,5 @@ start_daemon
 
 af session list | grep -F "\"id\": \"$session_id\"" >/dev/null
 af session state "$session_id" | grep -F "\"id\": \"$session_id\"" >/dev/null
-
-if [ "$#" -gt 0 ]; then
-    af session prompt "$session_id" "$1"
-fi
 
 echo "session lifecycle smoke test passed: $session_id"

@@ -1,7 +1,7 @@
 use aetherflow_pi::{
     AetherflowClient, AetherflowClientOptions, CreateSessionOptions, DEFAULT_ENDPOINT,
     DEFAULT_NAMESPACE, DEFAULT_POOL, DEFAULT_SESSION_DIRECTORY_KEY, DEFAULT_TOKEN, PiEvent,
-    PiMessage, PiOptions, PiRpc, RpcCommand,
+    PiMessage, PiOptions, PiRpc, RpcCommand, SessionEventStream,
 };
 use aetherflow_storage::{AgentId, ChannelId, SessionAssociation, SessionId};
 use anyhow::Result;
@@ -66,6 +66,11 @@ enum SessionCommand {
 
 #[derive(ClapArgs)]
 struct CreateSessionArgs {
+    /// Prompt the session immediately after creating it.
+    prompt: Option<String>,
+    /// Attach to and print the initial prompt's Pi event stream.
+    #[arg(long, requires = "prompt")]
+    attach: bool,
     #[arg(long)]
     agent_id: Option<AgentId>,
     #[arg(long)]
@@ -152,16 +157,26 @@ async fn create_session(client: &AetherflowClient, args: CreateSessionArgs) -> R
         .map_or(SessionAssociation::Standalone, |channel_id| {
             SessionAssociation::Channel { channel_id }
         });
-    let session = client
+    let attached_prompt = if args.attach {
+        args.prompt.clone()
+    } else {
+        None
+    };
+    let session_id = client
         .create_session(CreateSessionOptions {
             agent_id: args.agent_id,
             association,
             cwd: args.cwd,
             pi_session_directory: args.session_dir,
             pi_executable: args.pi,
+            initial_prompt: if args.attach { None } else { args.prompt },
         })
         .await?;
-    println!("{}", session.id);
+    println!("{session_id}");
+    if let Some(prompt) = attached_prompt {
+        let events = client.prompt_session(session_id, prompt).await?;
+        print_session_events(events).await?;
+    }
     Ok(())
 }
 
@@ -170,7 +185,11 @@ async fn prompt_session(
     session_id: SessionId,
     message: String,
 ) -> Result<()> {
-    let mut events = client.prompt_session(session_id, message).await?;
+    let events = client.prompt_session(session_id, message).await?;
+    print_session_events(events).await
+}
+
+async fn print_session_events(mut events: SessionEventStream) -> Result<()> {
     while let Some(event) = events.next().await? {
         println!("{}", serde_json::to_string(&event)?);
     }
@@ -185,4 +204,67 @@ async fn print_until(pi: &mut PiRpc, done: impl Fn(&PiMessage) -> bool) -> Resul
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_create_accepts_an_initial_prompt() {
+        let args = Args::try_parse_from(["af", "session", "create", "start here"]).unwrap();
+
+        let Command::Session {
+            command: SessionCommand::Create(create),
+        } = args.command
+        else {
+            panic!("expected session create command");
+        };
+
+        assert_eq!(create.prompt.as_deref(), Some("start here"));
+        assert!(!create.attach);
+    }
+
+    #[test]
+    fn session_create_keeps_the_initial_prompt_optional() {
+        let args = Args::try_parse_from(["af", "session", "create"]).unwrap();
+
+        let Command::Session {
+            command: SessionCommand::Create(create),
+        } = args.command
+        else {
+            panic!("expected session create command");
+        };
+
+        assert_eq!(create.prompt, None);
+        assert!(!create.attach);
+    }
+
+    #[test]
+    fn session_create_attach_requires_a_prompt() {
+        let error = Args::try_parse_from(["af", "session", "create", "--attach"])
+            .err()
+            .expect("attach without a prompt should fail");
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn session_create_can_attach_to_the_initial_prompt() {
+        let args =
+            Args::try_parse_from(["af", "session", "create", "start here", "--attach"]).unwrap();
+
+        let Command::Session {
+            command: SessionCommand::Create(create),
+        } = args.command
+        else {
+            panic!("expected session create command");
+        };
+
+        assert_eq!(create.prompt.as_deref(), Some("start here"));
+        assert!(create.attach);
+    }
 }
