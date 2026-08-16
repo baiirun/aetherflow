@@ -131,21 +131,6 @@ impl DesktopShell {
         self.sessions.iter().find(|session| session.id == selected)
     }
 
-    fn open_new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_sending {
-            return;
-        }
-        self.creating_new_session = true;
-        self.selected_session_id = None;
-        self.new_session_messages.clear();
-        self.action_error = None;
-        self.composer.update(cx, |input, cx| {
-            input.set_value("", window, cx);
-            input.focus(window, cx);
-        });
-        cx.notify();
-    }
-
     fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_sending {
             return;
@@ -357,21 +342,27 @@ impl DesktopShell {
             }))
             .child(
                 div()
-                    .pr_12()
-                    .truncate()
-                    .text_sm()
-                    .text_color(rgb(0xd6d7d9))
-                    .child(title),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .right_3()
-                    .top(px(9.))
-                    .text_xs()
-                    .text_color(rgb(0x74777a))
-                    .group_hover(group.clone(), |style| style.opacity(0.))
-                    .child(activity),
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .text_color(rgb(0xd6d7d9))
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(rgb(0x74777a))
+                            .group_hover(group.clone(), |style| style.opacity(0.))
+                            .child(activity),
+                    ),
             )
             .child(
                 div()
@@ -382,9 +373,10 @@ impl DesktopShell {
                     .px_2()
                     .py_1()
                     .rounded_md()
+                    .bg(rgb(0x343638))
                     .opacity(0.)
                     .group_hover(group, |style| style.opacity(1.))
-                    .hover(|style| style.bg(rgb(0x343638)))
+                    .hover(|style| style.bg(rgb(0x414447)))
                     .text_xs()
                     .text_color(rgb(0xaeb1b5))
                     .child(if archived { "Restore" } else { "Archive" })
@@ -401,7 +393,9 @@ impl DesktopShell {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .p_2();
+            .px_2()
+            .pt(px(72.))
+            .pb_2();
 
         match &self.load_state {
             SessionLoadState::Loading => {
@@ -494,57 +488,6 @@ impl DesktopShell {
             .flex()
             .flex_col()
             .bg(rgba(0x1d1f20d9))
-            .child(
-                div()
-                    .h(px(88.))
-                    .pt(px(26.))
-                    .px_5()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(div().text_sm().text_color(rgb(0x74777a)).child("Sessions"))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .id("new-session")
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .text_base()
-                                    .text_color(rgb(0x74777a))
-                                    .hover(|style| {
-                                        style.bg(rgb(0x252729)).text_color(rgb(0xd6d7d9))
-                                    })
-                                    .child("+")
-                                    .on_click(cx.listener(|shell, _, window, cx| {
-                                        shell.open_new_session(window, cx);
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .id("refresh-sessions")
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .text_sm()
-                                    .text_color(rgb(0x74777a))
-                                    .hover(|style| {
-                                        style.bg(rgb(0x252729)).text_color(rgb(0xd6d7d9))
-                                    })
-                                    .child("↻")
-                                    .on_click(cx.listener(|shell, _, _, cx| {
-                                        shell.load_sessions(cx);
-                                        cx.notify();
-                                    })),
-                            ),
-                    ),
-            )
             .child(list)
     }
 
