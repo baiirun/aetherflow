@@ -9,16 +9,17 @@ use aetherflow_pi::{
 use aetherflow_storage::SessionId;
 use daemon::{DaemonTarget, ManagedDaemon};
 use gpui::{
-    Animation, AnimationExt as _, App, Application, Bounds, Context, Div, Entity, KeyBinding,
-    Pixels, ScrollHandle, SharedString, Subscription, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowOptions, div, ease_out_quint, point,
-    prelude::*, px, rgb, rgba, size,
+    Animation, AnimationExt as _, App, Application, Bounds, Context, Div, Entity, HighlightStyle,
+    Hsla, KeyBinding, Pixels, ScrollHandle, SharedString, StyledText, Subscription,
+    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div,
+    ease_out_quint, point, prelude::*, px, rgb, rgba, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::text::{TextView, TextViewStyle};
 use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
+    ops::Range,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -37,6 +38,11 @@ const BOTTOM_FOLLOW_THRESHOLD: f32 = 32.;
 const CONTENT_SHIFT_TIME_CONSTANT: Duration = Duration::from_millis(55);
 const CONTENT_SHIFT_SETTLE_DISTANCE: f32 = 0.5;
 const CONVERSATION_EVENT_PAGE_SIZE: u32 = DEFAULT_SESSION_EVENT_PAGE_SIZE;
+const TOOL_ACTIVITY_ORB_SIZE: f64 = 20.;
+const TOOL_ACTIVITY_ORB_DURATION: Duration = Duration::from_secs(600);
+const TOOL_ACTIVITY_ORB_SPEED: f64 = 3.9;
+const TOOL_GROUP_SHIMMER_DURATION: Duration = Duration::from_millis(1_600);
+const TOOL_GROUP_SHIMMER_BAND_WIDTH: f32 = 0.24;
 
 gpui::actions!(aetherflow, [NewSession]);
 
@@ -1113,7 +1119,17 @@ impl DesktopShell {
                         ),
                         ConversationRole::Assistant => {
                             let content = if is_empty_assistant {
-                                div().child("Working…").into_any_element()
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(render_tool_activity_orb(format!(
+                                        "assistant-{session_id}-{index}"
+                                    )))
+                                    .child(render_working_text(format!(
+                                        "assistant-{session_id}-{index}"
+                                    )))
+                                    .into_any_element()
                             } else {
                                 let is_live_tail = session_has_active_turn
                                     && index == messages.len().saturating_sub(1);
@@ -1142,7 +1158,17 @@ impl DesktopShell {
                     }
                 }
                 ConversationItem::ToolGroup(group) => {
-                    transcript.child(self.render_tool_group(group, window, cx))
+                    let has_running_tool = group
+                        .calls
+                        .iter()
+                        .any(|call| call.status == ToolStatus::Running);
+                    let show_activity = tool_group_shows_activity(
+                        session_has_active_turn,
+                        index,
+                        messages.len(),
+                        has_running_tool,
+                    );
+                    transcript.child(self.render_tool_group(group, show_activity, window, cx))
                 }
             };
         }
@@ -1153,6 +1179,7 @@ impl DesktopShell {
     fn render_tool_group(
         &self,
         group: &ToolGroup,
+        show_activity: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -1162,21 +1189,6 @@ impl DesktopShell {
             .get(&group_key)
             .copied()
             .unwrap_or_else(|| group.should_open_by_default());
-        let icon = if group
-            .calls
-            .iter()
-            .any(|call| call.status == ToolStatus::Running)
-        {
-            "◌"
-        } else if group
-            .calls
-            .iter()
-            .any(|call| call.status == ToolStatus::Failed)
-        {
-            "!"
-        } else {
-            "✓"
-        };
         let toggle_group_key = group_key.clone();
         let mut container = div().w_full().max_w(px(720.)).text_sm().child(
             div()
@@ -1194,19 +1206,14 @@ impl DesktopShell {
                         .insert(toggle_group_key.clone(), !open);
                     cx.notify();
                 }))
-                .child(
-                    div()
-                        .size(px(18.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_md()
-                        .bg(rgb(0x25282d))
-                        .text_xs()
-                        .child(if open { "▾" } else { "▸" }),
-                )
-                .child(icon)
-                .child(group.summary()),
+                .when(show_activity, |header| {
+                    header.child(render_tool_activity_orb(format!("group-{group_key}")))
+                })
+                .child(render_tool_group_summary(
+                    group.summary(),
+                    &group_key,
+                    show_activity,
+                )),
         );
 
         if open {
@@ -1273,7 +1280,18 @@ impl DesktopShell {
                     }
                     cx.notify();
                 }))
-                .child(div().text_color(status_color).child(status_icon))
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_color(status_color)
+                        .child(status_icon)
+                        .when(call.status == ToolStatus::Running, |indicator| {
+                            indicator.child(render_tool_activity_orb(format!("call-{}", call.id)))
+                        }),
+                )
                 .child(
                     div()
                         .flex_1()
@@ -1675,6 +1693,247 @@ fn conversation_markdown_style(cx: &App) -> TextViewStyle {
     style
 }
 
+fn render_tool_activity_orb(key: impl Into<SharedString>) -> gpui::AnyElement {
+    let key = key.into();
+    div()
+        .size(px(TOOL_ACTIVITY_ORB_SIZE as f32))
+        .flex_none()
+        .relative()
+        .overflow_hidden()
+        .with_animation(
+            key,
+            Animation::new(TOOL_ACTIVITY_ORB_DURATION).repeat(),
+            |orb, progress| {
+                let time = f64::from(progress)
+                    * TOOL_ACTIVITY_ORB_DURATION.as_secs_f64()
+                    * TOOL_ACTIVITY_ORB_SPEED;
+                orb.children(tool_activity_frame(time).into_iter().map(|dot| {
+                    let diameter = dot.radius * 2.;
+                    let gray = ((1. - dot.white.clamp(0., 1.)) * 255.).round() as u32;
+                    let color = (gray << 16) | (gray << 8) | gray;
+                    div()
+                        .absolute()
+                        .left(px((dot.x - dot.radius) as f32))
+                        .top(px((dot.y - dot.radius) as f32))
+                        .size(px(diameter as f32))
+                        .rounded_full()
+                        .bg(rgb(color))
+                        .opacity(dot.alpha as f32)
+                }))
+            },
+        )
+        .into_any_element()
+}
+
+/// Port of thinking-orbs' MIT-licensed 20px `working`/`orbits` frame.
+/// The source geometry is deterministic 3D math; GPUI only paints its final,
+/// depth-sorted dots. See vendor/thinking-orbs/LICENSE.
+#[derive(Clone, Copy, Debug)]
+struct ToolActivityDot {
+    x: f64,
+    y: f64,
+    z: f64,
+    radius: f64,
+    white: f64,
+    alpha: f64,
+}
+
+fn tool_activity_frame(time: f64) -> Vec<ToolActivityDot> {
+    const ORBIT_COUNT: usize = 3;
+    const GHOST_COUNT: usize = 10;
+    const PARTICLES_PER_ORBIT: usize = 3;
+    const GHOST_RADIUS: f64 = 2.16;
+    const GHOST_ALPHA: f64 = 0.5;
+    const PARTICLE_RADIUS: f64 = 2.88;
+    const PARTICLE_DEPTH_RADIUS: f64 = 3.84;
+    const MIN_RADIUS: f64 = 0.3;
+
+    let center = TOOL_ACTIVITY_ORB_SIZE / 2.;
+    let outer_radius = center * 0.82;
+    let radius_scale = (TOOL_ACTIVITY_ORB_SIZE / 300.).powf(0.6);
+    let yaw = time * 0.12;
+    let tilt = 0.3;
+    let mut dots = Vec::with_capacity(ORBIT_COUNT * (GHOST_COUNT + PARTICLES_PER_ORBIT));
+
+    for orbit in 0..ORBIT_COUNT {
+        let orbit = orbit as f64;
+        let h1 = thinking_orb_hash(orbit, 1.7);
+        let h2 = thinking_orb_hash(orbit, 5.2);
+        let h3 = thinking_orb_hash(orbit, 8.9);
+        let orbit_radius = outer_radius * (0.45 + 0.52 * h1);
+        let theta = h1 * std::f64::consts::TAU;
+        let phi = (2. * h2 - 1.).acos();
+        let normal_x = phi.sin() * theta.cos();
+        let normal_y = phi.cos();
+        let normal_z = phi.sin() * theta.sin();
+        let mut basis_u_x = -normal_y;
+        let mut basis_u_y = normal_x;
+        let basis_u_z = 0.;
+        let basis_u_length = (basis_u_x * basis_u_x + basis_u_y * basis_u_y)
+            .sqrt()
+            .max(1e-6);
+        basis_u_x /= basis_u_length;
+        basis_u_y /= basis_u_length;
+        let basis_v_x = normal_y * basis_u_z - normal_z * basis_u_y;
+        let basis_v_y = normal_z * basis_u_x - normal_x * basis_u_z;
+        let basis_v_z = normal_x * basis_u_y - normal_y * basis_u_x;
+        let speed = (0.25 + 0.55 * h3) * if h3 > 0.5 { 1. } else { -1. };
+
+        for index in 0..GHOST_COUNT {
+            let angle = index as f64 / GHOST_COUNT as f64 * std::f64::consts::TAU;
+            let (x, y, z) = project_tool_activity_point(
+                (basis_u_x * angle.cos() + basis_v_x * angle.sin()) * orbit_radius,
+                (basis_u_y * angle.cos() + basis_v_y * angle.sin()) * orbit_radius,
+                (basis_u_z * angle.cos() + basis_v_z * angle.sin()) * orbit_radius,
+                yaw,
+                tilt,
+                center,
+            );
+            let depth = (z / orbit_radius + 1.) / 2.;
+            dots.push(ToolActivityDot {
+                x,
+                y,
+                z,
+                radius: (GHOST_RADIUS * radius_scale).max(MIN_RADIUS),
+                white: 0.72,
+                alpha: GHOST_ALPHA * (0.4 + 0.6 * depth),
+            });
+        }
+
+        for index in 0..PARTICLES_PER_ORBIT {
+            let angle = time * speed
+                + index as f64 / PARTICLES_PER_ORBIT as f64 * std::f64::consts::TAU
+                + h2 * 6.;
+            let (x, y, z) = project_tool_activity_point(
+                (basis_u_x * angle.cos() + basis_v_x * angle.sin()) * orbit_radius,
+                (basis_u_y * angle.cos() + basis_v_y * angle.sin()) * orbit_radius,
+                (basis_u_z * angle.cos() + basis_v_z * angle.sin()) * orbit_radius,
+                yaw,
+                tilt,
+                center,
+            );
+            let depth = (z / orbit_radius + 1.) / 2.;
+            dots.push(ToolActivityDot {
+                x,
+                y,
+                z,
+                radius: ((PARTICLE_RADIUS + PARTICLE_DEPTH_RADIUS * depth) * radius_scale)
+                    .max(MIN_RADIUS),
+                white: 0.3 - 0.22 * depth,
+                alpha: 1.,
+            });
+        }
+    }
+
+    dots.sort_by(|left, right| left.z.total_cmp(&right.z));
+    dots
+}
+
+fn thinking_orb_hash(a: f64, b: f64) -> f64 {
+    let hash = (a * 12.9898 + b * 78.233).sin() * 43_758.545_3;
+    hash - hash.floor()
+}
+
+fn project_tool_activity_point(
+    x: f64,
+    y: f64,
+    z: f64,
+    yaw: f64,
+    tilt: f64,
+    center: f64,
+) -> (f64, f64, f64) {
+    let x_rotated = x * yaw.cos() + z * yaw.sin();
+    let z_rotated = -x * yaw.sin() + z * yaw.cos();
+    let y_rotated = y * tilt.cos() - z_rotated * tilt.sin();
+    let depth = y * tilt.sin() + z_rotated * tilt.cos();
+    (center + x_rotated, center - y_rotated, depth)
+}
+
+fn tool_group_shows_activity(
+    session_has_active_turn: bool,
+    item_index: usize,
+    item_count: usize,
+    has_running_tool: bool,
+) -> bool {
+    has_running_tool || (session_has_active_turn && item_index == item_count.saturating_sub(1))
+}
+
+fn render_tool_group_summary(
+    summary: String,
+    group_key: &str,
+    show_activity: bool,
+) -> gpui::AnyElement {
+    if !show_activity {
+        return StyledText::new(summary).into_any_element();
+    }
+
+    render_working_text(format!("tool-group-{group_key}"))
+}
+
+fn render_working_text(animation_key: String) -> gpui::AnyElement {
+    let working = "Working…".to_owned();
+    let animated_working = working.clone();
+    StyledText::new(working)
+        .with_animation(
+            SharedString::from(format!("working-shimmer-{animation_key}")),
+            Animation::new(TOOL_GROUP_SHIMMER_DURATION).repeat(),
+            move |text, progress| {
+                text.with_highlights(shimmer_highlights(&animated_working, progress))
+            },
+        )
+        .into_any_element()
+}
+
+fn shimmer_highlights(text: &str, progress: f32) -> Vec<(Range<usize>, HighlightStyle)> {
+    let character_count = text.chars().count();
+    text.char_indices()
+        .enumerate()
+        .filter_map(|(character_index, (byte_index, character))| {
+            let intensity = shimmer_intensity(character_index, character_count, progress);
+            (intensity > 0.).then(|| {
+                (
+                    byte_index..byte_index + character.len_utf8(),
+                    HighlightStyle {
+                        color: Some(interpolate_hsla(
+                            rgb(0x85898f).into(),
+                            rgb(0xe3e5e8).into(),
+                            intensity,
+                        )),
+                        ..Default::default()
+                    },
+                )
+            })
+        })
+        .collect()
+}
+
+fn shimmer_intensity(character_index: usize, character_count: usize, progress: f32) -> f32 {
+    if character_count == 0 {
+        return 0.;
+    }
+
+    let character_position = if character_count == 1 {
+        0.5
+    } else {
+        character_index as f32 / (character_count - 1) as f32
+    };
+    let band_center = progress.clamp(0., 1.) * (1. + 2. * TOOL_GROUP_SHIMMER_BAND_WIDTH)
+        - TOOL_GROUP_SHIMMER_BAND_WIDTH;
+    let distance = (character_position - band_center).abs();
+    let intensity = (1. - distance / TOOL_GROUP_SHIMMER_BAND_WIDTH).clamp(0., 1.);
+    intensity * intensity
+}
+
+fn interpolate_hsla(from: Hsla, to: Hsla, amount: f32) -> Hsla {
+    let amount = amount.clamp(0., 1.);
+    Hsla {
+        h: from.h + (to.h - from.h) * amount,
+        s: from.s + (to.s - from.s) * amount,
+        l: from.l + (to.l - from.l) * amount,
+        a: from.a + (to.a - from.a) * amount,
+    }
+}
+
 fn transcript_reveal_animation() -> Animation {
     Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint())
 }
@@ -1850,6 +2109,81 @@ mod tests {
     fn truncation_is_unicode_safe() {
         assert_eq!(truncate("hello", 5), "hello");
         assert_eq!(truncate("héllo world", 5), "héllo…");
+    }
+
+    #[test]
+    fn shimmer_band_moves_across_the_tool_group_heading() {
+        assert_eq!(shimmer_intensity(2, 5, 0.5), 1.);
+        assert_eq!(shimmer_intensity(0, 5, 0.5), 0.);
+        assert_eq!(shimmer_intensity(4, 5, 0.5), 0.);
+    }
+
+    #[test]
+    fn shimmer_highlights_use_unicode_byte_boundaries() {
+        let highlights = shimmer_highlights("a·b", 0.5);
+
+        assert!(highlights.iter().any(|(range, _)| range == &(1..3)));
+        assert!(
+            highlights
+                .iter()
+                .all(|(range, _)| "a·b".is_char_boundary(range.start)
+                    && "a·b".is_char_boundary(range.end))
+        );
+    }
+
+    #[test]
+    fn tool_activity_frame_matches_thinking_orbs_working_20_golden_data() {
+        let frame = tool_activity_frame(0.6);
+
+        assert_eq!(frame.len(), 39);
+        assert!(frame.windows(2).all(|dots| dots[0].z <= dots[1].z));
+        let sums = frame.iter().fold([0.; 6], |mut sums, dot| {
+            for (sum, value) in sums
+                .iter_mut()
+                .zip([dot.x, dot.y, dot.z, dot.radius, dot.white, dot.alpha])
+            {
+                *sum += value;
+            }
+            sums
+        });
+        for (value, expected) in sums
+            .into_iter()
+            .zip([390., 390.000001, 0.000001, 21.27006, 23.31, 19.5])
+        {
+            assert!((value - expected).abs() < 0.0001, "{value} != {expected}");
+        }
+        for (actual, expected) in [
+            (
+                frame.first().expect("frame should contain a first dot"),
+                [11.235898, 9.940794, -7.451958, 0.425401, 0.72, 0.202026],
+            ),
+            (
+                frame.last().expect("frame should contain a last dot"),
+                [9.230714, 10.206142, 7.51188, 1.321364, 0.080613, 1.],
+            ),
+        ] {
+            for (value, expected) in [
+                actual.x,
+                actual.y,
+                actual.z,
+                actual.radius,
+                actual.white,
+                actual.alpha,
+            ]
+            .into_iter()
+            .zip(expected)
+            {
+                assert!((value - expected).abs() < 0.0001, "{value} != {expected}");
+            }
+        }
+    }
+
+    #[test]
+    fn active_turn_keeps_activity_on_its_last_tool_group_between_calls() {
+        assert!(tool_group_shows_activity(true, 2, 3, false));
+        assert!(!tool_group_shows_activity(true, 1, 3, false));
+        assert!(!tool_group_shows_activity(false, 2, 3, false));
+        assert!(tool_group_shows_activity(false, 1, 3, true));
     }
 
     #[test]

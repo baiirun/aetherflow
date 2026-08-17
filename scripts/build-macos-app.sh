@@ -85,6 +85,7 @@ install -m 755 "$repository_root/target/release/aetherflowd" "$helpers_directory
 install -m 644 "$repository_root/assets/macos/AppIcon.icns" "$resources_directory/AppIcon.icns"
 install -m 644 "$repository_root/LICENSE" "$licenses_directory/Aetherflow.txt"
 install -m 644 "$repository_root/vendor/rivet-engine/LICENSE" "$licenses_directory/RivetEngine.txt"
+install -m 644 "$repository_root/vendor/thinking-orbs/LICENSE" "$licenses_directory/ThinkingOrbs.txt"
 sed "s/@VERSION@/$package_version/g" \
     "$repository_root/assets/macos/Info.plist" > "$contents/Info.plist"
 
