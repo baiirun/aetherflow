@@ -44,7 +44,7 @@ const TOOL_ACTIVITY_ORB_SPEED: f64 = 3.9;
 const TOOL_GROUP_SHIMMER_DURATION: Duration = Duration::from_millis(1_600);
 const TOOL_GROUP_SHIMMER_BAND_WIDTH: f32 = 0.24;
 
-gpui::actions!(aetherflow, [NewSession]);
+gpui::actions!(aetherflow, [NewSession, Quit]);
 
 #[derive(Default)]
 struct BottomFollowAnimation {
@@ -1501,9 +1501,6 @@ impl DesktopShell {
 impl Render for DesktopShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .on_action(cx.listener(|shell, _: &NewSession, window, cx| {
-                shell.start_new_session(window, cx);
-            }))
             .size_full()
             .flex()
             .bg(rgba(0x00000000))
@@ -2059,7 +2056,11 @@ fn is_near_bottom(offset_y: Pixels, max_offset: Pixels) -> bool {
 fn main() {
     Application::new().run(|cx: &mut App| {
         gpui_component::init(cx);
-        cx.bind_keys([KeyBinding::new("cmd-n", NewSession, None)]);
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.bind_keys([
+            KeyBinding::new("cmd-n", NewSession, None),
+            KeyBinding::new("cmd-q", Quit, None),
+        ]);
         let theme = gpui_component::Theme::global_mut(cx);
         theme.background = gpui::transparent_black();
         theme.font_family = "Inter Variable".into();
@@ -2076,6 +2077,17 @@ fn main() {
             },
             |window, cx| {
                 let shell = cx.new(|cx| DesktopShell::new(window, cx));
+                let new_session_shell = shell.downgrade();
+                cx.on_action(move |_: &NewSession, cx| {
+                    let Some(window_handle) = cx.active_window() else {
+                        return;
+                    };
+                    let _ = window_handle.update(cx, |_, window, cx| {
+                        let _ = new_session_shell.update(cx, |shell, cx| {
+                            shell.start_new_session(window, cx);
+                        });
+                    });
+                });
                 cx.new(|cx| gpui_component::Root::new(shell, window, cx))
             },
         )
