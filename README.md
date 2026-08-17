@@ -13,9 +13,20 @@ Install the daemon and CLI from this checkout with:
 cargo install --path crates/aetherflow-pi --bins --force
 ```
 
-Run the checks with `cargo test --workspace`. Launch the desktop shell with
-`cargo run -p aetherflow-desktop`. Probe Pi directly without its TUI with
-`af pi state`.
+Run the checks with `cargo test --workspace`. Probe Pi directly without its TUI
+with `af pi state`.
+
+The desktop app connects to an existing daemon or starts `aetherflowd` itself.
+For development, build the daemon beside the desktop binary before launching:
+
+```sh
+cargo build -p aetherflow-pi --bin aetherflowd
+cargo run -p aetherflow-desktop
+```
+
+An application bundle may place the daemon at
+`Aetherflow.app/Contents/Helpers/aetherflowd` or beside the desktop executable.
+Set `AETHERFLOWD_PATH` to use another binary explicitly.
 
 Run the current session lifecycle acceptance test directly from the checkout:
 

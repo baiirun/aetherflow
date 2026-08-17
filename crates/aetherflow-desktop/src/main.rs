@@ -1,10 +1,13 @@
+mod daemon;
 mod transcript;
 
 use aetherflow_pi::{
     AetherflowClient, AetherflowClientOptions, AssistantMessageEvent, CreateSessionOptions,
-    MAX_SESSION_EVENT_PAGE_SIZE, PiEvent, SessionDescriptor, SessionEvent, SessionEventPayload,
+    DEFAULT_SESSION_DIRECTORY_KEY, DEFAULT_SESSION_EVENT_PAGE_SIZE, PiEvent,
+    SESSION_DIRECTORY_ACTOR_NAME, SessionDescriptor, SessionEvent, SessionEventPayload,
 };
 use aetherflow_storage::SessionId;
+use daemon::{DaemonTarget, ManagedDaemon};
 use gpui::{
     Animation, AnimationExt as _, App, Application, Bounds, Context, Div, Entity, KeyBinding,
     Pixels, ScrollHandle, SharedString, Subscription, TitlebarOptions, Window,
@@ -26,9 +29,11 @@ use transcript::{
 };
 
 const SIDEBAR_WIDTH: f32 = 280.;
+const CHAT_FONT_SIZE: f32 = 14.;
 const BOTTOM_FOLLOW_THRESHOLD: f32 = 32.;
 const CONTENT_SHIFT_TIME_CONSTANT: Duration = Duration::from_millis(55);
 const CONTENT_SHIFT_SETTLE_DISTANCE: f32 = 0.5;
+const CONVERSATION_EVENT_PAGE_SIZE: u32 = DEFAULT_SESSION_EVENT_PAGE_SIZE;
 
 gpui::actions!(aetherflow, [NewSession]);
 
@@ -63,9 +68,36 @@ enum PromptUpdate {
     },
 }
 
+enum DaemonStartup {
+    Existing(Vec<SessionDescriptor>),
+    Launched {
+        daemon: ManagedDaemon,
+        sessions: Vec<SessionDescriptor>,
+    },
+}
+
+async fn load_sessions_after_daemon_ready(
+    client: &AetherflowClient,
+    target: &DaemonTarget,
+) -> Result<Vec<SessionDescriptor>, String> {
+    daemon::recover_stalled_actor(
+        target,
+        SESSION_DIRECTORY_ACTOR_NAME,
+        DEFAULT_SESSION_DIRECTORY_KEY,
+    )
+    .await
+    .map_err(|error| format!("{error:#}"))?;
+    client
+        .list_sessions()
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
 struct DesktopShell {
     runtime: Arc<Runtime>,
     client: AetherflowClient,
+    daemon_target: DaemonTarget,
+    managed_daemon: Option<ManagedDaemon>,
     sessions: Vec<SessionDescriptor>,
     selected_session_id: Option<SessionId>,
     creating_new_session: bool,
@@ -99,9 +131,18 @@ impl DesktopShell {
                 }
             },
         );
+        let client_options = desktop_client_options();
+        let daemon_target = DaemonTarget {
+            endpoint: client_options.endpoint.clone(),
+            token: client_options.token.clone(),
+            namespace: client_options.namespace.clone(),
+            pool: client_options.pool.clone(),
+        };
         let mut shell = Self {
             runtime: Arc::new(Runtime::new().expect("failed to start desktop async runtime")),
-            client: AetherflowClient::connect(AetherflowClientOptions::default()),
+            client: AetherflowClient::connect(client_options),
+            daemon_target,
+            managed_daemon: None,
             sessions: Vec::new(),
             selected_session_id: None,
             creating_new_session: false,
@@ -122,8 +163,89 @@ impl DesktopShell {
             action_error: None,
             _subscriptions: vec![input_subscription],
         };
-        shell.load_sessions(cx);
+        shell.connect_daemon(cx);
         shell
+    }
+
+    fn connect_daemon(&mut self, cx: &mut Context<Self>) {
+        self.load_state = SessionLoadState::Loading;
+        let managed_daemon_running = if let Some(daemon) = &mut self.managed_daemon {
+            match daemon.is_running() {
+                Ok(true) => true,
+                Ok(false) => {
+                    self.managed_daemon = None;
+                    false
+                }
+                Err(error) => {
+                    self.load_state = SessionLoadState::Failed(format!("{error:#}"));
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            false
+        };
+
+        let client = self.client.clone();
+        let daemon_target = self.daemon_target.clone();
+        let request = self.runtime.spawn(async move {
+            let runner_snapshot = daemon::runner_snapshot(&daemon_target)
+                .await
+                .map_err(|error| format!("{error:#}"))?;
+            if runner_snapshot.is_ready() {
+                let sessions = load_sessions_after_daemon_ready(&client, &daemon_target).await?;
+                return Ok(DaemonStartup::Existing(sessions));
+            }
+
+            if managed_daemon_running {
+                daemon::wait_for_runner(&daemon_target)
+                    .await
+                    .map_err(|error| format!("{error:#}"))?;
+                let sessions = load_sessions_after_daemon_ready(&client, &daemon_target).await?;
+                return Ok(DaemonStartup::Existing(sessions));
+            }
+
+            let mut daemon = tokio::task::spawn_blocking(daemon::launch)
+                .await
+                .map_err(|error| format!("daemon launch task failed: {error}"))?
+                .map_err(|error| format!("{error:#}"))?;
+            daemon::wait_for_launched_runner(&daemon_target, &mut daemon, runner_snapshot.keys())
+                .await
+                .map_err(|error| format!("{error:#}"))?;
+            let sessions = load_sessions_after_daemon_ready(&client, &daemon_target).await?;
+            Ok(DaemonStartup::Launched { daemon, sessions })
+        });
+
+        cx.spawn(async move |shell, cx| {
+            let result = request
+                .await
+                .map_err(|error| format!("daemon startup task failed: {error}"))
+                .and_then(|result| result);
+            let _ = shell.update(cx, |shell, cx| match result {
+                Ok(startup) => match startup {
+                    DaemonStartup::Existing(sessions) => {
+                        shell.replace_sessions(sessions);
+                        if let Some(session_id) = shell.selected_session_id {
+                            shell.load_conversation(session_id, cx);
+                        }
+                        cx.notify();
+                    }
+                    DaemonStartup::Launched { daemon, sessions } => {
+                        shell.managed_daemon = Some(daemon);
+                        shell.replace_sessions(sessions);
+                        if let Some(session_id) = shell.selected_session_id {
+                            shell.load_conversation(session_id, cx);
+                        }
+                        cx.notify();
+                    }
+                },
+                Err(error) => {
+                    shell.load_state = SessionLoadState::Failed(error);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn load_sessions(&mut self, cx: &mut Context<Self>) {
@@ -217,7 +339,7 @@ impl DesktopShell {
             let mut events = Vec::new();
             loop {
                 let page = client
-                    .session_events(session_id, after_sequence, MAX_SESSION_EVENT_PAGE_SIZE)
+                    .session_events(session_id, after_sequence, CONVERSATION_EVENT_PAGE_SIZE)
                     .await
                     .map_err(|error| format!("Could not load session messages: {error:#}"))?;
                 let page_len = page.len();
@@ -225,7 +347,7 @@ impl DesktopShell {
                     after_sequence = event.sequence;
                 }
                 events.extend(page);
-                if page_len < MAX_SESSION_EVENT_PAGE_SIZE as usize {
+                if page_len < CONVERSATION_EVENT_PAGE_SIZE as usize {
                     break;
                 }
             }
@@ -746,7 +868,7 @@ impl DesktopShell {
                                 .text_color(rgb(0xe7eaf0))
                                 .child("Retry")
                                 .on_click(cx.listener(|shell, _, _, cx| {
-                                    shell.load_sessions(cx);
+                                    shell.connect_daemon(cx);
                                     cx.notify();
                                 })),
                         ),
@@ -897,7 +1019,8 @@ impl DesktopShell {
             .px_8()
             .py_6()
             .flex()
-            .flex_col();
+            .flex_col()
+            .text_size(px(CHAT_FONT_SIZE));
 
         if self.loading_conversations.contains(&session_id) {
             return conversation
@@ -1327,6 +1450,7 @@ impl DesktopShell {
                     .bg(rgba(0x1d2025f2))
                     .child(
                         Input::new(&self.composer)
+                            .text_size(px(CHAT_FONT_SIZE))
                             .appearance(false)
                             .bordered(false)
                             .focus_bordered(false)
@@ -1368,6 +1492,23 @@ impl Render for DesktopShell {
 
 fn short_id(id: SessionId) -> String {
     short_uuid(&id.to_string())
+}
+
+fn desktop_client_options() -> AetherflowClientOptions {
+    let mut options = AetherflowClientOptions::default();
+    if let Ok(endpoint) = std::env::var("RIVET_ENDPOINT") {
+        options.endpoint = endpoint;
+    }
+    if let Ok(token) = std::env::var("RIVET_TOKEN") {
+        options.token = token;
+    }
+    if let Ok(namespace) = std::env::var("RIVET_NAMESPACE") {
+        options.namespace = namespace;
+    }
+    if let Ok(pool) = std::env::var("RIVET_POOL_NAME") {
+        options.pool = pool;
+    }
+    options
 }
 
 fn session_title(session: &SessionDescriptor) -> String {
@@ -1522,6 +1663,7 @@ fn truncate_lines(value: &str, max_lines: usize) -> String {
 fn conversation_markdown_style(cx: &App) -> TextViewStyle {
     let theme = gpui_component::Theme::global(cx);
     let mut style = TextViewStyle::default().paragraph_gap(gpui::rems(0.75));
+    style.heading_base_font_size = px(CHAT_FONT_SIZE);
     style.highlight_theme = theme.highlight_theme.clone();
     style.is_dark = theme.is_dark();
     style
@@ -1957,6 +2099,14 @@ mod tests {
         assert_eq!(
             assistant_markdown_id(session_id, 2, 1, false),
             assistant_markdown_id(session_id, 2, 80, false),
+        );
+    }
+
+    #[test]
+    fn conversation_history_uses_transport_safe_event_pages() {
+        assert_eq!(
+            CONVERSATION_EVENT_PAGE_SIZE,
+            DEFAULT_SESSION_EVENT_PAGE_SIZE
         );
     }
 }
