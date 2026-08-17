@@ -1,13 +1,17 @@
 use crate::{
-    GetSessionState, PiEvent, PiOptions, ReadSessionEvents, RpcCommand, SESSION_ACTOR_NAME,
+    GetSessionState, PiEvent, PiOptions, ReadSessionEvents, SESSION_ACTOR_NAME,
     SESSION_DIRECTORY_ACTOR_NAME, SendSessionCommand, SessionActor, SessionActorConfig,
-    SessionActorState, SessionDescriptor, SessionDirectoryActor, SessionEvent, SessionEventPayload,
+    SessionActorState, SessionCommand, SessionDescriptor, SessionDirectoryActor, SessionEvent,
+    SessionEventPayload,
+    attachment_store::{hydrate_pi_message, referenced_attachments},
     session_directory::{
         DEFAULT_SESSION_DIRECTORY_KEY, ListSessions, RecordSessionActivity, RegisterSession,
         SetSessionArchived,
     },
 };
-use aetherflow_storage::{Agent, AgentId, Session, SessionAssociation, SessionId};
+use aetherflow_storage::{
+    Agent, AgentId, AttachmentId, AttachmentRef, Session, SessionAssociation, SessionId,
+};
 use anyhow::{Context, Result, bail};
 use rivetkit::{
     TypedActorConnection, TypedClientExt,
@@ -22,14 +26,18 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:6420";
+pub const DEFAULT_ATTACHMENT_ADDRESS: &str = "127.0.0.1:6422";
+pub const DEFAULT_ATTACHMENT_ENDPOINT: &str = "http://127.0.0.1:6422";
 pub const DEFAULT_TOKEN: &str = "dev";
 pub const DEFAULT_NAMESPACE: &str = "default";
 pub const DEFAULT_POOL: &str = "rivetkit-rust";
 const SESSION_LIST_TIMEOUT: Duration = Duration::from_secs(10);
+const ATTACHMENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug)]
 pub struct AetherflowClientOptions {
     pub endpoint: String,
+    pub attachment_endpoint: String,
     pub token: String,
     pub namespace: String,
     pub pool: String,
@@ -40,6 +48,7 @@ impl Default for AetherflowClientOptions {
     fn default() -> Self {
         Self {
             endpoint: DEFAULT_ENDPOINT.to_owned(),
+            attachment_endpoint: DEFAULT_ATTACHMENT_ENDPOINT.to_owned(),
             token: DEFAULT_TOKEN.to_owned(),
             namespace: DEFAULT_NAMESPACE.to_owned(),
             pool: DEFAULT_POOL.to_owned(),
@@ -74,6 +83,8 @@ impl Default for CreateSessionOptions {
 #[derive(Clone)]
 pub struct AetherflowClient {
     client: Client,
+    http: reqwest::Client,
+    attachment_endpoint: String,
     session_directory_key: String,
 }
 
@@ -86,6 +97,8 @@ impl AetherflowClient {
                     .namespace(options.namespace)
                     .pool_name(options.pool),
             ),
+            http: reqwest::Client::new(),
+            attachment_endpoint: options.attachment_endpoint,
             session_directory_key: options.session_directory_key,
         }
     }
@@ -93,6 +106,8 @@ impl AetherflowClient {
     pub fn from_rivet_client(client: Client) -> Self {
         Self {
             client,
+            http: reqwest::Client::new(),
+            attachment_endpoint: DEFAULT_ATTACHMENT_ENDPOINT.to_owned(),
             session_directory_key: DEFAULT_SESSION_DIRECTORY_KEY.to_owned(),
         }
     }
@@ -116,7 +131,6 @@ impl AetherflowClient {
         let title = initial_prompt.as_deref().and_then(session_title);
         let mut pi = PiOptions::persistent(cwd, session_directory, session.id);
         pi.executable = executable;
-
         self.client
             .get_or_create_typed::<SessionActor>(
                 SESSION_ACTOR_NAME,
@@ -143,7 +157,7 @@ impl AetherflowClient {
         if let Some(prompt) = initial_prompt {
             self.session_handle(session.id)
                 .send(SendSessionCommand {
-                    command: RpcCommand::prompt("prompt", prompt),
+                    command: SessionCommand::prompt("prompt", prompt, Vec::new()),
                 })
                 .await
                 .with_context(|| format!("prompt new session {}", session.id))?;
@@ -249,11 +263,23 @@ impl AetherflowClient {
         session_id: SessionId,
         message: impl Into<String>,
     ) -> Result<SessionEventStream> {
+        self.prompt_session_with_attachments(session_id, message, Vec::new())
+            .await
+    }
+
+    pub async fn prompt_session_with_attachments(
+        &self,
+        session_id: SessionId,
+        message: impl Into<String>,
+        attachments: Vec<AttachmentRef>,
+    ) -> Result<SessionEventStream> {
         let message = message.into();
+        let title =
+            session_title(&message).or_else(|| (!attachments.is_empty()).then(|| "Image".into()));
         self.session_directory()
             .send(RecordSessionActivity {
                 session_id,
-                title: session_title(&message),
+                title,
                 updated_at_ms: current_time_ms()?,
             })
             .await
@@ -269,7 +295,7 @@ impl AetherflowClient {
 
         connection
             .send(SendSessionCommand {
-                command: RpcCommand::prompt("prompt", message),
+                command: SessionCommand::prompt("prompt", message, attachments),
             })
             .await
             .with_context(|| format!("prompt session {session_id}"))?;
@@ -283,10 +309,100 @@ impl AetherflowClient {
         })
     }
 
+    pub async fn upload_attachment(
+        &self,
+        media_type: &str,
+        bytes: Vec<u8>,
+    ) -> Result<AttachmentRef> {
+        let response = self
+            .http
+            .post(format!(
+                "{}/attachments",
+                self.attachment_endpoint.trim_end_matches('/')
+            ))
+            .header(reqwest::header::CONTENT_TYPE, media_type)
+            .body(bytes)
+            .timeout(ATTACHMENT_REQUEST_TIMEOUT)
+            .send()
+            .await
+            .context("upload attachment to Aetherflow daemon")?;
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .context("read attachment upload response")?;
+        if !status.is_success() {
+            bail!(
+                "attachment upload failed with {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        serde_json::from_slice(&body).context("decode attachment upload response")
+    }
+
+    pub async fn download_attachment(&self, id: &AttachmentId) -> Result<Vec<u8>> {
+        let response = self
+            .http
+            .get(format!(
+                "{}/attachments/{id}",
+                self.attachment_endpoint.trim_end_matches('/')
+            ))
+            .timeout(ATTACHMENT_REQUEST_TIMEOUT)
+            .send()
+            .await
+            .with_context(|| format!("download attachment {id}"))?;
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .with_context(|| format!("read attachment {id}"))?;
+        if !status.is_success() {
+            bail!(
+                "attachment {id} download failed with {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        Ok(body.to_vec())
+    }
+
+    pub async fn hydrate_event_attachments(&self, event: &mut SessionEvent) -> Result<()> {
+        self.hydrate_events_attachments(std::slice::from_mut(event))
+            .await
+    }
+
+    pub async fn hydrate_events_attachments(&self, events: &mut [SessionEvent]) -> Result<()> {
+        let mut references = std::collections::HashMap::new();
+        for event in events.iter() {
+            let SessionEventPayload::Pi { message } = &event.payload else {
+                continue;
+            };
+            for attachment in referenced_attachments(message)? {
+                references.insert(attachment.id.clone(), attachment);
+            }
+        }
+        let mut attachments = std::collections::HashMap::new();
+        for attachment in references.into_values() {
+            let bytes = self.download_attachment(&attachment.id).await?;
+            if u64::try_from(bytes.len()).ok() != Some(attachment.byte_len) {
+                bail!(
+                    "attachment {} download length does not match event",
+                    attachment.id
+                );
+            }
+            attachments.insert(attachment.id, bytes);
+        }
+        for event in events {
+            if let SessionEventPayload::Pi { message } = &mut event.payload {
+                hydrate_pi_message(message, &attachments)?;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn cancel_turn(&self, session_id: SessionId) -> Result<()> {
         self.session_handle(session_id)
             .send(SendSessionCommand {
-                command: RpcCommand::abort("abort"),
+                command: SessionCommand::abort("abort"),
             })
             .await
             .with_context(|| format!("cancel active turn for session {session_id}"))
@@ -468,6 +584,16 @@ mod tests {
     use tempfile::TempDir;
     use tokio::task::JoinHandle;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn attachment_transport_does_not_reuse_a_rivet_engine_port() {
+        let port = url::Url::parse(DEFAULT_ATTACHMENT_ENDPOINT)
+            .expect("valid attachment endpoint")
+            .port_or_known_default()
+            .expect("attachment endpoint port");
+
+        assert!(![6420, 6421].contains(&port));
+    }
 
     #[test]
     fn title_uses_a_short_prefix_of_the_first_prompt() {

@@ -58,6 +58,71 @@ domain_id!(ChannelId);
 domain_id!(AgentId);
 domain_id!(SessionId);
 
+/// Content-addressed identity for a stored attachment.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct AttachmentId(String);
+
+impl AttachmentId {
+    pub fn from_sha256(digest: [u8; 32]) -> Self {
+        Self(hex::encode(digest))
+    }
+}
+
+impl fmt::Display for AttachmentId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl FromStr for AttachmentId {
+    type Err = ParseAttachmentIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(ParseAttachmentIdError);
+        }
+        Ok(Self(value.to_ascii_lowercase()))
+    }
+}
+
+impl Serialize for AttachmentId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for AttachmentId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(D::Error::custom)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ParseAttachmentIdError;
+
+impl fmt::Display for ParseAttachmentIdError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("attachment ID must be a 64-character SHA-256 digest")
+    }
+}
+
+impl std::error::Error for ParseAttachmentIdError {}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AttachmentRef {
+    pub id: AttachmentId,
+    pub media_type: String,
+    pub byte_len: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Channel {
     pub id: ChannelId,
@@ -182,5 +247,15 @@ mod tests {
         let session_id = SessionId::new();
 
         assert_eq!(session_id.to_string().parse(), Ok(session_id));
+    }
+
+    #[test]
+    fn attachment_ids_reject_values_that_could_escape_the_store() {
+        assert!("../attachment".parse::<AttachmentId>().is_err());
+        assert!("g".repeat(64).parse::<AttachmentId>().is_err());
+
+        let id = AttachmentId::from_sha256([0xab; 32]);
+        assert_eq!(id.to_string(), "ab".repeat(32));
+        assert_eq!(id.to_string().parse(), Ok(id));
     }
 }

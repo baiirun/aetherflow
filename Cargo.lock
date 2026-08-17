@@ -27,10 +27,13 @@ dependencies = [
  "aetherflow-pi",
  "aetherflow-storage",
  "anyhow",
+ "base64",
  "gpui",
  "gpui-component",
+ "image",
  "reqwest",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -41,10 +44,14 @@ dependencies = [
  "aetherflow-storage",
  "anyhow",
  "async-trait",
+ "axum",
+ "base64",
  "clap",
+ "reqwest",
  "rivetkit",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -58,6 +65,7 @@ dependencies = [
 name = "aetherflow-storage"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "serde",
  "serde_json",
  "uuid",

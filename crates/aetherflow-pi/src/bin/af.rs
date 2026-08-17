@@ -1,6 +1,6 @@
 use aetherflow_pi::{
-    AetherflowClient, AetherflowClientOptions, CreateSessionOptions, DEFAULT_ENDPOINT,
-    DEFAULT_NAMESPACE, DEFAULT_POOL, DEFAULT_SESSION_DIRECTORY_KEY,
+    AetherflowClient, AetherflowClientOptions, CreateSessionOptions, DEFAULT_ATTACHMENT_ENDPOINT,
+    DEFAULT_ENDPOINT, DEFAULT_NAMESPACE, DEFAULT_POOL, DEFAULT_SESSION_DIRECTORY_KEY,
     DEFAULT_SESSION_EVENT_PAGE_SIZE, DEFAULT_TOKEN, MAX_SESSION_EVENT_PAGE_SIZE, PiEvent,
     PiMessage, PiOptions, PiRpc, RpcCommand, SessionEventStream,
 };
@@ -15,6 +15,9 @@ struct Args {
     /// Rivet Engine endpoint used by daemon-backed session commands.
     #[arg(long, default_value = DEFAULT_ENDPOINT)]
     endpoint: String,
+    /// Aetherflow daemon endpoint used for attachment upload and download.
+    #[arg(long, default_value = DEFAULT_ATTACHMENT_ENDPOINT)]
+    attachment_endpoint: String,
     #[arg(long, default_value = DEFAULT_TOKEN)]
     token: String,
     #[arg(long, default_value = DEFAULT_NAMESPACE)]
@@ -117,6 +120,7 @@ async fn main() -> Result<()> {
         Command::Session { command } => {
             let client = AetherflowClient::connect(AetherflowClientOptions {
                 endpoint: args.endpoint,
+                attachment_endpoint: args.attachment_endpoint,
                 token: args.token,
                 namespace: args.namespace,
                 pool: args.pool,

@@ -9,24 +9,27 @@ use aetherflow_pi::{
 use aetherflow_storage::SessionId;
 use daemon::{DaemonTarget, ManagedDaemon};
 use gpui::{
-    Animation, AnimationExt as _, App, Application, Bounds, Context, Div, Entity, HighlightStyle,
-    Hsla, KeyBinding, Pixels, ScrollHandle, SharedString, StyledText, Subscription,
-    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div,
-    ease_out_quint, point, prelude::*, px, rgb, rgba, size,
+    Animation, AnimationExt as _, App, Application, Bounds, Context, Div, Entity, ExternalPaths,
+    HighlightStyle, Hsla, KeyBinding, ObjectFit, Pixels, ScrollHandle, SharedString,
+    StyledImage as _, StyledText, Subscription, TitlebarOptions, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowOptions, div, ease_out_quint, img, point,
+    prelude::*, px, rgb, rgba, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::text::{TextView, TextViewStyle};
 use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
+    io::Cursor,
     ops::Range,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::runtime::Runtime;
 use transcript::{
-    ConversationItem, ConversationMessage, ConversationRole, ToolCallView, ToolGroup, ToolStatus,
-    append_assistant_delta, apply_tool_event, conversation_from_events,
+    ConversationImage, ConversationItem, ConversationMessage, ConversationRole, ToolCallView,
+    ToolGroup, ToolStatus, append_assistant_delta, apply_tool_event, conversation_from_events,
 };
 
 const SIDEBAR_WIDTH: f32 = 280.;
@@ -43,6 +46,11 @@ const TOOL_ACTIVITY_ORB_DURATION: Duration = Duration::from_secs(600);
 const TOOL_ACTIVITY_ORB_SPEED: f64 = 3.9;
 const TOOL_GROUP_SHIMMER_DURATION: Duration = Duration::from_millis(1_600);
 const TOOL_GROUP_SHIMMER_BAND_WIDTH: f32 = 0.24;
+const MAX_PENDING_IMAGES: usize = 4;
+const MAX_IMAGE_FILE_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_PROCESSED_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TOTAL_IMAGE_BYTES: usize = 6 * 1024 * 1024;
+const MAX_IMAGE_DIMENSION: u32 = 2_000;
 
 gpui::actions!(aetherflow, [NewSession, Quit]);
 
@@ -85,6 +93,13 @@ enum DaemonStartup {
     },
 }
 
+#[derive(Clone)]
+struct PendingImage {
+    id: u64,
+    path: PathBuf,
+    image: ConversationImage,
+}
+
 async fn load_sessions_after_daemon_ready(
     client: &AetherflowClient,
     target: &DaemonTarget,
@@ -120,6 +135,8 @@ struct DesktopShell {
     conversation_errors: HashMap<SessionId, String>,
     new_session_messages: Vec<ConversationItem>,
     composer: Entity<InputState>,
+    pending_images: Vec<PendingImage>,
+    next_pending_image_id: u64,
     active_turn_session_ids: HashSet<SessionId>,
     is_creating_session: bool,
     cancelling_turn_session_ids: HashSet<SessionId>,
@@ -143,6 +160,7 @@ impl DesktopShell {
         let client_options = desktop_client_options();
         let daemon_target = DaemonTarget {
             endpoint: client_options.endpoint.clone(),
+            attachment_endpoint: client_options.attachment_endpoint.clone(),
             token: client_options.token.clone(),
             namespace: client_options.namespace.clone(),
             pool: client_options.pool.clone(),
@@ -165,6 +183,8 @@ impl DesktopShell {
             conversation_errors: HashMap::new(),
             new_session_messages: Vec::new(),
             composer,
+            pending_images: Vec::new(),
+            next_pending_image_id: 0,
             active_turn_session_ids: HashSet::new(),
             is_creating_session: false,
             cancelling_turn_session_ids: HashSet::new(),
@@ -201,7 +221,11 @@ impl DesktopShell {
             let runner_snapshot = daemon::runner_snapshot(&daemon_target)
                 .await
                 .map_err(|error| format!("{error:#}"))?;
-            if runner_snapshot.is_ready() {
+            if runner_snapshot.is_ready()
+                && daemon::attachment_is_ready(&daemon_target)
+                    .await
+                    .map_err(|error| format!("{error:#}"))?
+            {
                 let sessions = load_sessions_after_daemon_ready(&client, &daemon_target).await?;
                 return Ok(DaemonStartup::Existing(sessions));
             }
@@ -316,11 +340,54 @@ impl DesktopShell {
         self.creating_new_session = true;
         self.selected_session_id = None;
         self.new_session_messages.clear();
+        self.pending_images.clear();
         self.action_error = None;
         self.composer.update(cx, |input, cx| {
             input.set_value("", window, cx);
             input.focus(window, cx);
         });
+        cx.notify();
+    }
+
+    fn attach_dropped_images(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let mut errors = Vec::new();
+        for path in paths {
+            if self.pending_images.len() >= MAX_PENDING_IMAGES {
+                errors.push(format!("You can attach up to {MAX_PENDING_IMAGES} images."));
+                break;
+            }
+            if self.pending_images.iter().any(|image| image.path == *path) {
+                continue;
+            }
+            match load_conversation_image(path) {
+                Ok(image) => {
+                    let attached_bytes = self
+                        .pending_images
+                        .iter()
+                        .map(|pending| pending.image.data().len())
+                        .sum::<usize>();
+                    if attached_bytes.saturating_add(image.data().len()) > MAX_TOTAL_IMAGE_BYTES {
+                        errors.push("Attachments must total no more than 6 MB.".to_owned());
+                        break;
+                    }
+                    let id = self.next_pending_image_id;
+                    self.next_pending_image_id = self.next_pending_image_id.wrapping_add(1);
+                    self.pending_images.push(PendingImage {
+                        id,
+                        path: path.clone(),
+                        image,
+                    });
+                }
+                Err(error) => errors.push(error),
+            }
+        }
+        self.action_error = (!errors.is_empty()).then(|| errors.join(" "));
+        cx.notify();
+    }
+
+    fn remove_pending_image(&mut self, image_id: u64, cx: &mut Context<Self>) {
+        self.pending_images.retain(|image| image.id != image_id);
+        self.action_error = None;
         cx.notify();
     }
 
@@ -360,6 +427,10 @@ impl DesktopShell {
                     break;
                 }
             }
+            client
+                .hydrate_events_attachments(&mut events)
+                .await
+                .map_err(|error| format!("Could not load session attachments: {error:#}"))?;
             Ok::<_, String>(conversation_from_events(&events))
         });
 
@@ -496,9 +567,18 @@ impl DesktopShell {
         }
 
         let prompt = self.composer.read(cx).value().trim().to_owned();
-        if prompt.is_empty() {
+        let conversation_images = self
+            .pending_images
+            .iter()
+            .map(|pending| pending.image.clone())
+            .collect::<Vec<_>>();
+        if prompt.is_empty() && conversation_images.is_empty() {
             return;
         }
+        let attachment_uploads = conversation_images
+            .iter()
+            .map(|image| (image.mime_type.clone(), image.data().to_vec()))
+            .collect::<Vec<_>>();
 
         let create_new = self.creating_new_session;
         let session_id = if create_new {
@@ -510,10 +590,12 @@ impl DesktopShell {
             ConversationItem::Message(ConversationMessage {
                 role: ConversationRole::User,
                 text: prompt.clone(),
+                images: conversation_images,
             }),
             ConversationItem::Message(ConversationMessage {
                 role: ConversationRole::Assistant,
                 text: String::new(),
+                images: Vec::new(),
             }),
         ];
         if let Some(session_id) = session_id {
@@ -531,6 +613,7 @@ impl DesktopShell {
 
         self.composer
             .update(cx, |input, cx| input.set_value("", window, cx));
+        self.pending_images.clear();
         if let Some(session_id) = session_id {
             self.active_turn_session_ids.insert(session_id);
             self.cancelling_turn_session_ids.remove(&session_id);
@@ -542,6 +625,19 @@ impl DesktopShell {
         let client = self.client.clone();
         let (updates, mut update_rx) = tokio::sync::mpsc::unbounded_channel();
         self.runtime.spawn(async move {
+            let mut attachments = Vec::with_capacity(attachment_uploads.len());
+            for (media_type, bytes) in attachment_uploads {
+                match client.upload_attachment(&media_type, bytes).await {
+                    Ok(attachment) => attachments.push(attachment),
+                    Err(error) => {
+                        let _ = updates.send(PromptUpdate::Failed {
+                            session_id,
+                            error: format!("Could not upload attachment: {error:#}"),
+                        });
+                        return;
+                    }
+                }
+            }
             let session_id = match session_id {
                 Some(session_id) => session_id,
                 None => match client.create_session(CreateSessionOptions::default()).await {
@@ -559,7 +655,10 @@ impl DesktopShell {
                 },
             };
 
-            let mut stream = match client.prompt_session(session_id, prompt).await {
+            let mut stream = match client
+                .prompt_session_with_attachments(session_id, prompt, attachments)
+                .await
+            {
                 Ok(stream) => stream,
                 Err(error) => {
                     let _ = updates.send(PromptUpdate::Failed {
@@ -1079,8 +1178,9 @@ impl DesktopShell {
         for (index, item) in messages.iter().enumerate() {
             transcript = match item {
                 ConversationItem::Message(message) => {
-                    let is_empty_assistant =
-                        message.role == ConversationRole::Assistant && message.text.is_empty();
+                    let is_empty_assistant = message.role == ConversationRole::Assistant
+                        && message.text.is_empty()
+                        && message.images.is_empty();
                     if !should_render_conversation_item(
                         item,
                         index,
@@ -1102,19 +1202,30 @@ impl DesktopShell {
                                         .max_w(px(640.))
                                         .px_4()
                                         .py_3()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
                                         .rounded_xl()
                                         .bg(rgb(0x25282d))
-                                        .child(
-                                            TextView::markdown(
-                                                ("user-markdown", index),
-                                                message.text.clone(),
-                                                window,
-                                                cx,
+                                        .when(!message.images.is_empty(), |bubble| {
+                                            bubble.child(render_conversation_images(
+                                                &message.images,
+                                                format!("user-{session_id}-{index}"),
+                                            ))
+                                        })
+                                        .when(!message.text.is_empty(), |bubble| {
+                                            bubble.child(
+                                                TextView::markdown(
+                                                    ("user-markdown", index),
+                                                    message.text.clone(),
+                                                    window,
+                                                    cx,
+                                                )
+                                                .style(conversation_markdown_style(cx))
+                                                .selectable(true)
+                                                .w_full(),
                                             )
-                                            .style(conversation_markdown_style(cx))
-                                            .selectable(true)
-                                            .w_full(),
-                                        ),
+                                        }),
                                 ),
                         ),
                         ConversationRole::Assistant => {
@@ -1133,18 +1244,31 @@ impl DesktopShell {
                             } else {
                                 let is_live_tail = session_has_active_turn
                                     && index == messages.len().saturating_sub(1);
-                                render_assistant_markdown(
-                                    session_id,
-                                    index,
-                                    message,
-                                    is_live_tail,
-                                    self.previous_stream_texts
-                                        .get(&session_id)
-                                        .filter(|_| is_live_tail)
-                                        .map(String::as_str),
-                                    window,
-                                    cx,
-                                )
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .when(!message.images.is_empty(), |content| {
+                                        content.child(render_conversation_images(
+                                            &message.images,
+                                            format!("assistant-{session_id}-{index}"),
+                                        ))
+                                    })
+                                    .when(!message.text.is_empty(), |content| {
+                                        content.child(render_assistant_markdown(
+                                            session_id,
+                                            index,
+                                            message,
+                                            is_live_tail,
+                                            self.previous_stream_texts
+                                                .get(&session_id)
+                                                .filter(|_| is_live_tail)
+                                                .map(String::as_str),
+                                            window,
+                                            cx,
+                                        ))
+                                    })
+                                    .into_any_element()
                             };
                             transcript.child(
                                 div()
@@ -1396,6 +1520,48 @@ impl DesktopShell {
             .into_any_element()
     }
 
+    fn render_pending_images(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .w_full()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .children(self.pending_images.iter().map(|pending| {
+                let image_id = pending.id;
+                div()
+                    .id(("pending-image", image_id as usize))
+                    .relative()
+                    .size(px(48.))
+                    .overflow_hidden()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(0x3a3e45))
+                    .bg(rgb(0x17191d))
+                    .child(render_image(&pending.image))
+                    .child(
+                        div()
+                            .id(("remove-pending-image", image_id as usize))
+                            .absolute()
+                            .top(px(3.))
+                            .right(px(3.))
+                            .size(px(18.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(rgba(0x111318dd))
+                            .text_xs()
+                            .text_color(rgb(0xd6d7d9))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(0x2d3036)))
+                            .child("×")
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                shell.remove_pending_image(image_id, cx);
+                            })),
+                    )
+            }))
+    }
+
     fn render_composer(&self, cx: &mut Context<Self>) -> Div {
         let is_sending = self.composer_is_sending();
         let disabled = is_sending
@@ -1462,26 +1628,43 @@ impl DesktopShell {
                     .w_full()
                     .max_w(px(760.))
                     .mx_auto()
-                    .h(px(52.))
-                    .pl_3()
-                    .pr_2()
+                    .min_h(px(52.))
+                    .p_2()
                     .flex()
-                    .items_center()
+                    .flex_col()
                     .gap_2()
                     .rounded_xl()
                     .border_1()
                     .border_color(rgb(0x30343a))
                     .bg(rgba(0x1d2025f2))
+                    .drag_over::<ExternalPaths>(|style, _, _, _| {
+                        style.border_color(rgb(0x8f96ff)).bg(rgba(0x252a3bf2))
+                    })
+                    .on_drop(cx.listener(|shell, paths: &ExternalPaths, _, cx| {
+                        shell.attach_dropped_images(paths.paths(), cx);
+                    }))
+                    .when(!self.pending_images.is_empty(), |composer| {
+                        composer.child(self.render_pending_images(cx))
+                    })
                     .child(
-                        Input::new(&self.composer)
-                            .text_size(px(CHAT_FONT_SIZE))
-                            .appearance(false)
-                            .bordered(false)
-                            .focus_bordered(false)
-                            .disabled(disabled)
-                            .flex_1(),
-                    )
-                    .child(action),
+                        div()
+                            .w_full()
+                            .h(px(36.))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .pl_1()
+                            .child(
+                                Input::new(&self.composer)
+                                    .text_size(px(CHAT_FONT_SIZE))
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .focus_bordered(false)
+                                    .disabled(disabled)
+                                    .flex_1(),
+                            )
+                            .child(action),
+                    ),
             )
             .when_some(self.action_error.clone(), |composer, error| {
                 composer.child(
@@ -1519,6 +1702,9 @@ fn desktop_client_options() -> AetherflowClientOptions {
     let mut options = AetherflowClientOptions::default();
     if let Ok(endpoint) = std::env::var("RIVET_ENDPOINT") {
         options.endpoint = endpoint;
+    }
+    if let Ok(endpoint) = std::env::var("AETHERFLOW_ATTACHMENT_ENDPOINT") {
+        options.attachment_endpoint = endpoint;
     }
     if let Ok(token) = std::env::var("RIVET_TOKEN") {
         options.token = token;
@@ -1618,7 +1804,8 @@ fn should_render_conversation_item(
         ConversationItem::Message(ConversationMessage {
             role: ConversationRole::Assistant,
             text,
-        }) if text.is_empty()
+            images,
+        }) if text.is_empty() && images.is_empty()
     );
     !is_empty_assistant || (session_has_active_turn && index.checked_add(1) == Some(item_count))
 }
@@ -1679,6 +1866,97 @@ fn truncate_lines(value: &str, max_lines: usize) -> String {
     } else {
         format!("{visible}\n… {hidden} more lines")
     }
+}
+
+fn load_conversation_image(path: &Path) -> Result<ConversationImage, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("{} is not an image file.", path.display()));
+    }
+    if metadata.len() > MAX_IMAGE_FILE_BYTES {
+        return Err(format!(
+            "{} is larger than 25 MB.",
+            path.file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+        ));
+    }
+
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    let format = image::guess_format(&bytes)
+        .map_err(|_| format!("{} is not a supported image.", path.display()))?;
+    let mime_type = match format {
+        image::ImageFormat::Png => "image/png",
+        image::ImageFormat::Jpeg => "image/jpeg",
+        image::ImageFormat::Gif => "image/gif",
+        image::ImageFormat::WebP => "image/webp",
+        _ => return Err(format!("{} is not a supported image.", path.display())),
+    };
+    let decoded = image::load_from_memory_with_format(&bytes, format)
+        .map_err(|error| format!("Could not decode {}: {error}", path.display()))?;
+    let (data, mime_type) =
+        if decoded.width() > MAX_IMAGE_DIMENSION || decoded.height() > MAX_IMAGE_DIMENSION {
+            let resized = decoded.thumbnail(MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION);
+            let output_format = if format == image::ImageFormat::Jpeg {
+                image::ImageFormat::Jpeg
+            } else {
+                image::ImageFormat::Png
+            };
+            let mut encoded = Cursor::new(Vec::new());
+            resized
+                .write_to(&mut encoded, output_format)
+                .map_err(|error| format!("Could not resize {}: {error}", path.display()))?;
+            (
+                encoded.into_inner(),
+                if output_format == image::ImageFormat::Jpeg {
+                    "image/jpeg"
+                } else {
+                    "image/png"
+                },
+            )
+        } else {
+            (bytes, mime_type)
+        };
+    if data.len() > MAX_PROCESSED_IMAGE_BYTES {
+        return Err(format!(
+            "{} is still larger than 8 MB after processing.",
+            path.file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+        ));
+    }
+
+    ConversationImage::new(mime_type, data)
+        .ok_or_else(|| format!("{} is not a supported image.", path.display()))
+}
+
+fn render_image(image: &ConversationImage) -> gpui::AnyElement {
+    img(image.image.clone())
+        .w_full()
+        .h_full()
+        .object_fit(ObjectFit::Cover)
+        .into_any_element()
+}
+
+fn render_conversation_images(images: &[ConversationImage], key: String) -> gpui::AnyElement {
+    div()
+        .id(SharedString::from(format!("conversation-images-{key}")))
+        .flex()
+        .flex_wrap()
+        .gap_2()
+        .children(images.iter().enumerate().map(|(index, image)| {
+            div()
+                .id((SharedString::from(key.clone()), index))
+                .w(px(180.))
+                .h(px(128.))
+                .overflow_hidden()
+                .rounded_lg()
+                .bg(rgb(0x17191d))
+                .child(render_image(image))
+        }))
+        .into_any_element()
 }
 
 fn conversation_markdown_style(cx: &App) -> TextViewStyle {
@@ -2144,6 +2422,20 @@ mod tests {
     }
 
     #[test]
+    fn dropped_images_are_validated_from_their_bytes() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let image_path = directory.path().join("screenshot.png");
+        image::DynamicImage::new_rgba8(2, 2)
+            .save_with_format(&image_path, image::ImageFormat::Png)
+            .expect("write test image");
+
+        let image = load_conversation_image(&image_path).expect("valid dropped image");
+
+        assert_eq!(image.mime_type, "image/png");
+        assert!(!image.data().is_empty());
+    }
+
+    #[test]
     fn tool_activity_frame_matches_thinking_orbs_working_20_golden_data() {
         let frame = tool_activity_frame(0.6);
 
@@ -2252,6 +2544,7 @@ mod tests {
         let mut messages = vec![ConversationItem::Message(ConversationMessage {
             role: ConversationRole::Assistant,
             text: "Hello".to_owned(),
+            images: Vec::new(),
         })];
 
         append_assistant_delta(&mut messages, ", world");
@@ -2273,6 +2566,7 @@ mod tests {
             vec![ConversationItem::Message(ConversationMessage {
                 role: ConversationRole::Assistant,
                 text: "Hello".to_owned(),
+                images: Vec::new(),
             })]
         );
     }
@@ -2283,10 +2577,12 @@ mod tests {
             ConversationItem::Message(ConversationMessage {
                 role: ConversationRole::Assistant,
                 text: "First response.".to_owned(),
+                images: Vec::new(),
             }),
             ConversationItem::Message(ConversationMessage {
                 role: ConversationRole::User,
                 text: "Continue.".to_owned(),
+                images: Vec::new(),
             }),
         ];
 
@@ -2310,18 +2606,22 @@ mod tests {
             ConversationItem::Message(ConversationMessage {
                 role: ConversationRole::User,
                 text: "First turn".to_owned(),
+                images: Vec::new(),
             }),
             ConversationItem::Message(ConversationMessage {
                 role: ConversationRole::Assistant,
                 text: String::new(),
+                images: Vec::new(),
             }),
             ConversationItem::Message(ConversationMessage {
                 role: ConversationRole::User,
                 text: "Try again".to_owned(),
+                images: Vec::new(),
             }),
             ConversationItem::Message(ConversationMessage {
                 role: ConversationRole::Assistant,
                 text: String::new(),
+                images: Vec::new(),
             }),
         ];
 
@@ -2335,6 +2635,7 @@ mod tests {
                         ConversationItem::Message(ConversationMessage {
                             role: ConversationRole::Assistant,
                             text,
+                            ..
                         }) if text.is_empty()
                     )
             })
@@ -2431,10 +2732,12 @@ mod tests {
                 ConversationItem::Message(ConversationMessage {
                     role: ConversationRole::User,
                     text: "Where are we?".to_owned(),
+                    images: Vec::new(),
                 }),
                 ConversationItem::Message(ConversationMessage {
                     role: ConversationRole::Assistant,
                     text: "In the archive.".to_owned(),
+                    images: Vec::new(),
                 }),
             ]
         );

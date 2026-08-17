@@ -7,14 +7,17 @@ use tokio::{
     process::{Child, ChildStdin, Command},
 };
 
+mod attachment_store;
 mod client;
 pub mod protocol;
 mod session_actor;
 mod session_directory;
 
+pub use attachment_store::{LocalAttachmentStore, MAX_ATTACHMENT_BYTES};
 pub use client::{
-    AetherflowClient, AetherflowClientOptions, CreateSessionOptions, DEFAULT_ENDPOINT,
-    DEFAULT_NAMESPACE, DEFAULT_POOL, DEFAULT_TOKEN, SessionEventStream, SessionEventSubscription,
+    AetherflowClient, AetherflowClientOptions, CreateSessionOptions, DEFAULT_ATTACHMENT_ADDRESS,
+    DEFAULT_ATTACHMENT_ENDPOINT, DEFAULT_ENDPOINT, DEFAULT_NAMESPACE, DEFAULT_POOL, DEFAULT_TOKEN,
+    SessionEventStream, SessionEventSubscription,
 };
 
 pub use protocol::{
@@ -25,12 +28,37 @@ pub use protocol::{
 pub use session_actor::{
     DEFAULT_SESSION_EVENT_PAGE_SIZE, GetSessionState, MAX_SESSION_EVENT_PAGE_SIZE,
     ReadSessionEvents, SESSION_ACTOR_NAME, SendSessionCommand, SessionActor, SessionActorConfig,
-    SessionActorState, SessionEvent, SessionEventPayload, rivet_registry,
+    SessionActorState, SessionCommand, SessionEvent, SessionEventPayload, rivet_registry,
 };
 pub use session_directory::{
     DEFAULT_SESSION_DIRECTORY_KEY, SESSION_DIRECTORY_ACTOR_NAME, SessionDescriptor,
     SessionDirectoryActor,
 };
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageContentType {
+    Image,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageContent {
+    #[serde(rename = "type")]
+    pub content_type: ImageContentType,
+    pub data: String,
+    pub mime_type: String,
+}
+
+impl ImageContent {
+    pub fn new(data: impl Into<String>, mime_type: impl Into<String>) -> Self {
+        Self {
+            content_type: ImageContentType::Image,
+            data: data.into(),
+            mime_type: mime_type.into(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -39,6 +67,8 @@ pub enum RpcCommand {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        images: Option<Vec<ImageContent>>,
         #[serde(rename = "streamingBehavior", skip_serializing_if = "Option::is_none")]
         streaming_behavior: Option<StreamingBehavior>,
     },
@@ -46,11 +76,15 @@ pub enum RpcCommand {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        images: Option<Vec<ImageContent>>,
     },
     FollowUp {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        images: Option<Vec<ImageContent>>,
     },
     Abort {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,6 +111,20 @@ impl RpcCommand {
         Self::Prompt {
             id: Some(id.into()),
             message: message.into(),
+            images: None,
+            streaming_behavior: None,
+        }
+    }
+
+    pub fn prompt_with_images(
+        id: impl Into<String>,
+        message: impl Into<String>,
+        images: Vec<ImageContent>,
+    ) -> Self {
+        Self::Prompt {
+            id: Some(id.into()),
+            message: message.into(),
+            images: (!images.is_empty()).then_some(images),
             streaming_behavior: None,
         }
     }
@@ -272,6 +320,30 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({"id": "request-1", "type": "prompt", "message": "hello"})
+        );
+    }
+
+    #[test]
+    fn image_prompt_matches_pi_rpc_shape() {
+        let command = RpcCommand::prompt_with_images(
+            "request-image",
+            "What is this?",
+            vec![ImageContent::new("AQID", "image/png")],
+        );
+        let value = serde_json::to_value(command).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "id": "request-image",
+                "type": "prompt",
+                "message": "What is this?",
+                "images": [{
+                    "type": "image",
+                    "data": "AQID",
+                    "mimeType": "image/png"
+                }]
+            })
         );
     }
 

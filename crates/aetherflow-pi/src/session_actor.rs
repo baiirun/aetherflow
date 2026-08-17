@@ -1,7 +1,13 @@
-use crate::{JsonlReader, PiMessage, PiOptions, PiRpc, PiSessionStorage, RpcCommand};
-use aetherflow_storage::{AgentId, Session, SessionAssociation, SessionId, SessionStatus};
+use crate::{
+    ImageContent, JsonlReader, LocalAttachmentStore, PiMessage, PiOptions, PiRpc, PiSessionStorage,
+    QueueMode, RpcCommand, StreamingBehavior, attachment_store::externalize_pi_message,
+};
+use aetherflow_storage::{
+    AgentId, AttachmentRef, Session, SessionAssociation, SessionId, SessionStatus,
+};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
+use base64::Engine as _;
 use rivetkit::{BindParam, ColumnValue, prelude::*};
 use serde::{Deserialize, Serialize};
 use std::{future::Future, pin::Pin, sync::Arc};
@@ -46,7 +52,6 @@ impl SessionActorConfig {
         if !self.pi.cwd.is_absolute() {
             bail!("Pi working directory must be absolute");
         }
-
         match &self.pi.storage {
             PiSessionStorage::Ephemeral => {
                 bail!("Rivet Session actors require persistent Pi storage")
@@ -79,7 +84,121 @@ pub struct SessionActorState {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SendSessionCommand {
-    pub command: RpcCommand,
+    pub command: SessionCommand,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionCommand {
+    Prompt {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        message: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<AttachmentRef>,
+        #[serde(rename = "streamingBehavior", skip_serializing_if = "Option::is_none")]
+        streaming_behavior: Option<StreamingBehavior>,
+    },
+    Steer {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        message: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<AttachmentRef>,
+    },
+    FollowUp {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        message: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<AttachmentRef>,
+    },
+    Abort {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
+    SetSteeringMode {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        mode: QueueMode,
+    },
+    SetFollowUpMode {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        mode: QueueMode,
+    },
+}
+
+impl SessionCommand {
+    pub fn prompt(
+        id: impl Into<String>,
+        message: impl Into<String>,
+        attachments: Vec<AttachmentRef>,
+    ) -> Self {
+        Self::Prompt {
+            id: Some(id.into()),
+            message: message.into(),
+            attachments,
+            streaming_behavior: None,
+        }
+    }
+
+    pub fn abort(id: impl Into<String>) -> Self {
+        Self::Abort {
+            id: Some(id.into()),
+        }
+    }
+
+    fn into_pi(self, store: &LocalAttachmentStore) -> Result<RpcCommand> {
+        let load_images = |attachments: Vec<AttachmentRef>| -> Result<Option<Vec<ImageContent>>> {
+            let images = attachments
+                .into_iter()
+                .map(|attachment| {
+                    let bytes = store.read(&attachment)?;
+                    Ok(ImageContent::new(
+                        base64::engine::general_purpose::STANDARD.encode(bytes),
+                        attachment.media_type,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok((!images.is_empty()).then_some(images))
+        };
+
+        Ok(match self {
+            Self::Prompt {
+                id,
+                message,
+                attachments,
+                streaming_behavior,
+            } => RpcCommand::Prompt {
+                id,
+                message,
+                images: load_images(attachments)?,
+                streaming_behavior,
+            },
+            Self::Steer {
+                id,
+                message,
+                attachments,
+            } => RpcCommand::Steer {
+                id,
+                message,
+                images: load_images(attachments)?,
+            },
+            Self::FollowUp {
+                id,
+                message,
+                attachments,
+            } => RpcCommand::FollowUp {
+                id,
+                message,
+                images: load_images(attachments)?,
+            },
+            Self::Abort { id } => RpcCommand::Abort { id },
+            Self::SetSteeringMode { id, mode } => RpcCommand::SetSteeringMode { id, mode },
+            Self::SetFollowUpMode { id, mode } => RpcCommand::SetFollowUpMode { id, mode },
+        })
+    }
 }
 
 impl Action for SendSessionCommand {
@@ -130,11 +249,12 @@ impl Event for SessionEvent {
 
 struct SessionRuntime {
     pi: PiRpc,
-    commands: mpsc::Receiver<RpcCommand>,
+    commands: mpsc::Receiver<SessionCommand>,
+    attachment_store: LocalAttachmentStore,
 }
 
 pub struct SessionActor {
-    commands: mpsc::Sender<RpcCommand>,
+    commands: mpsc::Sender<SessionCommand>,
     runtime: Mutex<Option<SessionRuntime>>,
 }
 
@@ -176,6 +296,7 @@ impl Actor for SessionActor {
             )
             .await?;
         let pi = PiRpc::spawn(ctx.state().pi.clone()).context("start persistent Pi session")?;
+        let attachment_store = LocalAttachmentStore::from_env()?;
         let (commands, command_rx) = mpsc::channel(COMMAND_BUFFER_CAPACITY);
         ctx.state_mut().session.status = SessionStatus::Running;
 
@@ -184,6 +305,7 @@ impl Actor for SessionActor {
             runtime: Mutex::new(Some(SessionRuntime {
                 pi,
                 commands: command_rx,
+                attachment_store,
             })),
         })
     }
@@ -288,14 +410,24 @@ async fn run_session_loop(
         stdin,
         stdout,
     } = runtime.pi;
-    run_io_loop(child, stdin, stdout, runtime.commands, session, ctx).await
+    run_io_loop(
+        child,
+        stdin,
+        stdout,
+        runtime.commands,
+        runtime.attachment_store,
+        session,
+        ctx,
+    )
+    .await
 }
 
 async fn run_io_loop(
     _child: Child,
     mut stdin: ChildStdin,
     mut stdout: JsonlReader<BufReader<ChildStdout>>,
-    mut commands: mpsc::Receiver<RpcCommand>,
+    mut commands: mpsc::Receiver<SessionCommand>,
+    attachment_store: LocalAttachmentStore,
     session: &Session,
     ctx: &Ctx<SessionActor>,
 ) -> Result<()> {
@@ -303,6 +435,10 @@ async fn run_io_loop(
         tokio::select! {
             command = commands.recv() => {
                 let command = command.context("Session actor command channel closed")?;
+                let store = attachment_store.clone();
+                let command = tokio::task::spawn_blocking(move || command.into_pi(&store))
+                    .await
+                    .context("attachment loader task failed")??;
                 let mut record = serde_json::to_vec(&command)?;
                 record.push(b'\n');
                 stdin.write_all(&record).await?;
@@ -310,6 +446,12 @@ async fn run_io_loop(
             }
             message = stdout.next() => {
                 let message: PiMessage = message?.context("Pi closed its RPC stream")?;
+                let store = attachment_store.clone();
+                let message = tokio::task::spawn_blocking(move || {
+                    externalize_pi_message(&store, message)
+                })
+                .await
+                .context("attachment externalizer task failed")??;
                 append_session_event(
                     ctx,
                     session,
@@ -456,6 +598,20 @@ mod tests {
     }
 
     #[test]
+    fn large_prompt_attachments_stay_outside_the_actor_message() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = LocalAttachmentStore::new(temp.path());
+        let attachment = store.put("image/png", &vec![9; 96 * 1024])?;
+        let command = SessionCommand::prompt("prompt", "describe this", vec![attachment]);
+
+        assert!(serde_json::to_vec(&command)?.len() < 1_000);
+
+        let pi_command = command.into_pi(&store)?;
+        assert!(serde_json::to_vec(&pi_command)?.len() > 96 * 1024);
+        Ok(())
+    }
+
+    #[test]
     fn persisted_event_rows_recover_their_sequence() -> Result<()> {
         let agent = Agent::new("test");
         let session = Session::new(agent.id, SessionAssociation::Standalone);
@@ -532,7 +688,7 @@ done
 
         connection
             .send(SendSessionCommand {
-                command: RpcCommand::prompt("test", "hello"),
+                command: SessionCommand::prompt("test", "hello", Vec::new()),
             })
             .await?;
 

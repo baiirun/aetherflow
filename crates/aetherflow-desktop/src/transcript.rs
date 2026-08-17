@@ -1,5 +1,8 @@
 use aetherflow_pi::{PiEvent, SessionEvent, SessionEventPayload};
+use base64::Engine as _;
+use gpui::{Image, ImageFormat};
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConversationRole {
@@ -8,9 +11,31 @@ pub enum ConversationRole {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConversationImage {
+    pub mime_type: String,
+    pub image: Arc<Image>,
+}
+
+impl ConversationImage {
+    pub fn new(mime_type: impl Into<String>, data: Vec<u8>) -> Option<Self> {
+        let mime_type = mime_type.into();
+        let format = ImageFormat::from_mime_type(&mime_type)?;
+        Some(Self {
+            mime_type,
+            image: Arc::new(Image::from_bytes(format, data)),
+        })
+    }
+
+    pub fn data(&self) -> &[u8] {
+        &self.image.bytes
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConversationMessage {
     pub role: ConversationRole,
     pub text: String,
+    pub images: Vec<ConversationImage>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -214,6 +239,7 @@ pub fn append_assistant_delta(items: &mut Vec<ConversationItem>, delta: &str) {
         items.push(ConversationItem::Message(ConversationMessage {
             role: ConversationRole::Assistant,
             text: delta.to_owned(),
+            images: Vec::new(),
         }));
     }
 }
@@ -297,7 +323,8 @@ fn remove_empty_trailing_assistant(items: &mut Vec<ConversationItem>) {
         Some(ConversationItem::Message(ConversationMessage {
             role: ConversationRole::Assistant,
             text,
-        })) if text.is_empty()
+            images,
+        })) if text.is_empty() && images.is_empty()
     ) {
         items.pop();
     }
@@ -329,18 +356,29 @@ fn completed_conversation_message(message: &Value) -> Option<ConversationMessage
         "assistant" => ConversationRole::Assistant,
         _ => return None,
     };
-    let text = message
-        .get("content")?
-        .as_array()?
+    let content = message.get("content")?.as_array()?;
+    let text = content
         .iter()
         .filter(|content| content.get("type").and_then(Value::as_str) == Some("text"))
         .filter_map(|content| content.get("text").and_then(Value::as_str))
         .collect::<String>();
-    if text.is_empty() {
+    let images = content
+        .iter()
+        .filter(|content| content.get("type").and_then(Value::as_str) == Some("image"))
+        .filter_map(|content| {
+            let mime_type = content.get("mimeType")?.as_str()?.to_owned();
+            let data = content.get("data")?.as_str()?;
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .ok()?;
+            ConversationImage::new(mime_type, data)
+        })
+        .collect::<Vec<_>>();
+    if text.is_empty() && images.is_empty() {
         return None;
     }
 
-    Some(ConversationMessage { role, text })
+    Some(ConversationMessage { role, text, images })
 }
 
 fn value_string(value: &Value, keys: &[&str]) -> Option<String> {
@@ -483,10 +521,38 @@ mod tests {
     }
 
     #[test]
+    fn rebuilds_image_attachments_from_completed_user_messages() {
+        let events = [session_event(
+            1,
+            json!({
+                "type": "message_end",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "What is this?" },
+                        { "type": "image", "mimeType": "image/png", "data": "AQID" }
+                    ]
+                }
+            }),
+        )];
+
+        let items = conversation_from_events(&events);
+        let ConversationItem::Message(message) = &items[0] else {
+            panic!("message expected");
+        };
+        assert_eq!(message.text, "What is this?");
+        assert_eq!(
+            message.images,
+            vec![ConversationImage::new("image/png", vec![1, 2, 3]).expect("supported image")]
+        );
+    }
+
+    #[test]
     fn partial_tool_results_replace_instead_of_append() {
         let mut items = vec![ConversationItem::Message(ConversationMessage {
             role: ConversationRole::Assistant,
             text: String::new(),
+            images: Vec::new(),
         })];
         let start = serde_json::from_value::<PiMessage>(json!({
             "type": "tool_execution_start",

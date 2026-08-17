@@ -1,12 +1,14 @@
-use aetherflow_pi::rivet_registry;
-use anyhow::{Context, Result};
+use aetherflow_pi::{DEFAULT_ATTACHMENT_ADDRESS, LocalAttachmentStore, rivet_registry};
+use anyhow::{Context, Result, bail};
 use rivetkit::ServeConfig;
-use std::{process::ExitCode, time::Instant};
+use std::{net::SocketAddr, process::ExitCode, time::Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 use vendored_engine::EngineConfiguration;
 
+#[path = "aetherflowd/attachment_http.rs"]
+mod attachment_http;
 #[path = "aetherflowd/vendored_engine.rs"]
 mod vendored_engine;
 
@@ -53,6 +55,12 @@ async fn run() -> Result<&'static str> {
         engine_spawn = ?config.engine_spawn,
         "starting Aetherflow daemon"
     );
+    let attachment_address = std::env::var("AETHERFLOW_ATTACHMENT_ADDRESS")
+        .unwrap_or_else(|_| DEFAULT_ATTACHMENT_ADDRESS.to_owned())
+        .parse::<SocketAddr>()
+        .context("parse AETHERFLOW_ATTACHMENT_ADDRESS")?;
+    let attachment_store = LocalAttachmentStore::from_env()?;
+    let attachment_listener = attachment_http::bind(attachment_address).await?;
 
     let engine = vendored_engine::configure(&mut config)
         .context("configure the Rivet Engine used by aetherflowd")?;
@@ -69,12 +77,26 @@ async fn run() -> Result<&'static str> {
     );
     let mut runner =
         tokio::spawn(rivet_registry().serve_with_config(config, CancellationToken::new()));
+    let attachment_shutdown = CancellationToken::new();
+    let mut attachments = tokio::spawn(attachment_http::serve(
+        attachment_store,
+        attachment_listener,
+        attachment_shutdown.clone(),
+    ));
 
     tokio::select! {
         result = &mut runner => {
+            attachment_shutdown.cancel();
+            attachments.await.context("attachment server task failed")??;
             result.context("Rivet actor runner task failed")?
                 .context("Rivet actor runner exited with an error")?;
             Ok("runner_completed")
+        },
+        result = &mut attachments => {
+            runner.abort();
+            let _ = runner.await;
+            result.context("attachment server task failed")??;
+            bail!("attachment server exited unexpectedly")
         },
         signal = shutdown_signal() => {
             info!(
@@ -88,6 +110,8 @@ async fn run() -> Result<&'static str> {
             // process restarts, preserving their state and keys.
             runner.abort();
             let _ = runner.await;
+            attachment_shutdown.cancel();
+            attachments.await.context("attachment server task failed")??;
             Ok("signal")
         }
     }

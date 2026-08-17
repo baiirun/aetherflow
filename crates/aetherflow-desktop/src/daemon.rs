@@ -9,6 +9,7 @@ use std::{
 };
 
 const RUNNER_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
+const ATTACHMENT_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
 const RUNNER_PROBE_INTERVAL: Duration = Duration::from_millis(50);
 const RUNNER_HEARTBEAT_MAX_AGE: Duration = Duration::from_secs(10);
@@ -20,6 +21,7 @@ const SHELL_PATH_PROBE: &str =
 #[derive(Clone)]
 pub struct DaemonTarget {
     pub endpoint: String,
+    pub attachment_endpoint: String,
     pub token: String,
     pub namespace: String,
     pub pool: String,
@@ -177,6 +179,27 @@ pub async fn runner_is_ready(target: &DaemonTarget) -> Result<bool> {
     Ok(runner_snapshot(target).await?.is_ready())
 }
 
+pub async fn attachment_is_ready(target: &DaemonTarget) -> Result<bool> {
+    let response = match reqwest::Client::new()
+        .get(format!(
+            "{}/health",
+            target.attachment_endpoint.trim_end_matches('/')
+        ))
+        .timeout(ATTACHMENT_PROBE_TIMEOUT)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) if error.is_connect() || error.is_timeout() => return Ok(false),
+        Err(error) => return Err(error).context("probe Aetherflow attachment transport"),
+    };
+    Ok(response.status() == reqwest::StatusCode::NO_CONTENT)
+}
+
+pub async fn daemon_is_ready(target: &DaemonTarget) -> Result<bool> {
+    Ok(runner_is_ready(target).await? && attachment_is_ready(target).await?)
+}
+
 /// Forces Rivet to retry placement when a durable actor is stranded in the
 /// `no_envoys` backoff state. Rescheduling preserves the actor's stored state.
 pub async fn recover_stalled_actor(
@@ -288,7 +311,7 @@ fn decode_runner_snapshot(body: &str, now_ms: u64) -> Result<RunnerSnapshot> {
 pub async fn wait_for_runner(target: &DaemonTarget) -> Result<()> {
     let deadline = tokio::time::Instant::now() + RUNNER_START_TIMEOUT;
     loop {
-        if runner_is_ready(target).await? {
+        if daemon_is_ready(target).await? {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
@@ -314,6 +337,7 @@ pub async fn wait_for_launched_runner(
             .fresh_keys
             .iter()
             .any(|key| !previous_runner_keys.contains(key))
+            && attachment_is_ready(target).await?
         {
             return Ok(());
         }
@@ -431,6 +455,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rivet_not_found_response_is_not_attachment_readiness() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind attachment probe server");
+        let attachment_endpoint = format!(
+            "http://{}",
+            listener.local_addr().expect("read probe server address")
+        );
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept attachment probe");
+            let mut request = [0_u8; 4096];
+            let bytes_read = stream.read(&mut request).expect("read attachment probe");
+            let request = String::from_utf8_lossy(&request[..bytes_read]);
+            assert!(request.starts_with("GET /health "), "{request}");
+            let body = r#"{"group":"api","code":"not_found"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len(),
+            )
+            .expect("write attachment probe response");
+        });
+        let target = DaemonTarget {
+            endpoint: "http://127.0.0.1:6420".to_owned(),
+            attachment_endpoint,
+            token: "dev".to_owned(),
+            namespace: "default".to_owned(),
+            pool: "rivetkit-rust".to_owned(),
+        };
+
+        assert!(
+            !attachment_is_ready(&target)
+                .await
+                .expect("probe attachment transport")
+        );
+        server.join().expect("join attachment probe server");
+    }
+
+    #[tokio::test]
     async fn runner_probe_uses_envoy_status_without_touching_actors() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind probe server");
         let endpoint = format!(
@@ -457,7 +518,8 @@ mod tests {
             .expect("write runner probe response");
         });
         let target = DaemonTarget {
-            endpoint,
+            endpoint: endpoint.clone(),
+            attachment_endpoint: endpoint,
             token: "dev".to_owned(),
             namespace: "default".to_owned(),
             pool: "rivetkit-rust".to_owned(),
@@ -498,7 +560,8 @@ mod tests {
             }
         });
         let target = DaemonTarget {
-            endpoint,
+            endpoint: endpoint.clone(),
+            attachment_endpoint: endpoint,
             token: "dev".to_owned(),
             namespace: "default".to_owned(),
             pool: "rivetkit-rust".to_owned(),
