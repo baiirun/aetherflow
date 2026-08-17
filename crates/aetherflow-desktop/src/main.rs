@@ -11,7 +11,7 @@ use daemon::{DaemonTarget, ManagedDaemon};
 use gpui::{
     Animation, AnimationExt as _, App, Application, Bounds, Context, Div, Entity, ExternalPaths,
     HighlightStyle, Hsla, KeyBinding, ObjectFit, Pixels, ScrollHandle, SharedString,
-    StyledImage as _, StyledText, Subscription, TitlebarOptions, Window,
+    StyledImage as _, StyledText, Subscription, Timer, TitlebarOptions, Window,
     WindowBackgroundAppearance, WindowBounds, WindowOptions, div, ease_out_quint, img, point,
     prelude::*, px, rgb, rgba, size,
 };
@@ -138,6 +138,11 @@ struct DesktopShell {
     pending_images: Vec<PendingImage>,
     next_pending_image_id: u64,
     active_turn_session_ids: HashSet<SessionId>,
+    active_turn_started_at: HashMap<SessionId, Instant>,
+    active_turn_tool_group_keys: HashMap<SessionId, String>,
+    creating_turn_started_at: Option<Instant>,
+    completed_tool_group_durations: HashMap<String, Duration>,
+    working_duration_tick_scheduled: bool,
     is_creating_session: bool,
     cancelling_turn_session_ids: HashSet<SessionId>,
     load_state: SessionLoadState,
@@ -186,6 +191,11 @@ impl DesktopShell {
             pending_images: Vec::new(),
             next_pending_image_id: 0,
             active_turn_session_ids: HashSet::new(),
+            active_turn_started_at: HashMap::new(),
+            active_turn_tool_group_keys: HashMap::new(),
+            creating_turn_started_at: None,
+            completed_tool_group_durations: HashMap::new(),
+            working_duration_tick_scheduled: false,
             is_creating_session: false,
             cancelling_turn_session_ids: HashSet::new(),
             load_state: SessionLoadState::Loading,
@@ -616,10 +626,14 @@ impl DesktopShell {
         self.pending_images.clear();
         if let Some(session_id) = session_id {
             self.active_turn_session_ids.insert(session_id);
+            self.active_turn_started_at
+                .insert(session_id, Instant::now());
             self.cancelling_turn_session_ids.remove(&session_id);
         } else {
             self.is_creating_session = true;
+            self.creating_turn_started_at = Some(Instant::now());
         }
+        self.schedule_working_duration_tick(cx);
         self.action_error = None;
 
         let client = self.client.clone();
@@ -736,6 +750,12 @@ impl DesktopShell {
                 self.creating_new_session = false;
                 self.is_creating_session = false;
                 self.active_turn_session_ids.insert(session_id);
+                self.active_turn_started_at.insert(
+                    session_id,
+                    self.creating_turn_started_at
+                        .take()
+                        .unwrap_or_else(Instant::now),
+                );
                 let messages = std::mem::take(&mut self.new_session_messages);
                 self.conversations.insert(session_id, messages);
                 self.conversation_scrolls
@@ -758,12 +778,21 @@ impl DesktopShell {
             }
             PromptUpdate::ToolEvent { session_id, event } => {
                 let follow = self.conversation_is_at_bottom(session_id);
-                apply_tool_event(self.conversations.entry(session_id).or_default(), &event);
+                let conversation = self.conversations.entry(session_id).or_default();
+                apply_tool_event(conversation, &event);
+                if let Some(group_key) = conversation.iter().rev().find_map(|item| match item {
+                    ConversationItem::ToolGroup(group) => Some(group.key().to_owned()),
+                    ConversationItem::Message(_) => None,
+                }) {
+                    self.active_turn_tool_group_keys
+                        .insert(session_id, group_key);
+                }
                 self.follow_conversation_if(session_id, follow);
             }
             PromptUpdate::Finished(session_id) => {
                 self.previous_stream_texts.remove(&session_id);
                 self.active_turn_session_ids.remove(&session_id);
+                self.finish_turn_timing(session_id);
                 self.cancelling_turn_session_ids.remove(&session_id);
                 self.load_sessions(cx);
             }
@@ -771,13 +800,49 @@ impl DesktopShell {
                 if let Some(session_id) = session_id {
                     self.previous_stream_texts.remove(&session_id);
                     self.active_turn_session_ids.remove(&session_id);
+                    self.finish_turn_timing(session_id);
                     self.cancelling_turn_session_ids.remove(&session_id);
                 } else {
                     self.is_creating_session = false;
+                    self.creating_turn_started_at = None;
                 }
                 self.action_error = Some(error);
             }
         }
+    }
+
+    fn finish_turn_timing(&mut self, session_id: SessionId) {
+        let Some(started_at) = self.active_turn_started_at.remove(&session_id) else {
+            return;
+        };
+        let Some(group_key) = self.active_turn_tool_group_keys.remove(&session_id) else {
+            return;
+        };
+        self.completed_tool_group_durations
+            .insert(group_key, started_at.elapsed());
+    }
+
+    fn schedule_working_duration_tick(&mut self, cx: &mut Context<Self>) {
+        if self.working_duration_tick_scheduled {
+            return;
+        }
+        self.working_duration_tick_scheduled = true;
+        cx.spawn(async move |shell, cx| {
+            Timer::after(Duration::from_secs(1)).await;
+            let Some(shell) = shell.upgrade() else {
+                return;
+            };
+            shell
+                .update(cx, |shell, cx| {
+                    shell.working_duration_tick_scheduled = false;
+                    if shell.is_creating_session || !shell.active_turn_session_ids.is_empty() {
+                        cx.notify();
+                        shell.schedule_working_duration_tick(cx);
+                    }
+                })
+                .ok();
+        })
+        .detach();
     }
 
     fn cancel_turn(&mut self, cx: &mut Context<Self>) {
@@ -1168,6 +1233,10 @@ impl DesktopShell {
 
         let messages = messages.expect("non-empty conversations were checked above");
         let session_has_active_turn = self.active_turn_session_ids.contains(&session_id);
+        let active_turn_elapsed = self
+            .active_turn_started_at
+            .get(&session_id)
+            .map(Instant::elapsed);
         let mut transcript = div()
             .relative()
             .top(content_offset_y)
@@ -1237,9 +1306,10 @@ impl DesktopShell {
                                     .child(render_tool_activity_orb(format!(
                                         "assistant-{session_id}-{index}"
                                     )))
-                                    .child(render_working_text(format!(
-                                        "assistant-{session_id}-{index}"
-                                    )))
+                                    .child(render_working_text(
+                                        format!("assistant-{session_id}-{index}"),
+                                        active_turn_elapsed.unwrap_or_default(),
+                                    ))
                                     .into_any_element()
                             } else {
                                 let is_live_tail = session_has_active_turn
@@ -1292,7 +1362,13 @@ impl DesktopShell {
                         messages.len(),
                         has_running_tool,
                     );
-                    transcript.child(self.render_tool_group(group, show_activity, window, cx))
+                    transcript.child(self.render_tool_group(
+                        group,
+                        show_activity,
+                        active_turn_elapsed,
+                        window,
+                        cx,
+                    ))
                 }
             };
         }
@@ -1304,6 +1380,7 @@ impl DesktopShell {
         &self,
         group: &ToolGroup,
         show_activity: bool,
+        active_turn_elapsed: Option<Duration>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -1337,6 +1414,14 @@ impl DesktopShell {
                     group.summary(),
                     &group_key,
                     show_activity,
+                    group.calls.len(),
+                    group
+                        .calls
+                        .iter()
+                        .filter(|call| call.status == ToolStatus::Failed)
+                        .count(),
+                    active_turn_elapsed,
+                    self.completed_tool_group_durations.get(&group_key).copied(),
                 )),
         );
 
@@ -2137,26 +2222,87 @@ fn render_tool_group_summary(
     summary: String,
     group_key: &str,
     show_activity: bool,
+    tool_count: usize,
+    failed_count: usize,
+    active_elapsed: Option<Duration>,
+    completed_elapsed: Option<Duration>,
 ) -> gpui::AnyElement {
-    if !show_activity {
-        return StyledText::new(summary).into_any_element();
+    if show_activity {
+        return render_working_tool_summary(
+            format!("tool-group-{group_key}"),
+            active_elapsed.unwrap_or_default(),
+            tool_count,
+        );
     }
 
-    render_working_text(format!("tool-group-{group_key}"))
+    if let Some(elapsed) = completed_elapsed {
+        return StyledText::new(worked_tool_summary(elapsed, tool_count, failed_count))
+            .into_any_element();
+    }
+
+    StyledText::new(summary).into_any_element()
 }
 
-fn render_working_text(animation_key: String) -> gpui::AnyElement {
-    let working = "Working…".to_owned();
-    let animated_working = working.clone();
-    StyledText::new(working)
+fn render_working_text(animation_key: String, elapsed: Duration) -> gpui::AnyElement {
+    render_working_label(
+        animation_key,
+        format!("Working for {}", format_duration(elapsed)),
+    )
+}
+
+fn render_working_tool_summary(
+    animation_key: String,
+    elapsed: Duration,
+    tool_count: usize,
+) -> gpui::AnyElement {
+    render_working_label(animation_key, working_tool_summary(elapsed, tool_count))
+}
+
+fn render_working_label(animation_key: String, label: String) -> gpui::AnyElement {
+    let animated_label = label.clone();
+    StyledText::new(label)
         .with_animation(
             SharedString::from(format!("working-shimmer-{animation_key}")),
             Animation::new(TOOL_GROUP_SHIMMER_DURATION).repeat(),
             move |text, progress| {
-                text.with_highlights(shimmer_highlights(&animated_working, progress))
+                text.with_highlights(shimmer_highlights(&animated_label, progress))
             },
         )
         .into_any_element()
+}
+
+fn working_tool_summary(elapsed: Duration, tool_count: usize) -> String {
+    let noun = if tool_count == 1 { "tool" } else { "tools" };
+    format!(
+        "Working for {} · {tool_count} {noun}",
+        format_duration(elapsed)
+    )
+}
+
+fn worked_tool_summary(elapsed: Duration, tool_count: usize, failed_count: usize) -> String {
+    let noun = if tool_count == 1 { "tool" } else { "tools" };
+    let mut summary = format!(
+        "Worked for {} · {tool_count} {noun}",
+        format_duration(elapsed)
+    );
+    if failed_count > 0 {
+        summary.push_str(&format!(" · {failed_count} failed"));
+    }
+    summary
+}
+
+fn format_duration(duration: Duration) -> String {
+    let total_seconds = duration.as_secs();
+    let hours = total_seconds / 3_600;
+    let minutes = total_seconds % 3_600 / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours}h{minutes}m{seconds}s")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 fn shimmer_highlights(text: &str, progress: f32) -> Vec<(Range<usize>, HighlightStyle)> {
@@ -2488,6 +2634,30 @@ mod tests {
         assert!(!tool_group_shows_activity(true, 1, 3, false));
         assert!(!tool_group_shows_activity(false, 2, 3, false));
         assert!(tool_group_shows_activity(false, 1, 3, true));
+    }
+
+    #[test]
+    fn working_tool_summary_reports_the_live_tool_count() {
+        assert_eq!(
+            working_tool_summary(Duration::from_secs(8), 1),
+            "Working for 8s · 1 tool"
+        );
+        assert_eq!(
+            working_tool_summary(Duration::from_secs(113), 3),
+            "Working for 1m53s · 3 tools"
+        );
+    }
+
+    #[test]
+    fn worked_tool_summary_preserves_duration_and_failures() {
+        assert_eq!(
+            worked_tool_summary(Duration::from_secs(113), 3, 0),
+            "Worked for 1m53s · 3 tools"
+        );
+        assert_eq!(
+            worked_tool_summary(Duration::from_secs(3_723), 2, 1),
+            "Worked for 1h2m3s · 2 tools · 1 failed"
+        );
     }
 
     #[test]
