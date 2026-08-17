@@ -5,6 +5,16 @@ they may participate.
 
 ## Language
 
+**Agent**:
+A stable agent identity whose private model interactions are represented by
+Sessions. One Agent may have many Sessions and participate in many Channels.
+_Avoid_: Worker, runner, model
+
+**Channel**:
+A collaboration space with its own identity. Associating a Session with a
+Channel does not make that Session public or establish Agent participation.
+_Avoid_: Room, thread, project
+
 **Session**:
 A private, ongoing interaction between one Agent and its model runtime. A Session
 may be associated with a Channel.
@@ -13,6 +23,16 @@ may be associated with a Channel.
 Whether a Session is standalone or associated with exactly one Channel. The
 association does not make the Session public or imply Agent membership.
 _Avoid_: Channel context, channel scope
+
+**Session Event**:
+A durable observation in one Session's ordered history. Event order is scoped
+to that Session rather than shared across all Sessions.
+_Avoid_: Pi event, global event
+
+**Attachment**:
+Media content supplied with or emitted by a Session message. Messages refer to
+the Attachment without making its bytes part of Session identity.
+_Avoid_: Blob, upload
 
 **Session Promotion**:
 The transfer of authoritative ownership for a Session from local execution to

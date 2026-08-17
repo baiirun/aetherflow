@@ -8,6 +8,10 @@ Aetherflow is split into three Rust modules:
 - `crates/aetherflow-pi`: Pi RPC JSONL transport, a Rivet `Session` actor,
   canonical typed stdout unions, and the `af` binary.
 
+Start with the [architecture map](docs/architecture/README.md) for component
+responsibilities, runtime diagrams, persistence ownership, invariants, and
+architectural decisions. Domain language lives in [CONTEXT.md](CONTEXT.md).
+
 Install the desktop and its pinned daemon from this checkout with:
 
 ```sh
