@@ -30,6 +30,9 @@ use transcript::{
 
 const SIDEBAR_WIDTH: f32 = 280.;
 const CHAT_FONT_SIZE: f32 = 14.;
+const SESSION_ROW_HEIGHT: f32 = 30.;
+const SESSION_ROW_ACTION_HEIGHT: f32 = 22.;
+const SESSION_ROW_ACTION_TOP: f32 = (SESSION_ROW_HEIGHT - SESSION_ROW_ACTION_HEIGHT) / 2.;
 const BOTTOM_FOLLOW_THRESHOLD: f32 = 32.;
 const CONTENT_SHIFT_TIME_CONSTANT: Duration = Duration::from_millis(55);
 const CONTENT_SHIFT_SETTLE_DISTANCE: f32 = 0.5;
@@ -767,9 +770,9 @@ impl DesktopShell {
             .group(group.clone())
             .id(("session", index))
             .relative()
-            .mb_1()
+            .mb_0p5()
+            .h(px(SESSION_ROW_HEIGHT))
             .px_3()
-            .py_2()
             .rounded_lg()
             .cursor_pointer()
             .when(selected, |style| style.bg(rgb(0x2b2d2f)))
@@ -781,6 +784,7 @@ impl DesktopShell {
             .child(
                 div()
                     .w_full()
+                    .h_full()
                     .flex()
                     .items_center()
                     .gap_2()
@@ -807,9 +811,11 @@ impl DesktopShell {
                     .id(("archive-session", index))
                     .absolute()
                     .right_2()
-                    .top(px(5.))
+                    .top(px(SESSION_ROW_ACTION_TOP))
+                    .h(px(SESSION_ROW_ACTION_HEIGHT))
                     .px_2()
-                    .py_1()
+                    .flex()
+                    .items_center()
                     .rounded_md()
                     .bg(rgb(0x343638))
                     .opacity(0.)
