@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use std::{
     collections::HashSet,
     env,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -11,6 +12,10 @@ const RUNNER_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
 const RUNNER_PROBE_INTERVAL: Duration = Duration::from_millis(50);
 const RUNNER_HEARTBEAT_MAX_AGE: Duration = Duration::from_secs(10);
+const SHELL_PATH_BEGIN: &str = "__AETHERFLOW_PATH_BEGIN__";
+const SHELL_PATH_END: &str = "__AETHERFLOW_PATH_END__";
+const SHELL_PATH_PROBE: &str =
+    "printf '__AETHERFLOW_PATH_BEGIN__%s__AETHERFLOW_PATH_END__' \"$PATH\"";
 
 #[derive(Clone)]
 pub struct DaemonTarget {
@@ -56,7 +61,14 @@ impl ManagedDaemon {
 
 pub fn launch() -> Result<ManagedDaemon> {
     let executable = daemon_executable()?;
-    let child = Command::new(&executable)
+    let runtime_path = match login_shell_runtime_path() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("Aetherflow desktop could not read the login-shell PATH: {error:#}");
+            None
+        }
+    };
+    let child = daemon_command(&executable, runtime_path.as_deref())
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -69,6 +81,61 @@ pub fn launch() -> Result<ManagedDaemon> {
         child.id()
     );
     Ok(ManagedDaemon { child })
+}
+
+fn daemon_command(executable: &Path, runtime_path: Option<&OsStr>) -> Command {
+    let mut command = Command::new(executable);
+    if let Some(runtime_path) = runtime_path {
+        command.env("PATH", runtime_path);
+    }
+    command
+}
+
+fn login_shell_runtime_path() -> Result<Option<OsString>> {
+    let shell = env::var_os("SHELL")
+        .map(PathBuf::from)
+        .filter(|shell| shell.is_file())
+        .or_else(|| {
+            [PathBuf::from("/bin/zsh"), PathBuf::from("/bin/sh")]
+                .into_iter()
+                .find(|shell| shell.is_file())
+        });
+    shell
+        .as_deref()
+        .map(|shell| runtime_path_from_login_shell(shell, SHELL_PATH_PROBE))
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn runtime_path_from_login_shell(shell: &Path, probe: &str) -> Result<Option<OsString>> {
+    let output = Command::new(shell)
+        .arg("-lic")
+        .arg(probe)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .with_context(|| format!("launch login shell {}", shell.display()))?;
+    if !output.status.success() {
+        bail!(
+            "login shell {} exited with {}",
+            shell.display(),
+            output.status
+        );
+    }
+
+    let output = String::from_utf8(output.stdout).context("login shell PATH was not UTF-8")?;
+    let Some(start) = output.rfind(SHELL_PATH_BEGIN) else {
+        bail!("login shell output omitted the PATH marker");
+    };
+    let path_start = start + SHELL_PATH_BEGIN.len();
+    let Some(path_end) = output[path_start..].find(SHELL_PATH_END) else {
+        bail!("login shell output omitted the closing PATH marker");
+    };
+    let path = &output[path_start..path_start + path_end];
+    if path.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(OsString::from(path)))
 }
 
 pub async fn runner_snapshot(target: &DaemonTarget) -> Result<RunnerSnapshot> {
@@ -322,6 +389,23 @@ mod tests {
         net::TcpListener,
         sync::mpsc,
     };
+
+    #[test]
+    fn login_shell_path_is_forwarded_to_the_daemon() {
+        let probe = format!(
+            "printf '{}%s{}' '/runtime/bin:/usr/bin'",
+            SHELL_PATH_BEGIN, SHELL_PATH_END
+        );
+        let runtime_path = runtime_path_from_login_shell(Path::new("/bin/sh"), &probe)
+            .expect("read login shell PATH")
+            .expect("login shell should return PATH");
+        let command = daemon_command(Path::new("/tmp/aetherflowd"), Some(&runtime_path));
+        let configured_path = command
+            .get_envs()
+            .find_map(|(key, value)| (key == "PATH").then_some(value).flatten());
+
+        assert_eq!(configured_path, Some(OsStr::new("/runtime/bin:/usr/bin")));
+    }
 
     #[test]
     fn app_bundle_prefers_the_helpers_directory() {

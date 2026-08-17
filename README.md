@@ -24,9 +24,24 @@ cargo build -p aetherflow-pi --bin aetherflowd
 cargo run -p aetherflow-desktop
 ```
 
-An application bundle may place the daemon at
-`Aetherflow.app/Contents/Helpers/aetherflowd` or beside the desktop executable.
-Set `AETHERFLOWD_PATH` to use another binary explicitly.
+Build an Apple Silicon application bundle, including the daemon helper, with:
+
+```sh
+scripts/build-macos-app.sh
+```
+
+The bundle is written to `target/release/bundle/Aetherflow.app`. Install it in
+`/Applications` with:
+
+```sh
+scripts/build-macos-app.sh --install
+```
+
+The local bundle is ad-hoc signed. It is suitable for development installs but
+is not yet Developer ID signed or notarized for public distribution. When the
+desktop app starts its daemon from Finder, it forwards the interactive login
+shell's `PATH` so locally installed Pi and Node binaries remain discoverable.
+Set `AETHERFLOWD_PATH` to use another daemon binary explicitly.
 
 Run the current session lifecycle acceptance test directly from the checkout:
 
