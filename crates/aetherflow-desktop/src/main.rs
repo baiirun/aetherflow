@@ -131,6 +131,7 @@ struct DesktopShell {
     previous_stream_texts: HashMap<SessionId, String>,
     tool_group_expansion: HashMap<String, bool>,
     expanded_tool_calls: HashSet<String>,
+    archived_sessions_collapsed: bool,
     loading_conversations: HashSet<SessionId>,
     conversation_errors: HashMap<SessionId, String>,
     new_session_messages: Vec<ConversationItem>,
@@ -184,6 +185,7 @@ impl DesktopShell {
             previous_stream_texts: HashMap::new(),
             tool_group_expansion: HashMap::new(),
             expanded_tool_calls: HashSet::new(),
+            archived_sessions_collapsed: false,
             loading_conversations: HashSet::new(),
             conversation_errors: HashMap::new(),
             new_session_messages: Vec::new(),
@@ -1067,18 +1069,30 @@ impl DesktopShell {
                 }
 
                 if self.sessions.iter().any(|session| session.archived) {
+                    let archived_sessions_collapsed = self.archived_sessions_collapsed;
                     list = list.child(
                         div()
+                            .id("archived-sessions-toggle")
                             .mt_5()
                             .px_3()
                             .pb_2()
                             .text_xs()
                             .text_color(rgb(0x66696d))
-                            .child("Archived"),
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(rgb(0x929599)))
+                            .child("Archived")
+                            .on_click(cx.listener(|shell, _, _, cx| {
+                                shell.archived_sessions_collapsed =
+                                    !shell.archived_sessions_collapsed;
+                                cx.notify();
+                            })),
                     );
-                    for (index, session) in self.sessions.iter().enumerate() {
-                        if session.archived {
-                            list = list.child(self.render_session_row(session.clone(), index, cx));
+                    if !archived_sessions_collapsed {
+                        for (index, session) in self.sessions.iter().enumerate() {
+                            if session.archived {
+                                list =
+                                    list.child(self.render_session_row(session.clone(), index, cx));
+                            }
                         }
                     }
                 }

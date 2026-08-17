@@ -80,6 +80,12 @@ It does not currently provide:
   complete runtime state.
 - Archiving MUST hide a Session from the active desktop list without deleting
   its actor, event history, Pi continuation, or Attachments.
+- The desktop MUST group archived Sessions under a plain-text `Archived`
+  heading. Clicking that heading MUST toggle the archived rows without changing
+  any Session's archive state.
+- The `Archived` heading MUST NOT use a chip or disclosure icon. Its expanded or
+  collapsed state is transient desktop presentation state and MUST NOT be
+  persisted as Session metadata.
 
 ### Attachments
 
@@ -204,6 +210,11 @@ Run the local lifecycle acceptance flow with a real Rivet Engine and headless Pi
 ```sh
 scripts/smoke-session-lifecycle.sh
 ```
+
+For the desktop archive disclosure, verify manually that clicking the plain
+`Archived` heading hides and restores the archived rows, while restarting the
+desktop returns the section to its default expanded state and does not change
+which Sessions are archived.
 
 The following tests are the contract anchors:
 
