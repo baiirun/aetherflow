@@ -1,23 +1,39 @@
-use aetherflow_pi::{DEFAULT_ATTACHMENT_ADDRESS, LocalAttachmentStore, rivet_registry};
+use crate::{DEFAULT_ATTACHMENT_ADDRESS, LocalAttachmentStore, rivet_registry};
 use anyhow::{Context, Result, bail};
 use rivetkit::ServeConfig;
+use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, process::ExitCode, time::Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 use vendored_engine::EngineConfiguration;
 
-#[path = "aetherflowd/attachment_http.rs"]
 mod attachment_http;
-#[path = "aetherflowd/vendored_engine.rs"]
 mod vendored_engine;
 
-#[tokio::main]
-async fn main() -> ExitCode {
+pub const PROTOCOL_VERSION: u32 = 1;
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonHealth {
+    pub protocol_version: u32,
+    pub package_version: String,
+}
+
+impl DaemonHealth {
+    pub fn current() -> Self {
+        Self {
+            protocol_version: PROTOCOL_VERSION,
+            package_version: env!("CARGO_PKG_VERSION").to_owned(),
+        }
+    }
+}
+
+pub async fn run() -> ExitCode {
     init_logging();
     let started_at = Instant::now();
 
-    match run().await {
+    match serve().await {
         Ok(outcome) => {
             info!(
                 target: "aetherflowd",
@@ -42,7 +58,7 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run() -> Result<&'static str> {
+async fn serve() -> Result<&'static str> {
     let mut config = ServeConfig::from_env();
     info!(
         target: "aetherflowd",

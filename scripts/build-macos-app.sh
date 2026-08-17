@@ -68,7 +68,7 @@ if [ -z "$package_version" ]; then
 fi
 
 cd "$repository_root"
-cargo build --release --bin aetherflow-desktop --bin aetherflowd
+cargo build --release --package aetherflow-desktop --bins
 
 case "$bundle" in
     "$repository_root"/target/release/bundle/Aetherflow.app) ;;

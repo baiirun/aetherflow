@@ -30,7 +30,3 @@ tempfile = "3.27.0"
 [[bin]]
 name = "af"
 path = "src/bin/af.rs"
-
-[[bin]]
-name = "aetherflowd"
-path = "src/bin/aetherflowd.rs"

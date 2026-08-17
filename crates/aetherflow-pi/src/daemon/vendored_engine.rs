@@ -1,3 +1,5 @@
+//! Installation and configuration of Aetherflow's bundled Rivet Engine.
+
 use anyhow::{Context, Result, bail};
 use rivetkit::{EngineSpawnMode, ServeConfig};
 use std::{

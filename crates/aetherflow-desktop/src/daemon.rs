@@ -1,3 +1,4 @@
+use aetherflow_pi::daemon::{DaemonHealth, PROTOCOL_VERSION};
 use anyhow::{Context, Result, bail};
 use std::{
     collections::HashSet,
@@ -193,7 +194,33 @@ pub async fn attachment_is_ready(target: &DaemonTarget) -> Result<bool> {
         Err(error) if error.is_connect() || error.is_timeout() => return Ok(false),
         Err(error) => return Err(error).context("probe Aetherflow attachment transport"),
     };
-    Ok(response.status() == reqwest::StatusCode::NO_CONTENT)
+    if !response.status().is_success() {
+        return Ok(false);
+    }
+    // The attachment transport shipped before version metadata was added used
+    // 204 as its health response. That implementation is protocol version 1,
+    // so it remains safe to reuse while a pre-release daemon is still alive.
+    if response.status() == reqwest::StatusCode::NO_CONTENT {
+        return Ok(true);
+    }
+    let health = response.json::<DaemonHealth>().await.context(
+        "Aetherflow daemon did not report compatibility metadata; reinstall the desktop package",
+    )?;
+    ensure_compatible_daemon(&health)?;
+    Ok(true)
+}
+
+fn ensure_compatible_daemon(health: &DaemonHealth) -> Result<()> {
+    if health.protocol_version != PROTOCOL_VERSION {
+        bail!(
+            "Aetherflow daemon is incompatible: desktop package version {} requires protocol {}, but daemon package version {} reports protocol {}. Reinstall with `cargo install --path crates/aetherflow-desktop --force`",
+            env!("CARGO_PKG_VERSION"),
+            PROTOCOL_VERSION,
+            health.package_version,
+            health.protocol_version,
+        );
+    }
+    Ok(())
 }
 
 pub async fn daemon_is_ready(target: &DaemonTarget) -> Result<bool> {
@@ -452,6 +479,69 @@ mod tests {
             daemon_candidates(Path::new("/repo/target/debug/aetherflow-desktop")),
             vec![PathBuf::from("/repo/target/debug/aetherflowd")]
         );
+    }
+
+    #[test]
+    fn accepts_the_daemon_built_with_the_desktop() {
+        ensure_compatible_daemon(&DaemonHealth::current())
+            .expect("matching daemon should be compatible");
+    }
+
+    #[test]
+    fn accepts_a_different_package_version_with_the_same_protocol() {
+        ensure_compatible_daemon(&DaemonHealth {
+            protocol_version: PROTOCOL_VERSION,
+            package_version: "9.9.9".to_owned(),
+        })
+        .expect("protocol-compatible daemon should be accepted");
+    }
+
+    #[test]
+    fn rejects_an_incompatible_daemon_protocol() {
+        let error = ensure_compatible_daemon(&DaemonHealth {
+            protocol_version: PROTOCOL_VERSION + 1,
+            package_version: env!("CARGO_PKG_VERSION").to_owned(),
+        })
+        .expect_err("mismatched daemon protocol should be rejected");
+
+        let message = error.to_string();
+        assert!(message.contains("daemon is incompatible"), "{message}");
+        assert!(message.contains("cargo install"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn accepts_the_legacy_protocol_one_health_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind attachment probe server");
+        let attachment_endpoint = format!(
+            "http://{}",
+            listener.local_addr().expect("read probe server address")
+        );
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept attachment probe");
+            let mut request = [0_u8; 4096];
+            let bytes_read = stream.read(&mut request).expect("read attachment probe");
+            let request = String::from_utf8_lossy(&request[..bytes_read]);
+            assert!(request.starts_with("GET /health "), "{request}");
+            write!(
+                stream,
+                "HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n",
+            )
+            .expect("write legacy attachment probe response");
+        });
+        let target = DaemonTarget {
+            endpoint: "http://127.0.0.1:6420".to_owned(),
+            attachment_endpoint,
+            token: "dev".to_owned(),
+            namespace: "default".to_owned(),
+            pool: "rivetkit-rust".to_owned(),
+        };
+
+        assert!(
+            attachment_is_ready(&target)
+                .await
+                .expect("probe legacy attachment transport")
+        );
+        server.join().expect("join attachment probe server");
     }
 
     #[tokio::test]

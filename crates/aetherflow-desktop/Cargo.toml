@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+default-run = "aetherflow-desktop"
 
 [dependencies]
 aetherflow-pi = { path = "../aetherflow-pi" }
@@ -19,3 +20,11 @@ tokio.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+[[bin]]
+name = "aetherflow-desktop"
+path = "src/main.rs"
+
+[[bin]]
+name = "aetherflowd"
+path = "src/bin/aetherflowd.rs"

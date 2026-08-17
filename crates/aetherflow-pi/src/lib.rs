@@ -9,6 +9,7 @@ use tokio::{
 
 mod attachment_store;
 mod client;
+pub mod daemon;
 pub mod protocol;
 mod session_actor;
 mod session_directory;

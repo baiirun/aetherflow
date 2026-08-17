@@ -3,24 +3,32 @@
 Aetherflow is split into three Rust modules:
 
 - `crates/aetherflow-storage`: durable `Channel`, `Agent`, and `Session` models.
-- `crates/aetherflow-desktop`: the GPUI desktop application.
+- `crates/aetherflow-desktop`: the GPUI desktop application and its matching
+  `aetherflowd` helper.
 - `crates/aetherflow-pi`: Pi RPC JSONL transport, a Rivet `Session` actor,
-  canonical typed stdout unions, and the `aetherflowd` and `af` binaries.
+  canonical typed stdout unions, and the `af` binary.
 
-Install the daemon and CLI from this checkout with:
+Install the desktop and its pinned daemon from this checkout with:
 
 ```sh
-cargo install --path crates/aetherflow-pi --bins --force
+cargo install --path crates/aetherflow-desktop --force
+```
+
+Install the CLI separately when needed:
+
+```sh
+cargo install --path crates/aetherflow-pi --bin af --force
 ```
 
 Run the checks with `cargo test --workspace`. Probe Pi directly without its TUI
 with `af pi state`.
 
-The desktop app connects to an existing daemon or starts `aetherflowd` itself.
-For development, build the daemon beside the desktop binary before launching:
+The desktop app connects to an existing compatible daemon or starts its pinned
+`aetherflowd` itself. For development, build both binaries together before
+launching:
 
 ```sh
-cargo build -p aetherflow-pi --bin aetherflowd
+cargo build -p aetherflow-desktop --bins
 cargo run -p aetherflow-desktop
 ```
 

@@ -1,4 +1,7 @@
-use aetherflow_pi::{LocalAttachmentStore, MAX_ATTACHMENT_BYTES};
+//! Local HTTP transport for content-addressed session attachments.
+
+use super::DaemonHealth;
+use crate::{LocalAttachmentStore, MAX_ATTACHMENT_BYTES};
 use aetherflow_storage::{AttachmentId, AttachmentRef};
 use anyhow::{Context, Result};
 use axum::{
@@ -44,8 +47,8 @@ pub async fn serve(
         .context("serve attachment transport")
 }
 
-async fn health() -> StatusCode {
-    StatusCode::NO_CONTENT
+async fn health() -> Json<DaemonHealth> {
+    Json(DaemonHealth::current())
 }
 
 async fn upload(
@@ -131,7 +134,11 @@ mod tests {
             .get(format!("http://{address}/health"))
             .send()
             .await?;
-        assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.json::<DaemonHealth>().await?,
+            DaemonHealth::current()
+        );
 
         let response = client
             .post(format!("http://{address}/attachments"))
