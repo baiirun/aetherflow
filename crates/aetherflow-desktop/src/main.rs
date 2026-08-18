@@ -50,11 +50,11 @@ const BOTTOM_FOLLOW_THRESHOLD: f32 = 32.;
 const CONTENT_SHIFT_TIME_CONSTANT: Duration = Duration::from_millis(55);
 const CONTENT_SHIFT_SETTLE_DISTANCE: f32 = 0.5;
 const CONVERSATION_EVENT_PAGE_SIZE: u32 = DEFAULT_SESSION_EVENT_PAGE_SIZE;
-const TOOL_ACTIVITY_ORB_SIZE: f64 = 20.;
-const TOOL_ACTIVITY_ORB_DURATION: Duration = Duration::from_secs(600);
-const TOOL_ACTIVITY_ORB_SPEED: f64 = 3.9;
 const TOOL_GROUP_SHIMMER_DURATION: Duration = Duration::from_millis(1_600);
 const TOOL_GROUP_SHIMMER_BAND_WIDTH: f32 = 0.24;
+const AGENT_BLOB_SIZE: f32 = 32.;
+const AGENT_BLOB_LOOP_DURATION: Duration = Duration::from_secs(600);
+const AGENT_BLOB_TRANSITION_DURATION: Duration = Duration::from_millis(240);
 const MAX_PENDING_IMAGES: usize = 4;
 const MAX_IMAGE_FILE_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_PROCESSED_IMAGE_BYTES: usize = 8 * 1024 * 1024;
@@ -112,6 +112,39 @@ enum PromptUpdate {
         session_id: Option<SessionId>,
         error: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgentBlobState {
+    Idle,
+    Thinking,
+    Working,
+    Responding,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AgentBlobTransition {
+    from: AgentBlobState,
+    to: AgentBlobState,
+    started_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AgentTurnPresentation {
+    session_id: SessionId,
+    blob_transition: AgentBlobTransition,
+    elapsed: Option<Duration>,
+}
+
+impl AgentBlobTransition {
+    fn idle() -> Self {
+        Self {
+            from: AgentBlobState::Idle,
+            to: AgentBlobState::Idle,
+            started_at: Instant::now(),
+        }
+    }
 }
 
 enum DaemonStartup {
@@ -194,6 +227,7 @@ struct DesktopShell {
     active_turn_session_ids: HashSet<SessionId>,
     active_turn_started_at: HashMap<SessionId, Instant>,
     active_turn_tool_group_keys: HashMap<SessionId, String>,
+    agent_blob_transitions: HashMap<SessionId, AgentBlobTransition>,
     creating_turn_started_at: Option<Instant>,
     completed_tool_group_durations: HashMap<String, Duration>,
     working_duration_tick_scheduled: bool,
@@ -276,6 +310,7 @@ impl DesktopShell {
             active_turn_session_ids: HashSet::new(),
             active_turn_started_at: HashMap::new(),
             active_turn_tool_group_keys: HashMap::new(),
+            agent_blob_transitions: HashMap::new(),
             creating_turn_started_at: None,
             completed_tool_group_durations: HashMap::new(),
             working_duration_tick_scheduled: false,
@@ -959,6 +994,7 @@ impl DesktopShell {
             self.active_turn_started_at
                 .insert(session_id, Instant::now());
             self.cancelling_turn_session_ids.remove(&session_id);
+            self.set_agent_blob_state(session_id, AgentBlobState::Thinking);
         } else {
             self.is_creating_session = true;
             self.creating_turn_started_at = Some(Instant::now());
@@ -1093,6 +1129,7 @@ impl DesktopShell {
                         .take()
                         .unwrap_or_else(Instant::now),
                 );
+                self.set_agent_blob_state(session_id, AgentBlobState::Thinking);
                 let messages = std::mem::take(&mut self.new_session_messages);
                 self.conversations.insert(session_id, messages);
                 self.conversation_scrolls
@@ -1102,6 +1139,7 @@ impl DesktopShell {
                 self.load_sessions(cx);
             }
             PromptUpdate::TextDelta { session_id, delta } => {
+                self.set_agent_blob_state(session_id, AgentBlobState::Responding);
                 let follow = self.conversation_is_at_bottom(session_id);
                 let conversation = self.conversations.entry(session_id).or_default();
                 if let Some(previous) = trailing_assistant_text(conversation) {
@@ -1114,6 +1152,7 @@ impl DesktopShell {
                 self.follow_conversation_if(session_id, follow);
             }
             PromptUpdate::ToolEvent { session_id, event } => {
+                self.set_agent_blob_state(session_id, AgentBlobState::Working);
                 let follow = self.conversation_is_at_bottom(session_id);
                 let conversation = self.conversations.entry(session_id).or_default();
                 apply_tool_event(conversation, &event);
@@ -1129,6 +1168,7 @@ impl DesktopShell {
             PromptUpdate::Finished(session_id) => {
                 self.previous_stream_texts.remove(&session_id);
                 self.active_turn_session_ids.remove(&session_id);
+                self.set_agent_blob_state(session_id, AgentBlobState::Idle);
                 self.finish_turn_timing(session_id);
                 self.cancelling_turn_session_ids.remove(&session_id);
                 self.load_sessions(cx);
@@ -1137,6 +1177,7 @@ impl DesktopShell {
                 if let Some(session_id) = session_id {
                     self.previous_stream_texts.remove(&session_id);
                     self.active_turn_session_ids.remove(&session_id);
+                    self.set_agent_blob_state(session_id, AgentBlobState::Error);
                     self.finish_turn_timing(session_id);
                     self.cancelling_turn_session_ids.remove(&session_id);
                 } else {
@@ -1146,6 +1187,21 @@ impl DesktopShell {
                 self.action_error = Some(error);
             }
         }
+    }
+
+    fn set_agent_blob_state(&mut self, session_id: SessionId, state: AgentBlobState) {
+        let transition = self
+            .agent_blob_transitions
+            .entry(session_id)
+            .or_insert_with(AgentBlobTransition::idle);
+        if transition.to == state {
+            return;
+        }
+        *transition = AgentBlobTransition {
+            from: transition.to,
+            to: state,
+            started_at: Instant::now(),
+        };
     }
 
     fn finish_turn_timing(&mut self, session_id: SessionId) {
@@ -1942,6 +1998,11 @@ impl DesktopShell {
             .active_turn_started_at
             .get(&session_id)
             .map(Instant::elapsed);
+        let agent_blob_transition = self
+            .agent_blob_transitions
+            .get(&session_id)
+            .copied()
+            .unwrap_or_else(AgentBlobTransition::idle);
         let mut transcript = div()
             .relative()
             .top(content_offset_y)
@@ -2008,18 +2069,16 @@ impl DesktopShell {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .child(render_tool_activity_orb(format!(
-                                        "assistant-{session_id}-{index}"
-                                    )))
+                                    .child(render_agent_blob(session_id, agent_blob_transition))
                                     .child(render_working_text(
                                         format!("assistant-{session_id}-{index}"),
                                         active_turn_elapsed.unwrap_or_default(),
                                     ))
                                     .into_any_element()
                             } else {
-                                let is_live_tail = session_has_active_turn
-                                    && index == messages.len().saturating_sub(1);
-                                div()
+                                let is_transcript_tail = index == messages.len().saturating_sub(1);
+                                let is_live_tail = session_has_active_turn && is_transcript_tail;
+                                let message_content = div()
                                     .flex()
                                     .flex_col()
                                     .gap_2()
@@ -2042,8 +2101,18 @@ impl DesktopShell {
                                             window,
                                             cx,
                                         ))
-                                    })
-                                    .into_any_element()
+                                    });
+                                if is_transcript_tail {
+                                    div()
+                                        .flex()
+                                        .items_start()
+                                        .gap_3()
+                                        .child(render_agent_blob(session_id, agent_blob_transition))
+                                        .child(message_content.flex_1().min_w_0())
+                                        .into_any_element()
+                                } else {
+                                    message_content.into_any_element()
+                                }
                             };
                             transcript.child(
                                 div()
@@ -2070,7 +2139,11 @@ impl DesktopShell {
                     transcript.child(self.render_tool_group(
                         group,
                         show_activity,
-                        active_turn_elapsed,
+                        AgentTurnPresentation {
+                            session_id,
+                            blob_transition: agent_blob_transition,
+                            elapsed: active_turn_elapsed,
+                        },
                         window,
                         cx,
                     ))
@@ -2085,7 +2158,7 @@ impl DesktopShell {
         &self,
         group: &ToolGroup,
         show_activity: bool,
-        active_turn_elapsed: Option<Duration>,
+        agent_turn: AgentTurnPresentation,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -2099,7 +2172,7 @@ impl DesktopShell {
         let mut container = div().w_full().max_w(px(720.)).text_sm().child(
             div()
                 .id(SharedString::from(format!("tool-group-{group_key}")))
-                .h(px(30.))
+                .h(px(36.))
                 .flex()
                 .items_center()
                 .gap_2()
@@ -2113,7 +2186,10 @@ impl DesktopShell {
                     cx.notify();
                 }))
                 .when(show_activity, |header| {
-                    header.child(render_tool_activity_orb(format!("group-{group_key}")))
+                    header.child(render_agent_blob(
+                        agent_turn.session_id,
+                        agent_turn.blob_transition,
+                    ))
                 })
                 .child(render_tool_group_summary(
                     group.summary(),
@@ -2125,7 +2201,7 @@ impl DesktopShell {
                         .iter()
                         .filter(|call| call.status == ToolStatus::Failed)
                         .count(),
-                    active_turn_elapsed,
+                    agent_turn.elapsed,
                     self.completed_tool_group_durations.get(&group_key).copied(),
                 )),
         );
@@ -2201,10 +2277,7 @@ impl DesktopShell {
                         .items_center()
                         .gap_1()
                         .text_color(status_color)
-                        .child(status_icon)
-                        .when(call.status == ToolStatus::Running, |indicator| {
-                            indicator.child(render_tool_activity_orb(format!("call-{}", call.id)))
-                        }),
+                        .child(status_icon),
                 )
                 .child(
                     div()
@@ -2902,160 +2975,296 @@ fn conversation_markdown_style(cx: &App) -> TextViewStyle {
     style
 }
 
-fn render_tool_activity_orb(key: impl Into<SharedString>) -> gpui::AnyElement {
-    let key = key.into();
+fn render_agent_blob(session_id: SessionId, transition: AgentBlobTransition) -> gpui::AnyElement {
     div()
-        .size(px(TOOL_ACTIVITY_ORB_SIZE as f32))
+        .size(px(AGENT_BLOB_SIZE))
         .flex_none()
         .relative()
         .overflow_hidden()
         .with_animation(
-            key,
-            Animation::new(TOOL_ACTIVITY_ORB_DURATION).repeat(),
-            |orb, progress| {
-                let time = f64::from(progress)
-                    * TOOL_ACTIVITY_ORB_DURATION.as_secs_f64()
-                    * TOOL_ACTIVITY_ORB_SPEED;
-                orb.children(tool_activity_frame(time).into_iter().map(|dot| {
-                    let diameter = dot.radius * 2.;
-                    let gray = ((1. - dot.white.clamp(0., 1.)) * 255.).round() as u32;
-                    let color = (gray << 16) | (gray << 8) | gray;
-                    div()
-                        .absolute()
-                        .left(px((dot.x - dot.radius) as f32))
-                        .top(px((dot.y - dot.radius) as f32))
-                        .size(px(diameter as f32))
-                        .rounded_full()
-                        .bg(rgb(color))
-                        .opacity(dot.alpha as f32)
-                }))
+            SharedString::from(format!("agent-blob-{session_id}")),
+            Animation::new(AGENT_BLOB_LOOP_DURATION).repeat(),
+            move |blob, progress| {
+                let time = progress * AGENT_BLOB_LOOP_DURATION.as_secs_f32();
+                let transition_progress = agent_blob_transition_progress(
+                    transition.started_at.elapsed(),
+                    AGENT_BLOB_TRANSITION_DURATION,
+                );
+                let pose = interpolate_agent_blob_pose(
+                    agent_blob_pose(transition.from, time),
+                    agent_blob_pose(transition.to, time),
+                    transition_progress,
+                );
+                blob.child(render_agent_blob_frame(pose))
             },
         )
         .into_any_element()
 }
 
-/// Port of thinking-orbs' MIT-licensed 20px `working`/`orbits` frame.
-/// The source geometry is deterministic 3D math; GPUI only paints its final,
-/// depth-sorted dots. See vendor/thinking-orbs/LICENSE.
-#[derive(Clone, Copy, Debug)]
-struct ToolActivityDot {
-    x: f64,
-    y: f64,
-    z: f64,
-    radius: f64,
-    white: f64,
-    alpha: f64,
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AgentBlobPose {
+    outline: [(f32, f32); 10],
+    left_eye: (f32, f32),
+    right_eye: (f32, f32),
+    left_eye_size: (f32, f32),
+    right_eye_size: (f32, f32),
+    mouth: (f32, f32, f32, f32),
 }
 
-fn tool_activity_frame(time: f64) -> Vec<ToolActivityDot> {
-    const ORBIT_COUNT: usize = 3;
-    const GHOST_COUNT: usize = 10;
-    const PARTICLES_PER_ORBIT: usize = 3;
-    const GHOST_RADIUS: f64 = 2.16;
-    const GHOST_ALPHA: f64 = 0.5;
-    const PARTICLE_RADIUS: f64 = 2.88;
-    const PARTICLE_DEPTH_RADIUS: f64 = 3.84;
-    const MIN_RADIUS: f64 = 0.3;
-
-    let center = TOOL_ACTIVITY_ORB_SIZE / 2.;
-    let outer_radius = center * 0.82;
-    let radius_scale = (TOOL_ACTIVITY_ORB_SIZE / 300.).powf(0.6);
-    let yaw = time * 0.12;
-    let tilt = 0.3;
-    let mut dots = Vec::with_capacity(ORBIT_COUNT * (GHOST_COUNT + PARTICLES_PER_ORBIT));
-
-    for orbit in 0..ORBIT_COUNT {
-        let orbit = orbit as f64;
-        let h1 = thinking_orb_hash(orbit, 1.7);
-        let h2 = thinking_orb_hash(orbit, 5.2);
-        let h3 = thinking_orb_hash(orbit, 8.9);
-        let orbit_radius = outer_radius * (0.45 + 0.52 * h1);
-        let theta = h1 * std::f64::consts::TAU;
-        let phi = (2. * h2 - 1.).acos();
-        let normal_x = phi.sin() * theta.cos();
-        let normal_y = phi.cos();
-        let normal_z = phi.sin() * theta.sin();
-        let mut basis_u_x = -normal_y;
-        let mut basis_u_y = normal_x;
-        let basis_u_z = 0.;
-        let basis_u_length = (basis_u_x * basis_u_x + basis_u_y * basis_u_y)
-            .sqrt()
-            .max(1e-6);
-        basis_u_x /= basis_u_length;
-        basis_u_y /= basis_u_length;
-        let basis_v_x = normal_y * basis_u_z - normal_z * basis_u_y;
-        let basis_v_y = normal_z * basis_u_x - normal_x * basis_u_z;
-        let basis_v_z = normal_x * basis_u_y - normal_y * basis_u_x;
-        let speed = (0.25 + 0.55 * h3) * if h3 > 0.5 { 1. } else { -1. };
-
-        for index in 0..GHOST_COUNT {
-            let angle = index as f64 / GHOST_COUNT as f64 * std::f64::consts::TAU;
-            let (x, y, z) = project_tool_activity_point(
-                (basis_u_x * angle.cos() + basis_v_x * angle.sin()) * orbit_radius,
-                (basis_u_y * angle.cos() + basis_v_y * angle.sin()) * orbit_radius,
-                (basis_u_z * angle.cos() + basis_v_z * angle.sin()) * orbit_radius,
-                yaw,
-                tilt,
-                center,
-            );
-            let depth = (z / orbit_radius + 1.) / 2.;
-            dots.push(ToolActivityDot {
-                x,
-                y,
-                z,
-                radius: (GHOST_RADIUS * radius_scale).max(MIN_RADIUS),
-                white: 0.72,
-                alpha: GHOST_ALPHA * (0.4 + 0.6 * depth),
-            });
+fn agent_blob_pose(state: AgentBlobState, time: f32) -> AgentBlobPose {
+    let slow = (time * 2.1).sin();
+    let quick = (time * 5.4).sin();
+    match state {
+        AgentBlobState::Idle => {
+            let breath = (time * 1.25).sin();
+            let eye_openness = idle_blink_openness(time);
+            let gaze = idle_gaze_offset(time);
+            let eye_size = (2.5 + (1. - eye_openness) * 0.5, 3.4 * eye_openness);
+            AgentBlobPose {
+                outline: [
+                    (12., 1.2 + breath * 0.55),
+                    (15.1 + breath * 0.15, 6.5 + breath * 0.2),
+                    (21.8 - breath * 0.35, 5.6),
+                    (18.1 - breath * 0.2, 11.5),
+                    (22.2 - breath * 0.4, 18.2),
+                    (14.5, 16.8 - breath * 0.3),
+                    (9.2, 22.2 - breath * 0.55),
+                    (7.7 + breath * 0.2, 15.4),
+                    (1.8 + breath * 0.35, 11.5),
+                    (7.6 + breath * 0.2, 8.6),
+                ],
+                left_eye: (9.1 + gaze.0, 10.4 + gaze.1),
+                right_eye: (15.1 + gaze.0, 10.4 + gaze.1),
+                left_eye_size: eye_size,
+                right_eye_size: eye_size,
+                mouth: (10.4, 14.3 + breath * 0.12, 3.3, 1.2),
+            }
         }
-
-        for index in 0..PARTICLES_PER_ORBIT {
-            let angle = time * speed
-                + index as f64 / PARTICLES_PER_ORBIT as f64 * std::f64::consts::TAU
-                + h2 * 6.;
-            let (x, y, z) = project_tool_activity_point(
-                (basis_u_x * angle.cos() + basis_v_x * angle.sin()) * orbit_radius,
-                (basis_u_y * angle.cos() + basis_v_y * angle.sin()) * orbit_radius,
-                (basis_u_z * angle.cos() + basis_v_z * angle.sin()) * orbit_radius,
-                yaw,
-                tilt,
-                center,
-            );
-            let depth = (z / orbit_radius + 1.) / 2.;
-            dots.push(ToolActivityDot {
-                x,
-                y,
-                z,
-                radius: ((PARTICLE_RADIUS + PARTICLE_DEPTH_RADIUS * depth) * radius_scale)
-                    .max(MIN_RADIUS),
-                white: 0.3 - 0.22 * depth,
-                alpha: 1.,
-            });
+        AgentBlobState::Thinking => {
+            let pondering = (time * 0.95).sin();
+            let gaze = (0.45 + pondering * 0.4, -0.45 + pondering * 0.15);
+            AgentBlobPose {
+                outline: [
+                    (13.5 + slow * 1.2, 0.8),
+                    (15.8, 6.8),
+                    (22.6, 6.),
+                    (18.4, 11.3),
+                    (21.1, 18.8),
+                    (14., 17.2),
+                    (8.4, 22.7),
+                    (7.5, 15.3),
+                    (2., 12.7),
+                    (8.1 - slow * 0.8, 8.2),
+                ],
+                left_eye: (9.8 + gaze.0, 9.3 + gaze.1),
+                right_eye: (15.6 + gaze.0, 8.5 + gaze.1),
+                left_eye_size: (2.3, 2.55 + (pondering + 1.) * 0.35),
+                right_eye_size: (2.3, 3.25 - (pondering + 1.) * 0.35),
+                mouth: (11.3 + pondering * 0.25, 14.1, 3., 1.2),
+            }
         }
+        AgentBlobState::Working => {
+            let scan = (time * 3.1).sin();
+            AgentBlobPose {
+                outline: [
+                    (12. + quick * 0.8, 2.2),
+                    (15.6, 7.),
+                    (23., 7. + quick * 1.3),
+                    (18.7, 11.8),
+                    (22. + quick * 1.1, 18.),
+                    (14.2, 17.),
+                    (8., 22. - quick * 0.9),
+                    (7., 15.),
+                    (1.4 - quick * 1.1, 12.),
+                    (7.4, 8.),
+                ],
+                left_eye: (8.9 + scan * 0.65, 10.7),
+                right_eye: (15.2 + scan * 0.65, 10.7),
+                left_eye_size: (3., 1.45 + scan.max(0.) * 0.35),
+                right_eye_size: (3., 1.45 + (-scan).max(0.) * 0.35),
+                mouth: (10.1, 14.2 + quick * 0.12, 4., 1.2),
+            }
+        }
+        AgentBlobState::Responding => {
+            let cadence = (quick + 1.) * 0.5;
+            let gaze = (time * 1.7).sin() * 0.25;
+            AgentBlobPose {
+                outline: [
+                    (12., 1.4 - slow * 0.8),
+                    (15.2, 6.6),
+                    (22.3, 5.8 + slow * 0.8),
+                    (18.3, 11.4),
+                    (22.4, 18.6),
+                    (14.4, 16.8),
+                    (9., 22.8 + slow * 0.75),
+                    (7.5, 15.4),
+                    (1.4, 11.4 - slow * 0.8),
+                    (7.7, 8.4),
+                ],
+                left_eye: (9. + gaze, 10.1),
+                right_eye: (15.1 + gaze, 10.1),
+                left_eye_size: (2.5, 3.2 + cadence * 0.45),
+                right_eye_size: (2.5, 3.65 - cadence * 0.35),
+                mouth: (10.7, 13.1, 2.7, 2.8 + cadence * 1.3),
+            }
+        }
+        AgentBlobState::Error => AgentBlobPose {
+            outline: [
+                (12., 3.2),
+                (15.2, 7.4),
+                (21.4, 7.8),
+                (18., 12.3),
+                (20.7, 20.4),
+                (14., 18.),
+                (8.4, 23.),
+                (7.1, 16.4),
+                (2.1, 14.2),
+                (7.5, 9.4),
+            ],
+            left_eye: (8.9, 11.),
+            right_eye: (15.2, 11.),
+            left_eye_size: (3.2, 1.25),
+            right_eye_size: (2.6, 1.55),
+            mouth: (11., 14.2, 2.2, 3.),
+        },
+    }
+}
+
+fn idle_blink_openness(time: f32) -> f32 {
+    let phase = time.rem_euclid(5.6);
+    if phase < 5.32 {
+        return 1.;
     }
 
-    dots.sort_by(|left, right| left.z.total_cmp(&right.z));
-    dots
+    let progress = (phase - 5.32) / 0.28;
+    1. - (progress * std::f32::consts::PI).sin() * 0.82
 }
 
-fn thinking_orb_hash(a: f64, b: f64) -> f64 {
-    let hash = (a * 12.9898 + b * 78.233).sin() * 43_758.545_3;
-    hash - hash.floor()
+fn idle_gaze_offset(time: f32) -> (f32, f32) {
+    let phase = time.rem_euclid(9.);
+    match phase {
+        phase if phase < 2.4 => (0., 0.),
+        phase if phase < 2.65 => {
+            interpolate_point((0., 0.), (-0.75, 0.15), smooth_step((phase - 2.4) / 0.25))
+        }
+        phase if phase < 5. => (-0.75, 0.15),
+        phase if phase < 5.25 => interpolate_point(
+            (-0.75, 0.15),
+            (0.65, -0.45),
+            smooth_step((phase - 5.) / 0.25),
+        ),
+        phase if phase < 7.8 => (0.65, -0.45),
+        phase if phase < 8.1 => {
+            interpolate_point((0.65, -0.45), (0., 0.), smooth_step((phase - 7.8) / 0.3))
+        }
+        _ => (0., 0.),
+    }
 }
 
-fn project_tool_activity_point(
-    x: f64,
-    y: f64,
-    z: f64,
-    yaw: f64,
-    tilt: f64,
-    center: f64,
-) -> (f64, f64, f64) {
-    let x_rotated = x * yaw.cos() + z * yaw.sin();
-    let z_rotated = -x * yaw.sin() + z * yaw.cos();
-    let y_rotated = y * tilt.cos() - z_rotated * tilt.sin();
-    let depth = y * tilt.sin() + z_rotated * tilt.cos();
-    (center + x_rotated, center - y_rotated, depth)
+fn interpolate_agent_blob_pose(
+    from: AgentBlobPose,
+    to: AgentBlobPose,
+    progress: f32,
+) -> AgentBlobPose {
+    AgentBlobPose {
+        outline: std::array::from_fn(|index| {
+            interpolate_point(from.outline[index], to.outline[index], progress)
+        }),
+        left_eye: interpolate_point(from.left_eye, to.left_eye, progress),
+        right_eye: interpolate_point(from.right_eye, to.right_eye, progress),
+        left_eye_size: interpolate_point(from.left_eye_size, to.left_eye_size, progress),
+        right_eye_size: interpolate_point(from.right_eye_size, to.right_eye_size, progress),
+        mouth: (
+            interpolate_value(from.mouth.0, to.mouth.0, progress),
+            interpolate_value(from.mouth.1, to.mouth.1, progress),
+            interpolate_value(from.mouth.2, to.mouth.2, progress),
+            interpolate_value(from.mouth.3, to.mouth.3, progress),
+        ),
+    }
+}
+
+fn agent_blob_transition_progress(elapsed: Duration, duration: Duration) -> f32 {
+    let progress = (elapsed.as_secs_f32() / duration.as_secs_f32()).clamp(0., 1.);
+    smooth_step(progress)
+}
+
+fn smooth_step(progress: f32) -> f32 {
+    let progress = progress.clamp(0., 1.);
+    progress * progress * (3. - 2. * progress)
+}
+
+fn interpolate_value(from: f32, to: f32, progress: f32) -> f32 {
+    from + (to - from) * progress
+}
+
+fn render_agent_blob_frame(pose: AgentBlobPose) -> gpui::AnyElement {
+    let scale = AGENT_BLOB_SIZE / 24.;
+    let eye = |position: (f32, f32), size: (f32, f32)| {
+        div()
+            .absolute()
+            .left(px((position.0 - size.0 / 2.) * scale))
+            .top(px((position.1 - size.1 / 2.) * scale))
+            .w(px(size.0 * scale))
+            .h(px(size.1 * scale))
+            .rounded_full()
+            .bg(rgb(0xf1ecdf))
+    };
+
+    div()
+        .size(px(AGENT_BLOB_SIZE))
+        .relative()
+        .child(
+            canvas(
+                move |bounds, _, _| {
+                    let position = |(x, y): (f32, f32)| {
+                        point(
+                            bounds.origin.x + px(x * scale),
+                            bounds.origin.y + px(y * scale),
+                        )
+                    };
+                    let build_path = |mut path: PathBuilder| {
+                        path.move_to(position(midpoint(pose.outline[7], pose.outline[0])));
+                        for index in 0..pose.outline.len() {
+                            let current = pose.outline[index];
+                            let next = pose.outline[(index + 1) % pose.outline.len()];
+                            path.curve_to(position(midpoint(current, next)), position(current));
+                        }
+                        path.close();
+                        path.build()
+                    };
+                    (
+                        build_path(PathBuilder::fill()),
+                        build_path(PathBuilder::stroke(px(1.1 * scale))),
+                    )
+                },
+                |_, (fill, outline), window, _| {
+                    if let Ok(fill) = fill {
+                        window.paint_path(fill, Hsla::from(rgb(0x686dc2)));
+                    }
+                    if let Ok(outline) = outline {
+                        window.paint_path(outline, Hsla::from(rgb(0x3e437d)));
+                    }
+                },
+            )
+            .size(px(AGENT_BLOB_SIZE)),
+        )
+        .child(eye(pose.left_eye, pose.left_eye_size))
+        .child(eye(pose.right_eye, pose.right_eye_size))
+        .child(
+            div()
+                .absolute()
+                .left(px(pose.mouth.0 * scale))
+                .top(px(pose.mouth.1 * scale))
+                .w(px(pose.mouth.2 * scale))
+                .h(px(pose.mouth.3 * scale))
+                .rounded_full()
+                .bg(rgb(0xf1ecdf)),
+        )
+        .into_any_element()
+}
+
+fn midpoint(left: (f32, f32), right: (f32, f32)) -> (f32, f32) {
+    ((left.0 + right.0) / 2., (left.1 + right.1) / 2.)
 }
 
 fn tool_group_shows_activity(
@@ -3444,50 +3653,76 @@ mod tests {
     }
 
     #[test]
-    fn tool_activity_frame_matches_thinking_orbs_working_20_golden_data() {
-        let frame = tool_activity_frame(0.6);
+    fn agent_blob_states_share_topology_and_interpolate() {
+        let idle = agent_blob_pose(AgentBlobState::Idle, 0.);
+        let working = agent_blob_pose(AgentBlobState::Working, 0.);
+        let midpoint = interpolate_agent_blob_pose(idle, working, 0.5);
 
-        assert_eq!(frame.len(), 39);
-        assert!(frame.windows(2).all(|dots| dots[0].z <= dots[1].z));
-        let sums = frame.iter().fold([0.; 6], |mut sums, dot| {
-            for (sum, value) in sums
-                .iter_mut()
-                .zip([dot.x, dot.y, dot.z, dot.radius, dot.white, dot.alpha])
-            {
-                *sum += value;
-            }
-            sums
-        });
-        for (value, expected) in sums
-            .into_iter()
-            .zip([390., 390.000001, 0.000001, 21.27006, 23.31, 19.5])
-        {
-            assert!((value - expected).abs() < 0.0001, "{value} != {expected}");
-        }
-        for (actual, expected) in [
+        assert_eq!(idle.outline.len(), working.outline.len());
+        assert_eq!(
+            midpoint.outline[0],
             (
-                frame.first().expect("frame should contain a first dot"),
-                [11.235898, 9.940794, -7.451958, 0.425401, 0.72, 0.202026],
-            ),
+                (idle.outline[0].0 + working.outline[0].0) / 2.,
+                (idle.outline[0].1 + working.outline[0].1) / 2.,
+            )
+        );
+        assert_eq!(
+            midpoint.left_eye,
             (
-                frame.last().expect("frame should contain a last dot"),
-                [9.230714, 10.206142, 7.51188, 1.321364, 0.080613, 1.],
+                (idle.left_eye.0 + working.left_eye.0) / 2.,
+                (idle.left_eye.1 + working.left_eye.1) / 2.,
+            )
+        );
+    }
+
+    #[test]
+    fn idle_agent_blob_breathes_and_blinks_between_long_open_eye_intervals() {
+        let resting = agent_blob_pose(AgentBlobState::Idle, 0.);
+        let breathing = agent_blob_pose(AgentBlobState::Idle, 1.25);
+        let blinking = agent_blob_pose(AgentBlobState::Idle, 5.46);
+
+        assert_ne!(resting.outline, breathing.outline);
+        assert_eq!(idle_blink_openness(0.), 1.);
+        assert_eq!(idle_blink_openness(5.), 1.);
+        assert!(idle_blink_openness(5.46) < 0.2);
+        assert!(blinking.left_eye_size.1 < resting.left_eye_size.1);
+    }
+
+    #[test]
+    fn agent_blob_expressions_change_within_a_state() {
+        let idle_centered = agent_blob_pose(AgentBlobState::Idle, 1.);
+        let idle_looking_left = agent_blob_pose(AgentBlobState::Idle, 3.);
+        let thinking_a = agent_blob_pose(AgentBlobState::Thinking, 0.);
+        let thinking_b = agent_blob_pose(AgentBlobState::Thinking, 3.);
+        let working_a = agent_blob_pose(AgentBlobState::Working, 0.);
+        let working_b = agent_blob_pose(AgentBlobState::Working, 0.5);
+
+        assert_ne!(idle_centered.left_eye, idle_looking_left.left_eye);
+        assert_ne!(thinking_a.left_eye_size, thinking_b.left_eye_size);
+        assert_ne!(thinking_a.right_eye_size, thinking_b.right_eye_size);
+        assert_ne!(working_a.left_eye, working_b.left_eye);
+    }
+
+    #[test]
+    fn agent_blob_transition_progress_is_smooth_and_bounded() {
+        assert_eq!(
+            agent_blob_transition_progress(Duration::ZERO, AGENT_BLOB_TRANSITION_DURATION),
+            0.
+        );
+        assert_eq!(
+            agent_blob_transition_progress(
+                AGENT_BLOB_TRANSITION_DURATION,
+                AGENT_BLOB_TRANSITION_DURATION,
             ),
-        ] {
-            for (value, expected) in [
-                actual.x,
-                actual.y,
-                actual.z,
-                actual.radius,
-                actual.white,
-                actual.alpha,
-            ]
-            .into_iter()
-            .zip(expected)
-            {
-                assert!((value - expected).abs() < 0.0001, "{value} != {expected}");
-            }
-        }
+            1.
+        );
+        assert_eq!(
+            agent_blob_transition_progress(
+                AGENT_BLOB_TRANSITION_DURATION * 2,
+                AGENT_BLOB_TRANSITION_DURATION,
+            ),
+            1.
+        );
     }
 
     #[test]
