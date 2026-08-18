@@ -12,12 +12,15 @@ mod attachment_http;
 mod vendored_engine;
 
 pub const PROTOCOL_VERSION: u32 = 3;
+pub const ACTOR_BUILD_ID: &str = env!("AETHERFLOW_ACTOR_BUILD_ID");
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DaemonHealth {
     pub protocol_version: u32,
     pub package_version: String,
+    #[serde(default)]
+    pub actor_build_id: String,
 }
 
 impl DaemonHealth {
@@ -25,6 +28,7 @@ impl DaemonHealth {
         Self {
             protocol_version: PROTOCOL_VERSION,
             package_version: env!("CARGO_PKG_VERSION").to_owned(),
+            actor_build_id: ACTOR_BUILD_ID.to_owned(),
         }
     }
 }
@@ -64,6 +68,7 @@ async fn serve() -> Result<&'static str> {
         target: "aetherflowd",
         event = "daemon.starting",
         version = env!("CARGO_PKG_VERSION"),
+        actor_build_id = ACTOR_BUILD_ID,
         process_id = std::process::id(),
         endpoint = %config.endpoint,
         namespace = %config.namespace,

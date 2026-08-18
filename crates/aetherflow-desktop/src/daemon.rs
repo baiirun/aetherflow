@@ -1,4 +1,4 @@
-use aetherflow_pi::daemon::{DaemonHealth, PROTOCOL_VERSION};
+use aetherflow_pi::daemon::{ACTOR_BUILD_ID, DaemonHealth, PROTOCOL_VERSION};
 use anyhow::{Context, Result, bail};
 use std::{
     collections::HashSet,
@@ -328,13 +328,15 @@ fn terminate_daemon_process(process_id: u32) -> Result<()> {
 }
 
 fn ensure_compatible_daemon(health: &DaemonHealth) -> Result<()> {
-    if health.protocol_version != PROTOCOL_VERSION {
+    if health.protocol_version != PROTOCOL_VERSION || health.actor_build_id != ACTOR_BUILD_ID {
         bail!(
-            "Aetherflow daemon is incompatible: desktop package version {} requires protocol {}, but daemon package version {} reports protocol {}. Reinstall with `cargo install --path crates/aetherflow-desktop --force`",
+            "Aetherflow daemon is incompatible: desktop package version {} requires protocol {} actor build {}, but daemon package version {} reports protocol {} actor build {}. Reinstall with `cargo install --path crates/aetherflow-desktop --force`",
             env!("CARGO_PKG_VERSION"),
             PROTOCOL_VERSION,
+            ACTOR_BUILD_ID,
             health.package_version,
             health.protocol_version,
+            health.actor_build_id,
         );
     }
     Ok(())
@@ -625,8 +627,21 @@ mod tests {
         ensure_compatible_daemon(&DaemonHealth {
             protocol_version: PROTOCOL_VERSION,
             package_version: "9.9.9".to_owned(),
+            actor_build_id: ACTOR_BUILD_ID.to_owned(),
         })
         .expect("protocol-compatible daemon should be accepted");
+    }
+
+    #[test]
+    fn rejects_the_same_protocol_from_a_different_build() {
+        let error = ensure_compatible_daemon(&DaemonHealth {
+            protocol_version: PROTOCOL_VERSION,
+            package_version: env!("CARGO_PKG_VERSION").to_owned(),
+            actor_build_id: "stale-build".to_owned(),
+        })
+        .expect_err("a different actor build should be rejected");
+
+        assert!(error.to_string().contains("daemon is incompatible"));
     }
 
     #[test]
@@ -634,6 +649,7 @@ mod tests {
         let error = ensure_compatible_daemon(&DaemonHealth {
             protocol_version: PROTOCOL_VERSION + 1,
             package_version: env!("CARGO_PKG_VERSION").to_owned(),
+            actor_build_id: ACTOR_BUILD_ID.to_owned(),
         })
         .expect_err("mismatched daemon protocol should be rejected");
 
@@ -673,6 +689,44 @@ mod tests {
             !attachment_is_ready(&target)
                 .await
                 .expect("probe legacy attachment transport")
+        );
+        server.join().expect("join attachment probe server");
+    }
+
+    #[tokio::test]
+    async fn rejects_health_without_an_actor_build_id() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind attachment probe server");
+        let attachment_endpoint = format!(
+            "http://{}",
+            listener.local_addr().expect("read probe server address")
+        );
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept attachment probe");
+            let mut request = [0_u8; 4096];
+            let bytes_read = stream.read(&mut request).expect("read attachment probe");
+            let request = String::from_utf8_lossy(&request[..bytes_read]);
+            assert!(request.starts_with("GET /health "), "{request}");
+            let body =
+                format!(r#"{{"protocolVersion":{PROTOCOL_VERSION},"packageVersion":"0.1.0"}}"#);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len(),
+            )
+            .expect("write legacy attachment probe response");
+        });
+        let target = DaemonTarget {
+            endpoint: "http://127.0.0.1:6420".to_owned(),
+            attachment_endpoint,
+            token: "dev".to_owned(),
+            namespace: "default".to_owned(),
+            pool: "rivetkit-rust".to_owned(),
+        };
+
+        assert!(
+            !attachment_is_ready(&target)
+                .await
+                .expect("probe health without a build ID")
         );
         server.join().expect("join attachment probe server");
     }

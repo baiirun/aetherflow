@@ -93,8 +93,8 @@ It does not currently provide:
   heading. Clicking that heading MUST toggle the archived rows without changing
   any Session's archive state.
 - The `Archived` heading MUST NOT use a chip or disclosure icon. Its expanded or
-  collapsed state is transient desktop presentation state and MUST NOT be
-  persisted as Session metadata.
+  collapsed state is desktop preference state that MUST survive an app relaunch
+  and MUST NOT be persisted as Session metadata.
 
 ### Attachments
 
@@ -159,7 +159,7 @@ sequenceDiagram
 
     UI->>E: Read fresh runner registrations
     UI->>A: GET /health
-    alt compatible runner and attachment transport exist
+    alt matching protocol, actor build, runner, and attachment transport exist
         UI->>E: List Workspaces and Sessions
     else incompatible daemon owns the local endpoint
         UI->>D: TERM incompatible aetherflowd
@@ -169,7 +169,7 @@ sequenceDiagram
         D->>A: Bind attachment transport
         D->>R: Register Session, Session Directory, and Workspace Catalog actors
         UI->>E: Wait for a new fresh runner
-        UI->>A: Verify daemon protocol health
+        UI->>A: Verify daemon protocol and actor build
         UI->>E: List Workspaces and Sessions
     else no daemon is ready
         UI->>D: Launch bundled or sibling helper
@@ -177,7 +177,7 @@ sequenceDiagram
         D->>A: Bind attachment transport
         D->>R: Register Session, Session Directory, and Workspace Catalog actors
         UI->>E: Wait for a new fresh runner
-        UI->>A: Verify daemon protocol health
+        UI->>A: Verify daemon protocol and actor build
         UI->>E: List Workspaces and Sessions
     end
 ```
@@ -236,7 +236,7 @@ scripts/smoke-session-lifecycle.sh
 
 For the desktop archive disclosure, verify manually that clicking the plain
 `Archived` heading hides and restores the archived rows, while restarting the
-desktop returns the section to its default expanded state and does not change
+desktop restores the most recently chosen disclosure state and does not change
 which Sessions are archived.
 
 The following tests are the contract anchors:

@@ -18,13 +18,15 @@ truth.
 | Pi conversation continuation | Pi session JSONL | Aetherflow `SessionId` | Pi process and daemon restart | Pi owns the continuation format; Aetherflow does not reconstruct it from Session Events. |
 | Session discovery and navigation metadata | Session Directory actor SQL | `SessionId` | Directory sleep and daemon restart | Title, archive state, and activity time are a dedicated read model. |
 | Attachment bytes and integrity metadata | Local content-addressed filesystem store | SHA-256 `AttachmentId` | Process restart | Repeated uploads deduplicate; Session commands and events store references only. |
+| Desktop presentation preferences | Local `desktop-preferences.json` | Host user | App relaunch | Presentation only; currently remembers whether the archived Sessions section is collapsed. |
 | Live event delivery | Rivet subscription | Connection plus Session actor | No | A transient acceleration over durable history. |
 | Desktop transcript and optimistic composer state | GPUI process memory | `SessionId` | No | Derived from Session Events and current user actions. |
 
-By default, Pi continuation lives under `~/.aetherflow/pi-sessions` and
-Attachments under `~/.aetherflow/attachments`. `AETHERFLOW_DATA_DIR` relocates
-these default Aetherflow-managed filesystem stores; callers may also choose a
-Pi session directory explicitly. Rivet Engine manages its own local actor
+By default, Pi continuation lives under `~/.aetherflow/pi-sessions`, Attachments
+under `~/.aetherflow/attachments`, and desktop preferences at
+`~/.aetherflow/desktop-preferences.json`. `AETHERFLOW_DATA_DIR` relocates these
+default Aetherflow-managed filesystem stores; callers may also choose a Pi
+session directory explicitly. Rivet Engine manages its own local actor
 persistence according to its configuration.
 
 ## Write paths

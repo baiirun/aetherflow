@@ -1,4 +1,5 @@
 mod daemon;
+mod preferences;
 mod transcript;
 
 use aetherflow_pi::{
@@ -17,8 +18,10 @@ use gpui::{
     point, prelude::*, px, rgb, rgba, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::resizable::{h_resizable, resizable_panel};
 use gpui_component::text::{TextView, TextViewStyle};
 use gpui_component::{Icon, IconName};
+use preferences::DesktopPreferences;
 use std::{
     borrow::Cow,
     cmp::Reverse,
@@ -36,6 +39,8 @@ use transcript::{
 };
 
 const SIDEBAR_WIDTH: f32 = 280.;
+const SIDEBAR_MIN_WIDTH: f32 = 220.;
+const SIDEBAR_MAX_WIDTH: f32 = 420.;
 const CHAT_FONT_SIZE: f32 = 14.;
 const SESSION_ROW_HEIGHT: f32 = 30.;
 const SESSION_ROW_ACTION_HEIGHT: f32 = 22.;
@@ -199,6 +204,13 @@ struct DesktopShell {
 
 impl DesktopShell {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let (preferences, preferences_error) = match DesktopPreferences::load() {
+            Ok(preferences) => (preferences, None),
+            Err(error) => (
+                DesktopPreferences::default(),
+                Some(format!("Could not load desktop preferences: {error:#}")),
+            ),
+        };
         let composer = cx.new(|cx| InputState::new(window, cx).placeholder("Message Aetherflow"));
         let workspace_name = cx.new(|cx| InputState::new(window, cx).placeholder("Workspace name"));
         let input_subscription = cx.subscribe_in(
@@ -244,7 +256,7 @@ impl DesktopShell {
             previous_stream_texts: HashMap::new(),
             tool_group_expansion: HashMap::new(),
             expanded_tool_calls: HashSet::new(),
-            archived_sessions_collapsed: false,
+            archived_sessions_collapsed: preferences.archived_sessions_collapsed,
             loading_conversations: HashSet::new(),
             conversation_errors: HashMap::new(),
             new_session_messages: Vec::new(),
@@ -266,11 +278,22 @@ impl DesktopShell {
             is_creating_workspace: false,
             cancelling_turn_session_ids: HashSet::new(),
             load_state: SessionLoadState::Loading,
-            action_error: None,
+            action_error: preferences_error,
             _subscriptions: vec![input_subscription, workspace_name_subscription],
         };
         shell.connect_daemon(cx);
         shell
+    }
+
+    fn toggle_archived_sessions(&mut self, cx: &mut Context<Self>) {
+        self.archived_sessions_collapsed = !self.archived_sessions_collapsed;
+        let preferences = DesktopPreferences {
+            archived_sessions_collapsed: self.archived_sessions_collapsed,
+        };
+        if let Err(error) = preferences.save() {
+            self.action_error = Some(format!("Could not save desktop preferences: {error:#}"));
+        }
+        cx.notify();
     }
 
     fn connect_daemon(&mut self, cx: &mut Context<Self>) {
@@ -1459,9 +1482,7 @@ impl DesktopShell {
                             .hover(|style| style.text_color(rgb(0x929599)))
                             .child("Archived")
                             .on_click(cx.listener(|shell, _, _, cx| {
-                                shell.archived_sessions_collapsed =
-                                    !shell.archived_sessions_collapsed;
-                                cx.notify();
+                                shell.toggle_archived_sessions(cx);
                             })),
                     );
                     if !archived_sessions_collapsed {
@@ -1492,7 +1513,7 @@ impl DesktopShell {
         }
 
         div()
-            .w(px(SIDEBAR_WIDTH))
+            .w_full()
             .h_full()
             .flex()
             .flex_col()
@@ -2411,8 +2432,16 @@ impl Render for DesktopShell {
             .bg(rgba(0x00000000))
             .font_family("Inter Variable")
             .text_color(rgb(0xe7eaf0))
-            .child(self.render_sidebar(cx))
-            .child(self.render_main_panel(window, cx))
+            .child(
+                h_resizable("desktop-panels")
+                    .child(
+                        resizable_panel()
+                            .size(px(SIDEBAR_WIDTH))
+                            .size_range(px(SIDEBAR_MIN_WIDTH)..px(SIDEBAR_MAX_WIDTH))
+                            .child(self.render_sidebar(cx)),
+                    )
+                    .child(resizable_panel().child(self.render_main_panel(window, cx))),
+            )
             .when(self.workspace_modal_open, |root| {
                 root.child(self.render_workspace_modal(cx))
             })

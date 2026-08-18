@@ -33,7 +33,7 @@ relevant ADR or explicitly describe why no decision record is needed.
 | `RUN-2` | One active Session actor owns one headless Pi RPC subprocess. |
 | `RUN-3` | The Pi subprocess is replaceable; actor state, Pi continuation, and event history survive its replacement. |
 | `RUN-4` | Closing the desktop does not terminate its daemon, allowing detached turns and CLI reconnection. |
-| `RUN-5` | A daemon is reusable across package versions only when its daemon protocol is compatible; an incompatible local daemon is stopped before its replacement launches. |
+| `RUN-5` | A daemon is reusable only when its daemon protocol and actor build fingerprint match the desktop; an incompatible local daemon is stopped before its replacement launches. |
 
 ## Events and observation
 

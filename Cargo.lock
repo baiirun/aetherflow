@@ -32,6 +32,7 @@ dependencies = [
  "gpui-component",
  "image",
  "reqwest",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
