@@ -13,6 +13,7 @@ pub mod daemon;
 pub mod protocol;
 mod session_actor;
 mod session_directory;
+mod workspace_catalog;
 
 pub use attachment_store::{LocalAttachmentStore, MAX_ATTACHMENT_BYTES};
 pub use client::{
@@ -34,6 +35,9 @@ pub use session_actor::{
 pub use session_directory::{
     DEFAULT_SESSION_DIRECTORY_KEY, SESSION_DIRECTORY_ACTOR_NAME, SessionDescriptor,
     SessionDirectoryActor,
+};
+pub use workspace_catalog::{
+    DEFAULT_WORKSPACE_CATALOG_KEY, WORKSPACE_CATALOG_ACTOR_NAME, WorkspaceCatalogActor,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -170,6 +174,8 @@ pub struct PiOptions {
     pub executable: PathBuf,
     pub cwd: PathBuf,
     pub storage: PiSessionStorage,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub append_system_prompt: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -188,6 +194,7 @@ impl Default for PiOptions {
             executable: PathBuf::from("pi"),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             storage: PiSessionStorage::Ephemeral,
+            append_system_prompt: Vec::new(),
         }
     }
 }
@@ -205,6 +212,7 @@ impl PiOptions {
                 directory: directory.into(),
                 session_id,
             },
+            append_system_prompt: Vec::new(),
         }
     }
 
@@ -249,6 +257,10 @@ impl PiRpc {
                     .arg("--session-id")
                     .arg(session_id.to_string());
             }
+        }
+
+        for prompt in &options.append_system_prompt {
+            command.arg("--append-system-prompt").arg(prompt);
         }
 
         let mut child = command
@@ -418,7 +430,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn persistent_process_uses_explicit_cwd_directory_and_session_id() {
+    async fn persistent_process_uses_explicit_cwd_directory_session_id_and_context() {
         use std::{fs, os::unix::fs::PermissionsExt};
         use tokio::time::{Duration, timeout};
 
@@ -439,6 +451,9 @@ mod tests {
         let session_id = SessionId::new();
         let mut options = PiOptions::persistent(&cwd, &session_directory, session_id);
         options.executable = executable.clone();
+        options
+            .append_system_prompt
+            .push("Additional workspace root: /other".to_owned());
         let process = PiRpc::spawn(options).unwrap();
 
         timeout(Duration::from_secs(2), async {
@@ -459,7 +474,7 @@ mod tests {
         assert_eq!(
             fs::read_to_string(executable.with_extension("args")).unwrap(),
             format!(
-                "--mode\nrpc\n--session-dir\n{}\n--session-id\n{}\n",
+                "--mode\nrpc\n--session-dir\n{}\n--session-id\n{}\n--append-system-prompt\nAdditional workspace root: /other\n",
                 session_directory.display(),
                 session_id
             )

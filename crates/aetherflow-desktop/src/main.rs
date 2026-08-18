@@ -3,21 +3,24 @@ mod transcript;
 
 use aetherflow_pi::{
     AetherflowClient, AetherflowClientOptions, AssistantMessageEvent, CreateSessionOptions,
-    DEFAULT_SESSION_DIRECTORY_KEY, DEFAULT_SESSION_EVENT_PAGE_SIZE, PiEvent,
-    SESSION_DIRECTORY_ACTOR_NAME, SessionDescriptor, SessionEvent, SessionEventPayload,
+    DEFAULT_SESSION_DIRECTORY_KEY, DEFAULT_SESSION_EVENT_PAGE_SIZE, DEFAULT_WORKSPACE_CATALOG_KEY,
+    PiEvent, SESSION_DIRECTORY_ACTOR_NAME, SessionDescriptor, SessionEvent, SessionEventPayload,
+    WORKSPACE_CATALOG_ACTOR_NAME,
 };
-use aetherflow_storage::SessionId;
+use aetherflow_storage::{DirectoryId, SessionId, Workspace, WorkspaceId};
 use daemon::{DaemonTarget, ManagedDaemon};
 use gpui::{
-    Animation, AnimationExt as _, App, Application, Bounds, Context, Div, Entity, ExternalPaths,
-    HighlightStyle, Hsla, KeyBinding, ObjectFit, Pixels, ScrollHandle, SharedString,
-    StyledImage as _, StyledText, Subscription, Timer, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowOptions, div, ease_out_quint, img, point,
-    prelude::*, px, rgb, rgba, size,
+    Animation, AnimationExt as _, App, Application, AssetSource, Bounds, Context, Div, Entity,
+    ExternalPaths, HighlightStyle, Hsla, KeyBinding, ObjectFit, PathPromptOptions, Pixels,
+    ScrollHandle, SharedString, StyledImage as _, StyledText, Subscription, Timer, TitlebarOptions,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div, ease_out_quint, img,
+    point, prelude::*, px, rgb, rgba, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::text::{TextView, TextViewStyle};
+use gpui_component::{Icon, IconName};
 use std::{
+    borrow::Cow,
     cmp::Reverse,
     collections::{HashMap, HashSet},
     io::Cursor,
@@ -51,6 +54,26 @@ const MAX_IMAGE_FILE_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_PROCESSED_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES: usize = 6 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION: u32 = 2_000;
+
+struct DesktopAssets;
+
+impl AssetSource for DesktopAssets {
+    fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        let bytes: Option<&'static [u8]> = match path {
+            "icons/plus.svg" => Some(include_bytes!("../assets/icons/plus.svg")),
+            "icons/close.svg" => Some(include_bytes!("../assets/icons/close.svg")),
+            "icons/folder.svg" => Some(include_bytes!("../assets/icons/folder.svg")),
+            "icons/folder-closed.svg" => Some(include_bytes!("../assets/icons/folder-closed.svg")),
+            "icons/folder-open.svg" => Some(include_bytes!("../assets/icons/folder-open.svg")),
+            _ => None,
+        };
+        Ok(bytes.map(Cow::Borrowed))
+    }
+
+    fn list(&self, _path: &str) -> anyhow::Result<Vec<SharedString>> {
+        Ok(Vec::new())
+    }
+}
 
 gpui::actions!(aetherflow, [NewSession, Quit]);
 
@@ -86,11 +109,16 @@ enum PromptUpdate {
 }
 
 enum DaemonStartup {
-    Existing(Vec<SessionDescriptor>),
+    Existing(DesktopData),
     Launched {
         daemon: ManagedDaemon,
-        sessions: Vec<SessionDescriptor>,
+        data: DesktopData,
     },
+}
+
+struct DesktopData {
+    sessions: Vec<SessionDescriptor>,
+    workspaces: Vec<Workspace>,
 }
 
 #[derive(Clone)]
@@ -103,7 +131,7 @@ struct PendingImage {
 async fn load_sessions_after_daemon_ready(
     client: &AetherflowClient,
     target: &DaemonTarget,
-) -> Result<Vec<SessionDescriptor>, String> {
+) -> Result<DesktopData, String> {
     daemon::recover_stalled_actor(
         target,
         SESSION_DIRECTORY_ACTOR_NAME,
@@ -111,10 +139,19 @@ async fn load_sessions_after_daemon_ready(
     )
     .await
     .map_err(|error| format!("{error:#}"))?;
-    client
-        .list_sessions()
-        .await
-        .map_err(|error| format!("{error:#}"))
+    daemon::recover_stalled_actor(
+        target,
+        WORKSPACE_CATALOG_ACTOR_NAME,
+        DEFAULT_WORKSPACE_CATALOG_KEY,
+    )
+    .await
+    .map_err(|error| format!("{error:#}"))?;
+    let (sessions, workspaces) = tokio::try_join!(client.list_sessions(), client.list_workspaces())
+        .map_err(|error| format!("{error:#}"))?;
+    Ok(DesktopData {
+        sessions,
+        workspaces,
+    })
 }
 
 struct DesktopShell {
@@ -123,7 +160,10 @@ struct DesktopShell {
     daemon_target: DaemonTarget,
     managed_daemon: Option<ManagedDaemon>,
     sessions: Vec<SessionDescriptor>,
+    workspaces: Vec<Workspace>,
     selected_session_id: Option<SessionId>,
+    selected_workspace_id: Option<WorkspaceId>,
+    creating_directory_id: Option<DirectoryId>,
     creating_new_session: bool,
     conversations: HashMap<SessionId, Vec<ConversationItem>>,
     conversation_scrolls: HashMap<SessionId, ScrollHandle>,
@@ -136,6 +176,11 @@ struct DesktopShell {
     conversation_errors: HashMap<SessionId, String>,
     new_session_messages: Vec<ConversationItem>,
     composer: Entity<InputState>,
+    workspace_name: Entity<InputState>,
+    workspace_modal_open: bool,
+    workspace_draft_directories: Vec<PathBuf>,
+    workspace_modal_error: Option<String>,
+    is_selecting_workspace_directories: bool,
     pending_images: Vec<PendingImage>,
     next_pending_image_id: u64,
     active_turn_session_ids: HashSet<SessionId>,
@@ -145,6 +190,7 @@ struct DesktopShell {
     completed_tool_group_durations: HashMap<String, Duration>,
     working_duration_tick_scheduled: bool,
     is_creating_session: bool,
+    is_creating_workspace: bool,
     cancelling_turn_session_ids: HashSet<SessionId>,
     load_state: SessionLoadState,
     action_error: Option<String>,
@@ -154,6 +200,7 @@ struct DesktopShell {
 impl DesktopShell {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let composer = cx.new(|cx| InputState::new(window, cx).placeholder("Message Aetherflow"));
+        let workspace_name = cx.new(|cx| InputState::new(window, cx).placeholder("Workspace name"));
         let input_subscription = cx.subscribe_in(
             &composer,
             window,
@@ -161,6 +208,15 @@ impl DesktopShell {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     shell.submit_prompt(window, cx);
                 }
+            },
+        );
+        let workspace_name_subscription = cx.subscribe_in(
+            &workspace_name,
+            window,
+            |shell, _, event: &InputEvent, _, cx| match event {
+                InputEvent::Change => cx.notify(),
+                InputEvent::PressEnter { .. } => shell.create_workspace(cx),
+                InputEvent::Focus | InputEvent::Blur => {}
             },
         );
         let client_options = desktop_client_options();
@@ -177,7 +233,10 @@ impl DesktopShell {
             daemon_target,
             managed_daemon: None,
             sessions: Vec::new(),
+            workspaces: Vec::new(),
             selected_session_id: None,
+            selected_workspace_id: None,
+            creating_directory_id: None,
             creating_new_session: false,
             conversations: HashMap::new(),
             conversation_scrolls: HashMap::new(),
@@ -190,6 +249,11 @@ impl DesktopShell {
             conversation_errors: HashMap::new(),
             new_session_messages: Vec::new(),
             composer,
+            workspace_name,
+            workspace_modal_open: false,
+            workspace_draft_directories: Vec::new(),
+            workspace_modal_error: None,
+            is_selecting_workspace_directories: false,
             pending_images: Vec::new(),
             next_pending_image_id: 0,
             active_turn_session_ids: HashSet::new(),
@@ -199,10 +263,11 @@ impl DesktopShell {
             completed_tool_group_durations: HashMap::new(),
             working_duration_tick_scheduled: false,
             is_creating_session: false,
+            is_creating_workspace: false,
             cancelling_turn_session_ids: HashSet::new(),
             load_state: SessionLoadState::Loading,
             action_error: None,
-            _subscriptions: vec![input_subscription],
+            _subscriptions: vec![input_subscription, workspace_name_subscription],
         };
         shell.connect_daemon(cx);
         shell
@@ -233,21 +298,25 @@ impl DesktopShell {
             let runner_snapshot = daemon::runner_snapshot(&daemon_target)
                 .await
                 .map_err(|error| format!("{error:#}"))?;
-            if runner_snapshot.is_ready()
+            let replaced_incompatible_daemon = daemon::replace_incompatible_daemon(&daemon_target)
+                .await
+                .map_err(|error| format!("{error:#}"))?;
+            if !replaced_incompatible_daemon
+                && runner_snapshot.is_ready()
                 && daemon::attachment_is_ready(&daemon_target)
                     .await
                     .map_err(|error| format!("{error:#}"))?
             {
-                let sessions = load_sessions_after_daemon_ready(&client, &daemon_target).await?;
-                return Ok(DaemonStartup::Existing(sessions));
+                let data = load_sessions_after_daemon_ready(&client, &daemon_target).await?;
+                return Ok(DaemonStartup::Existing(data));
             }
 
-            if managed_daemon_running {
+            if managed_daemon_running && !replaced_incompatible_daemon {
                 daemon::wait_for_runner(&daemon_target)
                     .await
                     .map_err(|error| format!("{error:#}"))?;
-                let sessions = load_sessions_after_daemon_ready(&client, &daemon_target).await?;
-                return Ok(DaemonStartup::Existing(sessions));
+                let data = load_sessions_after_daemon_ready(&client, &daemon_target).await?;
+                return Ok(DaemonStartup::Existing(data));
             }
 
             let mut daemon = tokio::task::spawn_blocking(daemon::launch)
@@ -257,8 +326,8 @@ impl DesktopShell {
             daemon::wait_for_launched_runner(&daemon_target, &mut daemon, runner_snapshot.keys())
                 .await
                 .map_err(|error| format!("{error:#}"))?;
-            let sessions = load_sessions_after_daemon_ready(&client, &daemon_target).await?;
-            Ok(DaemonStartup::Launched { daemon, sessions })
+            let data = load_sessions_after_daemon_ready(&client, &daemon_target).await?;
+            Ok(DaemonStartup::Launched { daemon, data })
         });
 
         cx.spawn(async move |shell, cx| {
@@ -268,16 +337,16 @@ impl DesktopShell {
                 .and_then(|result| result);
             let _ = shell.update(cx, |shell, cx| match result {
                 Ok(startup) => match startup {
-                    DaemonStartup::Existing(sessions) => {
-                        shell.replace_sessions(sessions);
+                    DaemonStartup::Existing(data) => {
+                        shell.replace_data(data);
                         if let Some(session_id) = shell.selected_session_id {
                             shell.load_conversation(session_id, cx);
                         }
                         cx.notify();
                     }
-                    DaemonStartup::Launched { daemon, sessions } => {
+                    DaemonStartup::Launched { daemon, data } => {
                         shell.managed_daemon = Some(daemon);
-                        shell.replace_sessions(sessions);
+                        shell.replace_data(data);
                         if let Some(session_id) = shell.selected_session_id {
                             shell.load_conversation(session_id, cx);
                         }
@@ -297,10 +366,13 @@ impl DesktopShell {
         self.load_state = SessionLoadState::Loading;
         let client = self.client.clone();
         let request = self.runtime.spawn(async move {
-            client
-                .list_sessions()
-                .await
-                .map_err(|error| format!("{error:#}"))
+            let (sessions, workspaces) =
+                tokio::try_join!(client.list_sessions(), client.list_workspaces())
+                    .map_err(|error| format!("{error:#}"))?;
+            Ok::<_, String>(DesktopData {
+                sessions,
+                workspaces,
+            })
         });
 
         cx.spawn(async move |shell, cx| {
@@ -310,8 +382,8 @@ impl DesktopShell {
                 .and_then(|result| result);
             let _ = shell.update(cx, |shell, cx| {
                 match result {
-                    Ok(sessions) => {
-                        shell.replace_sessions(sessions);
+                    Ok(data) => {
+                        shell.replace_data(data);
                         if let Some(session_id) = shell.selected_session_id {
                             shell.load_conversation(session_id, cx);
                         }
@@ -333,6 +405,17 @@ impl DesktopShell {
         self.load_state = SessionLoadState::Loaded;
     }
 
+    fn replace_data(&mut self, data: DesktopData) {
+        self.workspaces = data.workspaces;
+        self.replace_sessions(data.sessions);
+        if self.selected_workspace_id.is_none() {
+            self.selected_workspace_id = self
+                .selected_session()
+                .map(session_workspace_id)
+                .or_else(|| self.workspaces.first().map(|workspace| workspace.id));
+        }
+    }
+
     fn selected_session(&self) -> Option<&SessionDescriptor> {
         let selected = self.selected_session_id?;
         self.sessions.iter().find(|session| session.id == selected)
@@ -341,6 +424,15 @@ impl DesktopShell {
     fn select_session(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
         self.creating_new_session = false;
         self.selected_session_id = Some(session_id);
+        if let Some((workspace_id, directory_id)) = self
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(session_workspace_ids)
+        {
+            self.selected_workspace_id = Some(workspace_id);
+            self.creating_directory_id = Some(directory_id);
+        }
         self.action_error = None;
         self.load_conversation(session_id, cx);
     }
@@ -348,6 +440,31 @@ impl DesktopShell {
     fn start_new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.creating_new_session && self.is_creating_session {
             return;
+        }
+        if let Some((workspace_id, directory_id)) =
+            self.selected_session().map(session_workspace_ids)
+        {
+            self.selected_workspace_id = Some(workspace_id);
+            self.creating_directory_id = Some(directory_id);
+        }
+        let Some(workspace_id) = self
+            .selected_workspace_id
+            .or_else(|| self.workspaces.first().map(|workspace| workspace.id))
+        else {
+            self.open_workspace_modal(window, cx);
+            return;
+        };
+        self.selected_workspace_id = Some(workspace_id);
+        if self.creating_directory_id.is_none()
+            || self
+                .workspace_directory(workspace_id, self.creating_directory_id)
+                .is_none()
+        {
+            self.creating_directory_id = self
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == workspace_id)
+                .map(|workspace| workspace.primary_directory_id);
         }
         self.creating_new_session = true;
         self.selected_session_id = None;
@@ -359,6 +476,154 @@ impl DesktopShell {
             input.focus(window, cx);
         });
         cx.notify();
+    }
+
+    fn workspace_directory(
+        &self,
+        workspace_id: WorkspaceId,
+        directory_id: Option<DirectoryId>,
+    ) -> Option<&aetherflow_storage::Directory> {
+        let directory_id = directory_id?;
+        self.workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)?
+            .directories
+            .iter()
+            .find(|directory| directory.id == directory_id)
+    }
+
+    fn open_workspace_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace_modal_open {
+            return;
+        }
+        self.workspace_modal_open = true;
+        self.workspace_draft_directories.clear();
+        self.workspace_modal_error = None;
+        self.action_error = None;
+        self.workspace_name.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn close_workspace_modal(&mut self, cx: &mut Context<Self>) {
+        if self.is_creating_workspace {
+            return;
+        }
+        self.workspace_modal_open = false;
+        self.workspace_draft_directories.clear();
+        self.workspace_modal_error = None;
+        self.is_selecting_workspace_directories = false;
+        cx.notify();
+    }
+
+    fn select_workspace_directories(&mut self, cx: &mut Context<Self>) {
+        if self.is_selecting_workspace_directories || self.is_creating_workspace {
+            return;
+        }
+        self.is_selecting_workspace_directories = true;
+        self.workspace_modal_error = None;
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: true,
+            prompt: Some("Open".into()),
+        });
+        cx.spawn(async move |shell, cx| {
+            let selection = paths.await;
+            let Some(shell) = shell.upgrade() else {
+                return;
+            };
+            shell
+                .update(cx, |shell, cx| match selection {
+                    Ok(Ok(Some(paths))) => {
+                        shell.is_selecting_workspace_directories = false;
+                        for path in paths {
+                            if !shell.workspace_draft_directories.contains(&path) {
+                                shell.workspace_draft_directories.push(path);
+                            }
+                        }
+                        cx.notify();
+                    }
+                    Ok(Ok(None)) => {
+                        shell.is_selecting_workspace_directories = false;
+                        cx.notify();
+                    }
+                    Ok(Err(error)) => {
+                        shell.is_selecting_workspace_directories = false;
+                        shell.workspace_modal_error =
+                            Some(format!("Could not open directory picker: {error:#}"));
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        shell.is_selecting_workspace_directories = false;
+                        shell.workspace_modal_error =
+                            Some(format!("Directory picker closed unexpectedly: {error}"));
+                        cx.notify();
+                    }
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    fn remove_workspace_directory_draft(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.workspace_draft_directories.len() && !self.is_creating_workspace {
+            self.workspace_draft_directories.remove(index);
+            cx.notify();
+        }
+    }
+
+    fn create_workspace(&mut self, cx: &mut Context<Self>) {
+        if self.is_creating_workspace {
+            return;
+        }
+        let name = self.workspace_name.read(cx).value().trim().to_owned();
+        if name.is_empty() {
+            self.workspace_modal_error = Some("Enter a Workspace name.".to_owned());
+            cx.notify();
+            return;
+        }
+        if self.workspace_draft_directories.is_empty() {
+            self.workspace_modal_error = Some("Add at least one directory.".to_owned());
+            cx.notify();
+            return;
+        }
+        self.is_creating_workspace = true;
+        self.workspace_modal_error = None;
+        let paths = self.workspace_draft_directories.clone();
+        let client = self.client.clone();
+        let request = self
+            .runtime
+            .spawn(async move { client.create_workspace(name, paths).await });
+        cx.spawn(async move |shell, cx| {
+            let result = request
+                .await
+                .map_err(|error| format!("workspace task failed: {error}"))
+                .and_then(|result| result.map_err(|error| format!("{error:#}")));
+            let _ = shell.update(cx, |shell, cx| {
+                shell.is_creating_workspace = false;
+                match result {
+                    Ok(workspace) => {
+                        shell.selected_workspace_id = Some(workspace.id);
+                        shell.creating_directory_id = Some(workspace.primary_directory_id);
+                        shell.workspaces.push(workspace);
+                        shell.workspace_modal_open = false;
+                        shell.workspace_draft_directories.clear();
+                        shell.workspace_modal_error = None;
+                        shell.creating_new_session = true;
+                        shell.selected_session_id = None;
+                        shell.new_session_messages.clear();
+                        shell.pending_images.clear();
+                        shell.action_error = None;
+                    }
+                    Err(error) => shell.workspace_modal_error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn attach_dropped_images(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
@@ -593,6 +858,17 @@ impl DesktopShell {
             .collect::<Vec<_>>();
 
         let create_new = self.creating_new_session;
+        let new_session_workspace =
+            create_new.then(|| self.selected_workspace_id.zip(self.creating_directory_id));
+        let new_session_workspace = match new_session_workspace {
+            Some(Some(selection)) => Some(selection),
+            Some(None) => {
+                self.action_error = Some("Open a directory before creating a session.".to_owned());
+                cx.notify();
+                return;
+            }
+            None => None,
+        };
         let session_id = if create_new {
             None
         } else {
@@ -656,19 +932,26 @@ impl DesktopShell {
             }
             let session_id = match session_id {
                 Some(session_id) => session_id,
-                None => match client.create_session(CreateSessionOptions::default()).await {
-                    Ok(session_id) => {
-                        let _ = updates.send(PromptUpdate::Created(session_id));
-                        session_id
+                None => {
+                    let Some((workspace_id, directory_id)) = new_session_workspace else {
+                        unreachable!("new sessions require a workspace")
+                    };
+                    let mut options = CreateSessionOptions::new(workspace_id);
+                    options.directory_id = Some(directory_id);
+                    match client.create_session(options).await {
+                        Ok(session_id) => {
+                            let _ = updates.send(PromptUpdate::Created(session_id));
+                            session_id
+                        }
+                        Err(error) => {
+                            let _ = updates.send(PromptUpdate::Failed {
+                                session_id: None,
+                                error: format!("Could not create session: {error:#}"),
+                            });
+                            return;
+                        }
                     }
-                    Err(error) => {
-                        let _ = updates.send(PromptUpdate::Failed {
-                            session_id: None,
-                            error: format!("Could not create session: {error:#}"),
-                        });
-                        return;
-                    }
-                },
+                }
             };
 
             let mut stream = match client
@@ -930,6 +1213,7 @@ impl DesktopShell {
         &self,
         session: SessionDescriptor,
         index: usize,
+        nested: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected = self.selected_session_id == Some(session.id);
@@ -944,7 +1228,8 @@ impl DesktopShell {
             .relative()
             .mb_0p5()
             .h(px(SESSION_ROW_HEIGHT))
-            .px_3()
+            .when(nested, |row| row.pl(px(40.)).pr_3())
+            .when(!nested, |row| row.px_3())
             .rounded_lg()
             .cursor_pointer()
             .when(selected, |style| style.bg(rgb(0x2b2d2f)))
@@ -1052,20 +1337,112 @@ impl DesktopShell {
                         ),
                 );
             }
-            SessionLoadState::Loaded if self.sessions.is_empty() => {
+            SessionLoadState::Loaded => {
                 list = list.child(
                     div()
-                        .p_3()
-                        .text_sm()
-                        .text_color(rgb(0x8b93a1))
-                        .child("No sessions yet."),
+                        .group("workspaces-heading")
+                        .h(px(28.))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .text_xs()
+                        .text_color(rgb(0x66696d))
+                        .child("Workspaces")
+                        .child(
+                            div()
+                                .id("create-workspace")
+                                .size(px(24.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .opacity(0.)
+                                .group_hover("workspaces-heading", |action| action.opacity(1.))
+                                .hover(|style| style.bg(rgb(0x2b2d2f)).text_color(rgb(0xd6d7d9)))
+                                .child(Icon::new(IconName::Plus).size_4().text_color(rgb(0x8b8e92)))
+                                .on_click(cx.listener(|shell, _, window, cx| {
+                                    shell.open_workspace_modal(window, cx);
+                                })),
+                        ),
                 );
-            }
-            SessionLoadState::Loaded => {
-                for (index, session) in self.sessions.iter().enumerate() {
-                    if !session.archived {
-                        list = list.child(self.render_session_row(session.clone(), index, cx));
+
+                for (workspace_index, workspace) in self.workspaces.iter().enumerate() {
+                    let workspace_id = workspace.id;
+                    let primary_directory_id = workspace.primary_directory_id;
+                    let group = format!("workspace-row-{workspace_id}");
+                    list = list.child(
+                        div()
+                            .group(group.clone())
+                            .id(("workspace", workspace_index))
+                            .relative()
+                            .mt_2()
+                            .h(px(32.))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Icon::new(IconName::FolderClosed)
+                                    .size_4()
+                                    .text_color(rgb(0xb8bbc0)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .text_color(rgb(0xd6d7d9))
+                                    .child(workspace.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id(("new-workspace-session", workspace_index))
+                                    .size(px(24.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .opacity(0.)
+                                    .group_hover(group, |action| action.opacity(1.))
+                                    .hover(|style| style.bg(rgb(0x3a3c3f)))
+                                    .child(
+                                        Icon::new(IconName::Plus)
+                                            .size_4()
+                                            .text_color(rgb(0xb8bbc0)),
+                                    )
+                                    .on_click(cx.listener(move |shell, _, window, cx| {
+                                        cx.stop_propagation();
+                                        shell.selected_session_id = None;
+                                        shell.selected_workspace_id = Some(workspace_id);
+                                        shell.creating_directory_id = Some(primary_directory_id);
+                                        shell.start_new_session(window, cx);
+                                    })),
+                            ),
+                    );
+                    for (index, session) in self.sessions.iter().enumerate() {
+                        if !session.archived && session_workspace_id(session) == workspace_id {
+                            list = list.child(self.render_session_row(
+                                session.clone(),
+                                index,
+                                true,
+                                cx,
+                            ));
+                        }
                     }
+                }
+
+                if self.workspaces.is_empty() && self.sessions.is_empty() {
+                    list = list.child(
+                        div()
+                            .px_3()
+                            .pt_3()
+                            .text_sm()
+                            .text_color(rgb(0x8b93a1))
+                            .child("Create a Workspace to start."),
+                    );
                 }
 
                 if self.sessions.iter().any(|session| session.archived) {
@@ -1090,8 +1467,12 @@ impl DesktopShell {
                     if !archived_sessions_collapsed {
                         for (index, session) in self.sessions.iter().enumerate() {
                             if session.archived {
-                                list =
-                                    list.child(self.render_session_row(session.clone(), index, cx));
+                                list = list.child(self.render_session_row(
+                                    session.clone(),
+                                    index,
+                                    false,
+                                    cx,
+                                ));
                             }
                         }
                     }
@@ -1115,8 +1496,249 @@ impl DesktopShell {
             .h_full()
             .flex()
             .flex_col()
-            .bg(rgba(0x1d1f20d9))
+            .bg(rgba(0x101318d9))
+            .border_r_1()
+            .border_color(rgb(0x2a303b))
             .child(list)
+    }
+
+    fn render_workspace_modal(&self, cx: &mut Context<Self>) -> Div {
+        let can_create = !self.workspace_name.read(cx).value().trim().is_empty()
+            && !self.workspace_draft_directories.is_empty()
+            && !self.is_creating_workspace;
+        let mut directories = div().flex().flex_col().gap_2();
+        for (index, path) in self.workspace_draft_directories.iter().enumerate() {
+            let path_text = path.display().to_string();
+            directories = directories.child(
+                div()
+                    .id(("workspace-directory-draft", index))
+                    .h(px(38.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_lg()
+                    .bg(rgb(0x202225))
+                    .border_1()
+                    .border_color(rgb(0x303338))
+                    .child(
+                        Icon::new(IconName::Folder)
+                            .size_4()
+                            .text_color(rgb(0xaeb1b5)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .text_color(rgb(0xd6d7d9))
+                            .child(path_text),
+                    )
+                    .child(
+                        div()
+                            .id(("remove-workspace-directory", index))
+                            .size(px(24.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(0x34373b)))
+                            .child(
+                                Icon::new(IconName::Close)
+                                    .size_4()
+                                    .text_color(rgb(0x8b8e92)),
+                            )
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                shell.remove_workspace_directory_draft(index, cx);
+                            })),
+                    ),
+            );
+        }
+
+        div()
+            .absolute()
+            .top_0()
+            .right_0()
+            .bottom_0()
+            .left_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000099))
+            .child(
+                div()
+                    .w(px(640.))
+                    .max_h(px(680.))
+                    .mx_6()
+                    .p_6()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .rounded_2xl()
+                    .border_1()
+                    .border_color(rgb(0x2a2d31))
+                    .bg(rgb(0x17191c))
+                    .shadow_xl()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_xl()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("Create workspace"),
+                            )
+                            .child(
+                                div()
+                                    .id("close-workspace-modal")
+                                    .size(px(28.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x292c30)))
+                                    .child(
+                                        Icon::new(IconName::Close)
+                                            .size_4()
+                                            .text_color(rgb(0xaeb1b5)),
+                                    )
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.close_workspace_modal(cx);
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .h(px(44.))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(rgb(0x626aa5))
+                            .bg(rgb(0x1b1d20))
+                            .child(
+                                Icon::new(IconName::Folder)
+                                    .size_4()
+                                    .text_color(rgb(0xb8bbc0)),
+                            )
+                            .child(
+                                Input::new(&self.workspace_name)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .focus_bordered(false)
+                                    .flex_1()
+                                    .disabled(self.is_creating_workspace),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("Directories"),
+                    )
+                    .child(directories)
+                    .child(
+                        div()
+                            .id("add-workspace-directories")
+                            .min_h(px(112.))
+                            .px_4()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .justify_center()
+                            .gap_2()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(rgb(0x303338))
+                            .bg(rgb(0x1b1d20))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(0x202327)).border_color(rgb(0x3b3f45)))
+                            .child(
+                                Icon::new(IconName::FolderOpen)
+                                    .size_5()
+                                    .text_color(rgb(0x8b8e92)),
+                            )
+                            .child(div().text_sm().text_color(rgb(0xd6d7d9)).child(
+                                if self.is_selecting_workspace_directories {
+                                    "Opening directory picker…"
+                                } else {
+                                    "Add directories Aetherflow can read and edit"
+                                },
+                            ))
+                            .on_click(cx.listener(|shell, _, _, cx| {
+                                shell.select_workspace_directories(cx);
+                            })),
+                    )
+                    .when_some(self.workspace_modal_error.clone(), |modal, error| {
+                        modal.child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0xf29b9b))
+                                .child(truncate(&error, 180)),
+                        )
+                    })
+                    .child(
+                        div()
+                            .mt_2()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .id("cancel-workspace-modal")
+                                    .h(px(38.))
+                                    .px_4()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_lg()
+                                    .cursor_pointer()
+                                    .text_sm()
+                                    .text_color(rgb(0xaeb1b5))
+                                    .hover(|style| style.bg(rgb(0x24272b)))
+                                    .child("Cancel")
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.close_workspace_modal(cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("submit-workspace-modal")
+                                    .h(px(38.))
+                                    .px_4()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_lg()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .when(can_create, |button| {
+                                        button
+                                            .cursor_pointer()
+                                            .bg(rgb(0xe7eaf0))
+                                            .text_color(rgb(0x181a1d))
+                                            .hover(|style| style.bg(rgb(0xffffff)))
+                                    })
+                                    .when(!can_create, |button| {
+                                        button.bg(rgb(0x2a2d31)).text_color(rgb(0x696d72))
+                                    })
+                                    .child(if self.is_creating_workspace {
+                                        "Creating…"
+                                    } else {
+                                        "Create workspace"
+                                    })
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.create_workspace(cx);
+                                    })),
+                            ),
+                    ),
+            )
     }
 
     fn render_main_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -1784,17 +2406,32 @@ impl Render for DesktopShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
+            .relative()
             .flex()
             .bg(rgba(0x00000000))
             .font_family("Inter Variable")
             .text_color(rgb(0xe7eaf0))
             .child(self.render_sidebar(cx))
             .child(self.render_main_panel(window, cx))
+            .when(self.workspace_modal_open, |root| {
+                root.child(self.render_workspace_modal(cx))
+            })
     }
 }
 
 fn short_id(id: SessionId) -> String {
     short_uuid(&id.to_string())
+}
+
+fn session_workspace_ids(session: &SessionDescriptor) -> (WorkspaceId, DirectoryId) {
+    (
+        session.workspace.workspace_id,
+        session.workspace.working_directory_id,
+    )
+}
+
+fn session_workspace_id(session: &SessionDescriptor) -> WorkspaceId {
+    session.workspace.workspace_id
 }
 
 fn desktop_client_options() -> AetherflowClientOptions {
@@ -2492,53 +3129,55 @@ fn is_near_bottom(offset_y: Pixels, max_offset: Pixels) -> bool {
 }
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
-        gpui_component::init(cx);
-        cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.bind_keys([
-            KeyBinding::new("cmd-n", NewSession, None),
-            KeyBinding::new("cmd-q", Quit, None),
-        ]);
-        let theme = gpui_component::Theme::global_mut(cx);
-        theme.background = gpui::transparent_black();
-        theme.font_family = "Inter Variable".into();
-        let bounds = Bounds::centered(None, size(px(1040.), px(700.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    appears_transparent: true,
+    Application::new()
+        .with_assets(DesktopAssets)
+        .run(|cx: &mut App| {
+            gpui_component::init(cx);
+            cx.on_action(|_: &Quit, cx| cx.quit());
+            cx.bind_keys([
+                KeyBinding::new("cmd-n", NewSession, None),
+                KeyBinding::new("cmd-q", Quit, None),
+            ]);
+            let theme = gpui_component::Theme::global_mut(cx);
+            theme.background = gpui::transparent_black();
+            theme.font_family = "Inter Variable".into();
+            let bounds = Bounds::centered(None, size(px(1040.), px(700.)), cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        appears_transparent: true,
+                        ..Default::default()
+                    }),
+                    window_background: WindowBackgroundAppearance::Blurred,
                     ..Default::default()
-                }),
-                window_background: WindowBackgroundAppearance::Transparent,
-                ..Default::default()
-            },
-            |window, cx| {
-                let shell = cx.new(|cx| DesktopShell::new(window, cx));
-                let new_session_shell = shell.downgrade();
-                cx.on_action(move |_: &NewSession, cx| {
-                    let Some(window_handle) = cx.active_window() else {
-                        return;
-                    };
-                    let _ = window_handle.update(cx, |_, window, cx| {
-                        let _ = new_session_shell.update(cx, |shell, cx| {
-                            shell.start_new_session(window, cx);
+                },
+                |window, cx| {
+                    let shell = cx.new(|cx| DesktopShell::new(window, cx));
+                    let new_session_shell = shell.downgrade();
+                    cx.on_action(move |_: &NewSession, cx| {
+                        let Some(window_handle) = cx.active_window() else {
+                            return;
+                        };
+                        let _ = window_handle.update(cx, |_, window, cx| {
+                            let _ = new_session_shell.update(cx, |shell, cx| {
+                                shell.start_new_session(window, cx);
+                            });
                         });
                     });
-                });
-                cx.new(|cx| gpui_component::Root::new(shell, window, cx))
-            },
-        )
-        .expect("failed to open the Aetherflow window");
-        cx.activate(true);
-    });
+                    cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+                },
+            )
+            .expect("failed to open the Aetherflow window");
+            cx.activate(true);
+        });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use aetherflow_pi::PiMessage;
-    use aetherflow_storage::{AgentId, SessionAssociation};
+    use aetherflow_storage::{AgentId, SessionAssociation, SessionWorkspace};
     use serde_json::json;
 
     fn session_event(message: serde_json::Value) -> SessionEvent {
@@ -2688,6 +3327,10 @@ mod tests {
             id: SessionId::new(),
             agent_id: AgentId::new(),
             association: SessionAssociation::Standalone,
+            workspace: SessionWorkspace {
+                workspace_id: WorkspaceId::new(),
+                working_directory_id: DirectoryId::new(),
+            },
             title: Some("First".to_owned()),
             archived: false,
             updated_at_ms: 2,
@@ -2696,6 +3339,10 @@ mod tests {
             id: SessionId::new(),
             agent_id: AgentId::new(),
             association: SessionAssociation::Standalone,
+            workspace: SessionWorkspace {
+                workspace_id: WorkspaceId::new(),
+                working_directory_id: DirectoryId::new(),
+            },
             title: Some("Second".to_owned()),
             archived: false,
             updated_at_ms: 1,

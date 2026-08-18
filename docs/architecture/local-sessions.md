@@ -8,9 +8,10 @@ history they have not yet observed.
 
 ## Scope
 
-This contract covers local Session creation, prompting, cancellation,
-observation, listing, archiving, attachments, daemon startup, and process
-recovery.
+This contract covers local Session creation within a Workspace, prompting,
+cancellation, observation, listing, archiving, attachments, daemon startup, and
+process recovery. Filesystem placement is specified by the
+[Local Workspace contract](workspaces.md).
 
 It does not currently provide:
 
@@ -27,6 +28,10 @@ It does not currently provide:
 ### Identity and privacy
 
 - A Session MUST have one stable `SessionId` and one stable `AgentId`.
+- Every newly created Session MUST select one Directory from one Workspace.
+- Every newly created Session MUST append all of its Workspace Directory paths
+  to Pi's system context and identify which one is the process working
+  Directory.
 - The `SessionId` MUST be the logical Session identity, the Rivet actor key, and
   the persistent Pi session ID.
 - A Session MUST be either standalone or associated with exactly one Channel by
@@ -50,6 +55,10 @@ It does not currently provide:
 - The desktop MUST use an already-running daemon only when its runner is fresh
   and its daemon protocol is compatible. Otherwise it MUST launch its bundled
   or sibling helper and wait for both actor and attachment readiness.
+- When an incompatible `aetherflowd` owns the configured loopback attachment
+  endpoint, the desktop MUST stop that process and wait for the endpoint to be
+  released before launching its replacement. It MUST NOT terminate an unknown
+  process or act through a non-loopback endpoint.
 
 ### Commands and events
 
@@ -75,7 +84,7 @@ It does not currently provide:
 - Session listing MUST read the Session Directory rather than waking or
   scanning every Session actor.
 - A Session descriptor MUST contain only identity plus navigation metadata:
-  title, archive state, and last activity time.
+  Workspace placement, title, archive state, and last activity time.
 - A descriptor MUST NOT be treated as authoritative conversation history or
   complete runtime state.
 - Archiving MUST hide a Session from the active desktop list without deleting
@@ -102,9 +111,11 @@ It does not currently provide:
 
 ### User interfaces
 
-- The desktop lists active and archived Sessions, opens durable transcript
-  history, creates Sessions, prompts and cancels turns, and renders live Pi
+- The desktop groups active Sessions beneath their named Workspaces, lists
+  archived Sessions, creates multi-Directory Workspaces and Sessions, opens
+  durable transcript history, prompts and cancels turns, and renders live Pi
   text/tool activity.
+- `af workspace` exposes create, list, and add-Directory operations.
 - `af session` exposes create, list, state, archive, unarchive, prompt, and
   cursored event operations against the same client contract.
 - `af pi` starts an ephemeral Pi process for direct protocol diagnostics and is
@@ -112,17 +123,19 @@ It does not currently provide:
 
 ### Client interface
 
-`AetherflowClient` is the semantic seam for Session workflows. It creates and
-registers Sessions, updates discovery metadata, sends commands, reads state and
-events, follows replay plus live events, and transfers Attachments. Callers do
-not need to coordinate raw Rivet actor handles.
+`AetherflowClient` is the semantic seam for Workspace and Session workflows. It
+registers and lists Workspaces, resolves a Session's selected Directory, creates
+and registers Sessions, updates discovery metadata, sends commands, reads state
+and events, follows replay plus live events, and transfers Attachments. Callers
+do not need to coordinate raw Rivet actor handles.
 
 ### Actor interface
 
 The Session actor accepts typed commands, state reads, and bounded event reads;
 it emits `SessionEvent`. The Session Directory accepts registration, listing,
-activity, and archive mutations. These interfaces are separate because their
-lifecycles and read patterns differ.
+activity, and archive mutations. The Workspace Catalog accepts Workspace
+registration, listing, lookup, and Directory additions. These interfaces are
+separate because their lifecycles and read patterns differ.
 
 ### Process and transport interfaces
 
@@ -147,15 +160,25 @@ sequenceDiagram
     UI->>E: Read fresh runner registrations
     UI->>A: GET /health
     alt compatible runner and attachment transport exist
-        UI->>E: List Sessions
-    else no compatible daemon is ready
+        UI->>E: List Workspaces and Sessions
+    else incompatible daemon owns the local endpoint
+        UI->>D: TERM incompatible aetherflowd
+        UI->>A: Wait for endpoint release
         UI->>D: Launch bundled or sibling helper
         D->>D: Configure/start bundled Rivet Engine
         D->>A: Bind attachment transport
-        D->>R: Register Session and Directory actors
+        D->>R: Register Session, Session Directory, and Workspace Catalog actors
         UI->>E: Wait for a new fresh runner
         UI->>A: Verify daemon protocol health
-        UI->>E: List Sessions
+        UI->>E: List Workspaces and Sessions
+    else no daemon is ready
+        UI->>D: Launch bundled or sibling helper
+        D->>D: Configure/start bundled Rivet Engine
+        D->>A: Bind attachment transport
+        D->>R: Register Session, Session Directory, and Workspace Catalog actors
+        UI->>E: Wait for a new fresh runner
+        UI->>A: Verify daemon protocol health
+        UI->>E: List Workspaces and Sessions
     end
 ```
 
@@ -229,7 +252,7 @@ The following tests are the contract anchors:
 | Pi records remain typed and forward-compatible | `unknown_event_round_trips_without_losing_fields` |
 | Actor messages exclude attachment bytes | `large_prompt_attachments_stay_outside_the_actor_message` |
 | Persisted events externalize attachment bytes | `externalized_events_carry_references_instead_of_base64` |
-| Desktop accepts compatible daemon health | `accepts_the_legacy_protocol_one_health_response` and `rejects_an_incompatible_daemon_protocol` |
+| Desktop rejects stale daemon health | `rejects_the_legacy_protocol_one_health_response` and `rejects_an_incompatible_daemon_protocol` |
 
 The Rivet lifecycle tests are ignored by default because they require a local
 Engine. The smoke script exercises that integration.

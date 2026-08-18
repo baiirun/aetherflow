@@ -525,22 +525,38 @@ pub fn rivet_registry() -> Registry {
             ..rivetkit::ActorConfig::default()
         },
     );
+    registry.register_actor_with::<crate::WorkspaceCatalogActor>(
+        crate::WORKSPACE_CATALOG_ACTOR_NAME,
+        rivetkit::ActorConfig {
+            has_database: true,
+            ..rivetkit::ActorConfig::default()
+        },
+    );
     registry
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aetherflow_storage::Agent;
+    use aetherflow_storage::{Agent, AgentId, DirectoryId, WorkspaceId};
     use rivetkit::client::GetOrCreateOptions;
     use std::path::PathBuf;
     #[cfg(unix)]
     use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 
+    fn test_session(agent_id: AgentId) -> Session {
+        Session::new(
+            agent_id,
+            SessionAssociation::Standalone,
+            WorkspaceId::new(),
+            DirectoryId::new(),
+        )
+    }
+
     #[test]
     fn config_rejects_a_different_pi_session_identity() {
         let agent = Agent::new("test");
-        let session = Session::new(agent.id, SessionAssociation::Standalone);
+        let session = test_session(agent.id);
         let config = SessionActorConfig {
             session: session.clone(),
             pi: PiOptions::persistent(
@@ -558,7 +574,7 @@ mod tests {
     #[test]
     fn config_requires_persistent_pi_storage() {
         let agent = Agent::new("test");
-        let session = Session::new(agent.id, SessionAssociation::Standalone);
+        let session = test_session(agent.id);
         let config = SessionActorConfig {
             session,
             pi: PiOptions::ephemeral("/worktree"),
@@ -614,7 +630,7 @@ mod tests {
     #[test]
     fn persisted_event_rows_recover_their_sequence() -> Result<()> {
         let agent = Agent::new("test");
-        let session = Session::new(agent.id, SessionAssociation::Standalone);
+        let session = test_session(agent.id);
         let payload = SessionEventPayload::Stopped { error: None };
 
         let event = decode_session_event_row(
@@ -664,7 +680,7 @@ done
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))?;
 
         let agent = Agent::new("test");
-        let session = Session::new(agent.id, SessionAssociation::Standalone);
+        let session = test_session(agent.id);
         let session_id = session.id;
         let mut pi = PiOptions::persistent(temp.path(), temp.path().join("sessions"), session.id);
         pi.executable = executable;

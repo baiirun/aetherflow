@@ -1,4 +1,4 @@
-use aetherflow_storage::{AgentId, Session, SessionAssociation, SessionId};
+use aetherflow_storage::{AgentId, Session, SessionAssociation, SessionId, SessionWorkspace};
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use rivetkit::{BindParam, ColumnValue, prelude::*};
@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{cmp::Reverse, future::Future, pin::Pin, sync::Arc};
 
 pub const SESSION_DIRECTORY_ACTOR_NAME: &str = "session_directory";
-pub const DEFAULT_SESSION_DIRECTORY_KEY: &str = "sessions-v2";
+pub const DEFAULT_SESSION_DIRECTORY_KEY: &str = "sessions-v3";
 
 type BoxActionFuture<T> = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
 
@@ -16,6 +16,7 @@ pub struct SessionDescriptor {
     pub id: SessionId,
     pub agent_id: AgentId,
     pub association: SessionAssociation,
+    pub workspace: SessionWorkspace,
     pub title: Option<String>,
     pub archived: bool,
     pub updated_at_ms: u64,
@@ -27,6 +28,7 @@ impl SessionDescriptor {
             id: session.id,
             agent_id: session.agent_id,
             association: session.association,
+            workspace: session.workspace,
             title,
             archived: false,
             updated_at_ms,
@@ -259,12 +261,17 @@ async fn write_descriptor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aetherflow_storage::{Agent, SessionAssociation};
+    use aetherflow_storage::{Agent, DirectoryId, SessionAssociation, WorkspaceId};
 
     #[test]
     fn descriptor_contains_only_sidebar_state_beyond_session_identity() {
         let agent = Agent::new("test");
-        let session = Session::new(agent.id, SessionAssociation::Standalone);
+        let session = Session::new(
+            agent.id,
+            SessionAssociation::Standalone,
+            WorkspaceId::new(),
+            DirectoryId::new(),
+        );
 
         assert_eq!(
             SessionDescriptor::new(&session, Some("Test session".to_owned()), 42),
@@ -272,6 +279,7 @@ mod tests {
                 id: session.id,
                 agent_id: session.agent_id,
                 association: SessionAssociation::Standalone,
+                workspace: session.workspace,
                 title: Some("Test session".to_owned()),
                 archived: false,
                 updated_at_ms: 42,

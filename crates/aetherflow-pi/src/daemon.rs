@@ -11,7 +11,7 @@ use vendored_engine::EngineConfiguration;
 mod attachment_http;
 mod vendored_engine;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,7 +85,7 @@ async fn serve() -> Result<&'static str> {
     info!(
         target: "aetherflowd",
         event = "runner.starting",
-        actor_types = "Session,SessionDirectory",
+        actor_types = "Session,SessionDirectory,WorkspaceCatalog",
         endpoint = %config.endpoint,
         namespace = %config.namespace,
         pool = %config.pool_name,

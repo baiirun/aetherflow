@@ -1,5 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
-use std::{fmt, str::FromStr};
+use std::{fmt, path::PathBuf, str::FromStr};
 use uuid::Uuid;
 
 macro_rules! domain_id {
@@ -56,7 +56,9 @@ macro_rules! domain_id {
 
 domain_id!(ChannelId);
 domain_id!(AgentId);
+domain_id!(DirectoryId);
 domain_id!(SessionId);
+domain_id!(WorkspaceId);
 
 /// Content-addressed identity for a stored attachment.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -144,6 +146,116 @@ pub struct Agent {
     pub name: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Directory {
+    pub id: DirectoryId,
+    pub path: PathBuf,
+}
+
+impl Directory {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            id: DirectoryId::new(),
+            path: path.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Workspace {
+    pub id: WorkspaceId,
+    pub name: String,
+    pub directories: Vec<Directory>,
+    pub primary_directory_id: DirectoryId,
+}
+
+impl Workspace {
+    pub fn new(
+        name: impl Into<String>,
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Self, WorkspaceInvariantError> {
+        let name = name.into().trim().to_owned();
+        let directories = paths.into_iter().map(Directory::new).collect::<Vec<_>>();
+        let Some(primary_directory_id) = directories.first().map(|directory| directory.id) else {
+            return Err(WorkspaceInvariantError::Empty);
+        };
+        let workspace = Self {
+            id: WorkspaceId::new(),
+            name,
+            directories,
+            primary_directory_id,
+        };
+        workspace.validate()?;
+        Ok(workspace)
+    }
+
+    pub fn primary_directory(&self) -> Result<&Directory, WorkspaceInvariantError> {
+        self.directory(self.primary_directory_id)
+    }
+
+    pub fn directory(
+        &self,
+        directory_id: DirectoryId,
+    ) -> Result<&Directory, WorkspaceInvariantError> {
+        self.directories
+            .iter()
+            .find(|directory| directory.id == directory_id)
+            .ok_or(WorkspaceInvariantError::UnknownDirectory(directory_id))
+    }
+
+    pub fn validate(&self) -> Result<(), WorkspaceInvariantError> {
+        if self.name.is_empty() || self.name.trim() != self.name {
+            return Err(WorkspaceInvariantError::InvalidName);
+        }
+        if self.directories.is_empty() {
+            return Err(WorkspaceInvariantError::Empty);
+        }
+        self.primary_directory()?;
+        for (index, directory) in self.directories.iter().enumerate() {
+            if !directory.path.is_absolute() {
+                return Err(WorkspaceInvariantError::RelativeDirectory(directory.id));
+            }
+            if self.directories[..index]
+                .iter()
+                .any(|existing| existing.id == directory.id || existing.path == directory.path)
+            {
+                return Err(WorkspaceInvariantError::DuplicateDirectory);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceInvariantError {
+    InvalidName,
+    Empty,
+    UnknownDirectory(DirectoryId),
+    RelativeDirectory(DirectoryId),
+    DuplicateDirectory,
+}
+
+impl fmt::Display for WorkspaceInvariantError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidName => {
+                formatter.write_str("workspace name must contain non-whitespace characters")
+            }
+            Self::Empty => formatter.write_str("workspace must contain at least one directory"),
+            Self::UnknownDirectory(directory_id) => write!(
+                formatter,
+                "directory {directory_id} does not belong to the workspace"
+            ),
+            Self::RelativeDirectory(directory_id) => {
+                write!(formatter, "directory {directory_id} path must be absolute")
+            }
+            Self::DuplicateDirectory => formatter.write_str("workspace directories must be unique"),
+        }
+    }
+}
+
+impl std::error::Error for WorkspaceInvariantError {}
+
 impl Agent {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
@@ -172,21 +284,37 @@ pub enum SessionAssociation {
     },
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SessionWorkspace {
+    pub workspace_id: WorkspaceId,
+    pub working_directory_id: DirectoryId,
+}
+
 /// A private agent session that is either standalone or associated with a channel.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Session {
     pub id: SessionId,
     pub agent_id: AgentId,
     pub association: SessionAssociation,
+    pub workspace: SessionWorkspace,
     pub status: SessionStatus,
 }
 
 impl Session {
-    pub fn new(agent_id: AgentId, association: SessionAssociation) -> Self {
+    pub fn new(
+        agent_id: AgentId,
+        association: SessionAssociation,
+        workspace_id: WorkspaceId,
+        working_directory_id: DirectoryId,
+    ) -> Self {
         Self {
             id: SessionId::new(),
             agent_id,
             association,
+            workspace: SessionWorkspace {
+                workspace_id,
+                working_directory_id,
+            },
             status: SessionStatus::default(),
         }
     }
@@ -205,6 +333,8 @@ mod tests {
             SessionAssociation::Channel {
                 channel_id: channel.id,
             },
+            WorkspaceId::new(),
+            DirectoryId::new(),
         );
 
         assert_eq!(session.agent_id, agent.id);
@@ -220,7 +350,12 @@ mod tests {
     #[test]
     fn standalone_session_is_an_explicit_domain_state() {
         let agent = Agent::new("scout");
-        let session = Session::new(agent.id, SessionAssociation::Standalone);
+        let session = Session::new(
+            agent.id,
+            SessionAssociation::Standalone,
+            WorkspaceId::new(),
+            DirectoryId::new(),
+        );
 
         assert_eq!(session.association, SessionAssociation::Standalone);
     }
@@ -247,6 +382,67 @@ mod tests {
         let session_id = SessionId::new();
 
         assert_eq!(session_id.to_string().parse(), Ok(session_id));
+    }
+
+    #[test]
+    fn workspace_requires_a_directory_and_uses_the_first_as_primary() {
+        assert_eq!(
+            Workspace::new("Test", Vec::new()),
+            Err(WorkspaceInvariantError::Empty)
+        );
+
+        let workspace =
+            Workspace::new("Test", [PathBuf::from("/work/a"), PathBuf::from("/work/b")])
+                .expect("non-empty workspace");
+
+        assert_eq!(workspace.name, "Test");
+        assert_eq!(workspace.directories.len(), 2);
+        assert_eq!(
+            workspace.primary_directory().unwrap().path,
+            PathBuf::from("/work/a")
+        );
+        assert_eq!(workspace.validate(), Ok(()));
+    }
+
+    #[test]
+    fn workspace_rejects_relative_directory_paths() {
+        assert!(matches!(
+            Workspace::new("Test", [PathBuf::from("relative")]),
+            Err(WorkspaceInvariantError::RelativeDirectory(_))
+        ));
+    }
+
+    #[test]
+    fn workspace_requires_a_name() {
+        assert_eq!(
+            Workspace::new("  ", [PathBuf::from("/work")]),
+            Err(WorkspaceInvariantError::InvalidName)
+        );
+    }
+
+    #[test]
+    fn session_workspace_is_independent_from_channel_association() {
+        let workspace = Workspace::new("Test", [PathBuf::from("/work")]).unwrap();
+        let directory = workspace.primary_directory().unwrap();
+        let channel_id = ChannelId::new();
+        let session = Session::new(
+            AgentId::new(),
+            SessionAssociation::Channel { channel_id },
+            workspace.id,
+            directory.id,
+        );
+
+        assert_eq!(
+            session.workspace,
+            SessionWorkspace {
+                workspace_id: workspace.id,
+                working_directory_id: directory.id,
+            }
+        );
+        assert_eq!(
+            session.association,
+            SessionAssociation::Channel { channel_id }
+        );
     }
 
     #[test]

@@ -2,7 +2,8 @@
 
 Aetherflow is split into three Rust modules:
 
-- `crates/aetherflow-storage`: durable `Channel`, `Agent`, and `Session` models.
+- `crates/aetherflow-storage`: durable `Channel`, `Agent`, `Directory`,
+  `Workspace`, and `Session` models.
 - `crates/aetherflow-desktop`: the GPUI desktop application and its matching
   `aetherflowd` helper.
 - `crates/aetherflow-pi`: Pi RPC JSONL transport, a Rivet `Session` actor,
@@ -28,7 +29,9 @@ Run the checks with `cargo test --workspace`. Probe Pi directly without its TUI
 with `af pi state`.
 
 The desktop app connects to an existing compatible daemon or starts its pinned
-`aetherflowd` itself. For development, build both binaries together before
+`aetherflowd` itself. An incompatible local daemon is stopped and replaced;
+quitting the desktop still leaves a compatible daemon running for detached
+turns and CLI access. For development, build both binaries together before
 launching:
 
 ```sh
@@ -82,10 +85,13 @@ endpoint, namespace, pool, Engine source and path, actor types, outcome, and
 duration. Set `RUST_LOG` to adjust verbosity, for example
 `RUST_LOG=aetherflowd=debug,rivetkit=info aetherflowd`.
 
-In another terminal, create and prompt a persistent session:
+In another terminal, register one or more local roots as a Workspace, then
+create and prompt a persistent Session in it:
 
 ```sh
-af session create "Hello"
+af workspace create --name Aetherflow --directory "$PWD"
+af workspace list
+af session create --workspace <WORKSPACE_ID> "Hello"
 af session list
 af session prompt <SESSION_ID> "Hello"
 af session state <SESSION_ID>
@@ -97,8 +103,12 @@ ID and lets the turn continue in the daemon. Pass `--attach` to print the same
 unrendered Pi event stream as `session prompt`:
 
 ```sh
-af session create "Hello" --attach
+af session create --workspace <WORKSPACE_ID> "Hello" --attach
 ```
+
+To register several roots together, repeat `--directory`. A Session uses the
+Workspace's primary Directory unless `--directory <DIRECTORY_ID>` selects
+another member.
 
 Every daemon-backed session event has a durable, monotonically increasing
 `sequence`. Read a bounded snapshot, resume after the last sequence you saw, or

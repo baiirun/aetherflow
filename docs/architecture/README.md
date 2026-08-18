@@ -10,6 +10,8 @@ separated into [Session Promotion](../session-promotion.md).
   implementation details.
 - [Local Session contract](local-sessions.md) specifies behavior, interfaces,
   runtime collaboration, and verification.
+- [Local Workspace contract](workspaces.md) defines filesystem context,
+  multi-Directory membership, and Session placement.
 - [Persistence](persistence.md) identifies every source of truth and derived
   view.
 - [Invariant registry](invariants.md) gives stable identifiers to constraints
@@ -22,10 +24,11 @@ separated into [Session Promotion](../session-promotion.md).
 ## Current product boundary
 
 Aetherflow currently provides local, durable, private Pi-backed Sessions through
-a GPUI desktop app and the `af` CLI. The domain models Agents, Channels, and
-Session Association, but the end-to-end product currently exercises standalone
-Sessions and a default local Agent. Channel participation, hosted authority, and
-Session Promotion are not implemented product flows.
+a GPUI desktop app and the `af` CLI. Newly created Sessions belong to a local
+Workspace and select one of its Directories as Pi's working directory. The
+domain also models Agents, Channels, and Session Association, but Channel
+participation, hosted authority, and Session Promotion are not implemented
+product flows.
 
 ## System map
 
@@ -38,7 +41,8 @@ flowchart LR
 
     subgraph Daemon["aetherflowd process"]
         Runner["Rivet actor runner"]
-        Directory["Session Directory actor"]
+        SessionDirectory["Session Directory actor"]
+        WorkspaceCatalog["Workspace Catalog actor"]
         Session["Session actor<br/>one logical Session"]
         AttachmentHTTP["Attachment HTTP transport"]
     end
@@ -52,7 +56,8 @@ flowchart LR
     CLI --> Client
     Client -->|"actor actions and subscriptions"| Engine
     Engine <-->|"routes actor work"| Runner
-    Runner --- Directory
+    Runner --- SessionDirectory
+    Runner --- WorkspaceCatalog
     Runner --- Session
     Client -->|"upload and download"| AttachmentHTTP
     AttachmentHTTP --> AttachmentFiles
@@ -71,13 +76,14 @@ attachment transport for binary media.
 
 | Module | Owns | Must not own |
 | --- | --- | --- |
-| `aetherflow-storage` | Domain IDs and serializable Agent, Channel, Session, Session Association, status, and Attachment reference shapes | Persistence engines, actor lifecycles, Pi protocol behavior, or UI state |
+| `aetherflow-storage` | Domain IDs and serializable Agent, Channel, Directory, Workspace, Session, association, placement, status, and Attachment reference shapes | Persistence engines, actor lifecycles, Pi protocol behavior, or UI state |
 | GPUI desktop | User interaction, optimistic display state, transcript rendering, daemon discovery and launch | Authoritative Session history, actor state, or Pi continuation |
 | `af` CLI | Scriptable access to the same client contract and direct diagnostic access to ephemeral Pi RPC | A separate backend or a second Session model |
-| Aetherflow client | Multi-actor workflows, cursored event observation, attachment transfer, and typed client-facing operations | Durable data of its own or UI policy |
+| Aetherflow client | Multi-actor workflows, Workspace path validation, Session placement, cursored event observation, attachment transfer, and typed client-facing operations | Durable data of its own or UI policy |
 | `aetherflowd` | Local process supervision, actor registration, bundled Engine configuration, attachment HTTP transport, readiness metadata | Session identity or conversation history |
 | Rivet Engine | Actor placement, routing, lifecycle, state, and per-actor SQL persistence | Pi message semantics, transcript rendering, or attachment bytes |
 | Session Directory actor | Durable discovery and sidebar metadata for many Sessions | Session runtime state, conversation history, or Pi processes |
+| Workspace Catalog actor | Durable local Workspace definitions and Directory membership | Session history, filesystem contents, Channel membership, or Pi processes |
 | Session actor | One Session's durable configuration, command serialization, Pi process lifecycle, and sequenced event history | Cross-Session listing or raw attachment bytes in actor messages |
 | Pi RPC subprocess | The agent loop, model/tool execution, and Pi continuation format | Aetherflow Session discovery, durable event cursors, or Channel semantics |
 | Attachment store | Immutable content-addressed bytes and integrity metadata | Message order, Session ownership, or UI previews |

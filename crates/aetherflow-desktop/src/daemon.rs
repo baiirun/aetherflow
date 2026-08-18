@@ -14,6 +14,7 @@ const ATTACHMENT_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
 const RUNNER_PROBE_INTERVAL: Duration = Duration::from_millis(50);
 const RUNNER_HEARTBEAT_MAX_AGE: Duration = Duration::from_secs(10);
+const DAEMON_REPLACEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 const SHELL_PATH_BEGIN: &str = "__AETHERFLOW_PATH_BEGIN__";
 const SHELL_PATH_END: &str = "__AETHERFLOW_PATH_END__";
 const SHELL_PATH_PROBE: &str =
@@ -181,6 +182,20 @@ pub async fn runner_is_ready(target: &DaemonTarget) -> Result<bool> {
 }
 
 pub async fn attachment_is_ready(target: &DaemonTarget) -> Result<bool> {
+    Ok(matches!(
+        attachment_compatibility(target).await?,
+        AttachmentCompatibility::Compatible
+    ))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AttachmentCompatibility {
+    Unavailable,
+    Compatible,
+    Incompatible,
+}
+
+async fn attachment_compatibility(target: &DaemonTarget) -> Result<AttachmentCompatibility> {
     let response = match reqwest::Client::new()
         .get(format!(
             "{}/health",
@@ -191,23 +206,125 @@ pub async fn attachment_is_ready(target: &DaemonTarget) -> Result<bool> {
         .await
     {
         Ok(response) => response,
-        Err(error) if error.is_connect() || error.is_timeout() => return Ok(false),
+        Err(error) if error.is_connect() || error.is_timeout() => {
+            return Ok(AttachmentCompatibility::Unavailable);
+        }
         Err(error) => return Err(error).context("probe Aetherflow attachment transport"),
     };
     if !response.status().is_success() {
-        return Ok(false);
+        return Ok(AttachmentCompatibility::Unavailable);
     }
-    // The attachment transport shipped before version metadata was added used
-    // 204 as its health response. That implementation is protocol version 1,
-    // so it remains safe to reuse while a pre-release daemon is still alive.
+    // A 204 response predates compatibility metadata and therefore cannot prove
+    // support for the desktop's current actor protocol.
     if response.status() == reqwest::StatusCode::NO_CONTENT {
-        return Ok(true);
+        return Ok(AttachmentCompatibility::Incompatible);
     }
     let health = response.json::<DaemonHealth>().await.context(
         "Aetherflow daemon did not report compatibility metadata; reinstall the desktop package",
     )?;
-    ensure_compatible_daemon(&health)?;
-    Ok(true)
+    Ok(if ensure_compatible_daemon(&health).is_ok() {
+        AttachmentCompatibility::Compatible
+    } else {
+        AttachmentCompatibility::Incompatible
+    })
+}
+
+pub async fn replace_incompatible_daemon(target: &DaemonTarget) -> Result<bool> {
+    if attachment_compatibility(target).await? != AttachmentCompatibility::Incompatible {
+        return Ok(false);
+    }
+
+    let process_id = daemon_listener_process_id(&target.attachment_endpoint)?;
+    terminate_daemon_process(process_id)?;
+    eprintln!(
+        "Aetherflow desktop stopped incompatible aetherflowd process {process_id} before replacement"
+    );
+
+    let deadline = tokio::time::Instant::now() + DAEMON_REPLACEMENT_TIMEOUT;
+    loop {
+        match attachment_compatibility(target).await? {
+            AttachmentCompatibility::Unavailable => return Ok(true),
+            AttachmentCompatibility::Compatible => return Ok(true),
+            AttachmentCompatibility::Incompatible if tokio::time::Instant::now() >= deadline => {
+                bail!(
+                    "incompatible Aetherflow daemon process {process_id} did not stop within {} seconds",
+                    DAEMON_REPLACEMENT_TIMEOUT.as_secs()
+                );
+            }
+            AttachmentCompatibility::Incompatible => {
+                tokio::time::sleep(RUNNER_PROBE_INTERVAL).await;
+            }
+        }
+    }
+}
+
+fn daemon_listener_process_id(attachment_endpoint: &str) -> Result<u32> {
+    let endpoint = reqwest::Url::parse(attachment_endpoint)
+        .with_context(|| format!("parse Aetherflow attachment endpoint {attachment_endpoint}"))?;
+    let host = endpoint
+        .host_str()
+        .context("Aetherflow attachment endpoint omitted a host")?;
+    if !matches!(host, "127.0.0.1" | "localhost" | "::1") {
+        bail!("refusing to replace a daemon through non-loopback endpoint {attachment_endpoint}");
+    }
+    let port = endpoint
+        .port_or_known_default()
+        .context("Aetherflow attachment endpoint omitted a port")?;
+    let output = Command::new("lsof")
+        .args(["-nP", "-t", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .context("locate the incompatible Aetherflow daemon process")?;
+    if !output.status.success() {
+        bail!("could not find the process listening on {host}:{port}");
+    }
+    let process_ids = String::from_utf8(output.stdout).context("lsof output was not UTF-8")?;
+    for process_id in process_ids.lines() {
+        let process_id = process_id
+            .trim()
+            .parse::<u32>()
+            .context("lsof returned an invalid process ID")?;
+        if process_is_aetherflowd(process_id)? {
+            return Ok(process_id);
+        }
+    }
+    bail!("the process listening on {host}:{port} is not aetherflowd")
+}
+
+fn process_is_aetherflowd(process_id: u32) -> Result<bool> {
+    let output = Command::new("ps")
+        .args(["-p", &process_id.to_string(), "-o", "comm="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .with_context(|| format!("inspect process {process_id}"))?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+    let executable = String::from_utf8(output.stdout).context("ps output was not UTF-8")?;
+    Ok(executable_is_aetherflowd(&executable))
+}
+
+fn executable_is_aetherflowd(executable: &str) -> bool {
+    Path::new(executable.trim()).file_name() == Some(OsStr::new("aetherflowd"))
+}
+
+fn terminate_daemon_process(process_id: u32) -> Result<()> {
+    if process_id == std::process::id() {
+        bail!("refusing to terminate the current process");
+    }
+    let status = Command::new("kill")
+        .args(["-TERM", &process_id.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("terminate incompatible Aetherflow daemon {process_id}"))?;
+    if !status.success() {
+        bail!("could not terminate incompatible Aetherflow daemon process {process_id}");
+    }
+    Ok(())
 }
 
 fn ensure_compatible_daemon(health: &DaemonHealth) -> Result<()> {
@@ -482,6 +599,22 @@ mod tests {
     }
 
     #[test]
+    fn replacement_only_targets_the_aetherflow_daemon_executable() {
+        assert!(executable_is_aetherflowd(
+            "/Users/test/.cargo/bin/aetherflowd\n"
+        ));
+        assert!(!executable_is_aetherflowd("/usr/bin/python3\n"));
+    }
+
+    #[test]
+    fn replacement_refuses_non_loopback_endpoints() {
+        let error = daemon_listener_process_id("https://example.com:6422")
+            .expect_err("remote endpoints must not be eligible for process replacement");
+
+        assert!(error.to_string().contains("non-loopback"), "{error:#}");
+    }
+
+    #[test]
     fn accepts_the_daemon_built_with_the_desktop() {
         ensure_compatible_daemon(&DaemonHealth::current())
             .expect("matching daemon should be compatible");
@@ -510,7 +643,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepts_the_legacy_protocol_one_health_response() {
+    async fn rejects_the_legacy_protocol_one_health_response() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind attachment probe server");
         let attachment_endpoint = format!(
             "http://{}",
@@ -537,7 +670,7 @@ mod tests {
         };
 
         assert!(
-            attachment_is_ready(&target)
+            !attachment_is_ready(&target)
                 .await
                 .expect("probe legacy attachment transport")
         );

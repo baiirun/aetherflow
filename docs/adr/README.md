@@ -11,5 +11,6 @@ context, and the result of a real trade-off.
 | [0004](0004-separate-session-discovery-from-session-runtime.md) | Separate Session discovery from Session runtime |
 | [0005](0005-externalize-attachment-bytes.md) | Externalize Attachment bytes |
 | [0006](0006-ship-the-daemon-with-the-desktop.md) | Ship the daemon with the desktop |
+| [0007](0007-replace-incompatible-local-daemons.md) | Replace incompatible local daemons |
 
 When a decision changes, add a new ADR and mark the old record as superseded.

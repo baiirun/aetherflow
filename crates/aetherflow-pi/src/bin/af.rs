@@ -1,10 +1,13 @@
 use aetherflow_pi::{
     AetherflowClient, AetherflowClientOptions, CreateSessionOptions, DEFAULT_ATTACHMENT_ENDPOINT,
     DEFAULT_ENDPOINT, DEFAULT_NAMESPACE, DEFAULT_POOL, DEFAULT_SESSION_DIRECTORY_KEY,
-    DEFAULT_SESSION_EVENT_PAGE_SIZE, DEFAULT_TOKEN, MAX_SESSION_EVENT_PAGE_SIZE, PiEvent,
-    PiMessage, PiOptions, PiRpc, RpcCommand, SessionEventStream,
+    DEFAULT_SESSION_EVENT_PAGE_SIZE, DEFAULT_TOKEN, DEFAULT_WORKSPACE_CATALOG_KEY,
+    MAX_SESSION_EVENT_PAGE_SIZE, PiEvent, PiMessage, PiOptions, PiRpc, RpcCommand,
+    SessionEventStream,
 };
-use aetherflow_storage::{AgentId, ChannelId, SessionAssociation, SessionId};
+use aetherflow_storage::{
+    AgentId, ChannelId, DirectoryId, SessionAssociation, SessionId, WorkspaceId,
+};
 use anyhow::Result;
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use std::path::PathBuf;
@@ -27,6 +30,9 @@ struct Args {
     /// Isolates session discovery within a Rivet namespace.
     #[arg(long, default_value = DEFAULT_SESSION_DIRECTORY_KEY, hide = true)]
     session_directory_key: String,
+    /// Isolates workspace discovery within a Rivet namespace.
+    #[arg(long, default_value = DEFAULT_WORKSPACE_CATALOG_KEY, hide = true)]
+    workspace_catalog_key: String,
     #[command(subcommand)]
     command: Command,
 }
@@ -44,6 +50,11 @@ enum Command {
     Session {
         #[command(subcommand)]
         command: SessionCommand,
+    },
+    /// Register and inspect local filesystem workspaces.
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommand,
     },
 }
 
@@ -89,6 +100,24 @@ enum SessionCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum WorkspaceCommand {
+    /// Create a workspace from one or more filesystem directories.
+    Create {
+        #[arg(long)]
+        name: String,
+        #[arg(long = "directory", required = true)]
+        directories: Vec<PathBuf>,
+    },
+    /// List registered workspaces and their directories.
+    List,
+    /// Add another filesystem directory to a workspace.
+    AddDirectory {
+        workspace_id: WorkspaceId,
+        directory: PathBuf,
+    },
+}
+
 #[derive(ClapArgs)]
 struct CreateSessionArgs {
     /// Prompt the session immediately after creating it.
@@ -100,8 +129,10 @@ struct CreateSessionArgs {
     agent_id: Option<AgentId>,
     #[arg(long)]
     channel_id: Option<ChannelId>,
-    #[arg(long, default_value = ".")]
-    cwd: PathBuf,
+    #[arg(long)]
+    workspace: WorkspaceId,
+    #[arg(long)]
+    directory: Option<DirectoryId>,
     #[arg(long)]
     session_dir: Option<PathBuf>,
     #[arg(long, default_value = "pi")]
@@ -111,6 +142,15 @@ struct CreateSessionArgs {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let client_options = AetherflowClientOptions {
+        endpoint: args.endpoint,
+        attachment_endpoint: args.attachment_endpoint,
+        token: args.token,
+        namespace: args.namespace,
+        pool: args.pool,
+        session_directory_key: args.session_directory_key,
+        workspace_catalog_key: args.workspace_catalog_key,
+    };
 
     match args.command {
         Command::Pi {
@@ -118,17 +158,31 @@ async fn main() -> Result<()> {
             command,
         } => run_direct_pi(executable, command).await,
         Command::Session { command } => {
-            let client = AetherflowClient::connect(AetherflowClientOptions {
-                endpoint: args.endpoint,
-                attachment_endpoint: args.attachment_endpoint,
-                token: args.token,
-                namespace: args.namespace,
-                pool: args.pool,
-                session_directory_key: args.session_directory_key,
-            });
-            run_session_command(&client, command).await
+            run_session_command(&AetherflowClient::connect(client_options), command).await
+        }
+        Command::Workspace { command } => {
+            run_workspace_command(&AetherflowClient::connect(client_options), command).await
         }
     }
+}
+
+async fn run_workspace_command(client: &AetherflowClient, command: WorkspaceCommand) -> Result<()> {
+    let value = match command {
+        WorkspaceCommand::Create { name, directories } => {
+            serde_json::to_value(client.create_workspace(name, directories).await?)?
+        }
+        WorkspaceCommand::List => serde_json::to_value(client.list_workspaces().await?)?,
+        WorkspaceCommand::AddDirectory {
+            workspace_id,
+            directory,
+        } => serde_json::to_value(
+            client
+                .add_workspace_directory(workspace_id, directory)
+                .await?,
+        )?,
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
 }
 
 async fn run_direct_pi(executable: PathBuf, command: PiCommand) -> Result<()> {
@@ -243,7 +297,8 @@ async fn create_session(client: &AetherflowClient, args: CreateSessionArgs) -> R
         .create_session(CreateSessionOptions {
             agent_id: args.agent_id,
             association,
-            cwd: args.cwd,
+            workspace_id: args.workspace,
+            directory_id: args.directory,
             pi_session_directory: args.session_dir,
             pi_executable: args.pi,
             initial_prompt: if args.attach { None } else { args.prompt },
@@ -287,9 +342,19 @@ async fn print_until(pi: &mut PiRpc, done: impl Fn(&PiMessage) -> bool) -> Resul
 mod tests {
     use super::*;
 
+    const WORKSPACE_ID: &str = "00000000-0000-0000-0000-000000000002";
+
     #[test]
     fn session_create_accepts_an_initial_prompt() {
-        let args = Args::try_parse_from(["af", "session", "create", "start here"]).unwrap();
+        let args = Args::try_parse_from([
+            "af",
+            "session",
+            "create",
+            "--workspace",
+            WORKSPACE_ID,
+            "start here",
+        ])
+        .unwrap();
 
         let Command::Session {
             command: SessionCommand::Create(create),
@@ -304,7 +369,8 @@ mod tests {
 
     #[test]
     fn session_create_keeps_the_initial_prompt_optional() {
-        let args = Args::try_parse_from(["af", "session", "create"]).unwrap();
+        let args =
+            Args::try_parse_from(["af", "session", "create", "--workspace", WORKSPACE_ID]).unwrap();
 
         let Command::Session {
             command: SessionCommand::Create(create),
@@ -319,9 +385,16 @@ mod tests {
 
     #[test]
     fn session_create_attach_requires_a_prompt() {
-        let error = Args::try_parse_from(["af", "session", "create", "--attach"])
-            .err()
-            .expect("attach without a prompt should fail");
+        let error = Args::try_parse_from([
+            "af",
+            "session",
+            "create",
+            "--workspace",
+            WORKSPACE_ID,
+            "--attach",
+        ])
+        .err()
+        .expect("attach without a prompt should fail");
 
         assert_eq!(
             error.kind(),
@@ -331,8 +404,16 @@ mod tests {
 
     #[test]
     fn session_create_can_attach_to_the_initial_prompt() {
-        let args =
-            Args::try_parse_from(["af", "session", "create", "start here", "--attach"]).unwrap();
+        let args = Args::try_parse_from([
+            "af",
+            "session",
+            "create",
+            "--workspace",
+            WORKSPACE_ID,
+            "start here",
+            "--attach",
+        ])
+        .unwrap();
 
         let Command::Session {
             command: SessionCommand::Create(create),
@@ -376,6 +457,35 @@ mod tests {
         assert_eq!(after, 42);
         assert_eq!(limit, 25);
         assert!(follow);
+    }
+
+    #[test]
+    fn workspace_create_accepts_multiple_directories() {
+        let args = Args::try_parse_from([
+            "af",
+            "workspace",
+            "create",
+            "--name",
+            "Test workspace",
+            "--directory",
+            "/work/a",
+            "--directory",
+            "/work/b",
+        ])
+        .unwrap();
+
+        let Command::Workspace {
+            command: WorkspaceCommand::Create { name, directories },
+        } = args.command
+        else {
+            panic!("expected workspace create command");
+        };
+
+        assert_eq!(name, "Test workspace");
+        assert_eq!(
+            directories,
+            [PathBuf::from("/work/a"), PathBuf::from("/work/b")]
+        );
     }
 
     #[test]

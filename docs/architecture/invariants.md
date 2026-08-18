@@ -12,6 +12,17 @@ relevant ADR or explicitly describe why no decision record is needed.
 | `DOM-2` | Session Association is a discriminated state: standalone or exactly one Channel. |
 | `DOM-3` | Agent identity, Channel identity, and Session identity remain separate. |
 
+## Workspaces
+
+| ID | Invariant |
+| --- | --- |
+| `WSP-1` | A Workspace has a non-empty user-facing name, contains at least one Directory, and its primary Directory is a member. |
+| `WSP-2` | A Directory is one canonical absolute filesystem root, unique within its Workspace. |
+| `WSP-3` | Every newly created durable Session selects one Directory from its Workspace. |
+| `WSP-4` | The selected Directory path is Pi's one process working directory; every Workspace Directory is identified in appended system context, without implying sandbox permissions. |
+| `WSP-5` | Session Workspace placement and Channel association remain independent. |
+| `WSP-6` | Workspace listing reads the Workspace Catalog; Session descriptors only project placement for navigation. |
+
 ## Identity and runtime
 
 | ID | Invariant |
@@ -22,7 +33,7 @@ relevant ADR or explicitly describe why no decision record is needed.
 | `RUN-2` | One active Session actor owns one headless Pi RPC subprocess. |
 | `RUN-3` | The Pi subprocess is replaceable; actor state, Pi continuation, and event history survive its replacement. |
 | `RUN-4` | Closing the desktop does not terminate its daemon, allowing detached turns and CLI reconnection. |
-| `RUN-5` | A daemon is reusable across package versions only when its daemon protocol is compatible. |
+| `RUN-5` | A daemon is reusable across package versions only when its daemon protocol is compatible; an incompatible local daemon is stopped before its replacement launches. |
 
 ## Events and observation
 
@@ -69,11 +80,14 @@ The following properties are intentionally not guaranteed today:
 - A Session descriptor is not a complete Session snapshot.
 - Local and hosted writers cannot currently synchronize or share authority.
 - Modeled Agent and Channel relationships are not yet complete product flows.
+- Machine-local Directory paths are not portable hosted execution locations.
 
 ## Verification by group
 
 - `DOM-*` and `ID-*`: domain serialization tests and Session actor configuration
   tests.
+- `WSP-*`: Workspace invariant tests, CLI parser tests, and the ignored Rivet
+  client lifecycle integration test.
 - `RUN-*`: Session actor integration tests, daemon readiness tests, and
   `scripts/smoke-session-lifecycle.sh`.
 - `EVT-*`: Session actor cursor tests, Pi protocol round-trip tests, and the

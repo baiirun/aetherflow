@@ -45,6 +45,9 @@ It does not provide:
   authoritative replica.
 - A running Pi subprocess MUST be stopped locally and recreated remotely. Its
   operating-system process state is not part of the promotion bundle.
+- Local Directory paths MUST NOT be assumed to exist on the hosted runtime. A
+  promoted Session MUST explicitly rebind its Workspace and working Directory
+  to hosted filesystem context before execution resumes.
 
 ## Interfaces
 
@@ -60,7 +63,9 @@ The portable bundle should contain only Aetherflow-owned, versioned data:
 - integrity metadata for detecting incomplete or corrupt transfers.
 
 Credentials and machine-specific filesystem paths MUST NOT be embedded without
-an explicit portability and security policy.
+an explicit portability and security policy. Local Workspace and Directory IDs
+may be retained as provenance, but their paths are not executable hosted
+configuration.
 
 ### Promotion coordinator
 

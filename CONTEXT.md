@@ -15,9 +15,19 @@ A collaboration space with its own identity. Associating a Session with a
 Channel does not make that Session public or establish Agent participation.
 _Avoid_: Room, thread, project
 
+**Directory**:
+Exactly one filesystem root available as working context for Sessions.
+_Avoid_: Project, repository
+
+**Workspace**:
+A named, non-empty collection of Directories used together as filesystem
+context. A Workspace is not a collaboration space.
+_Avoid_: Project, channel
+
 **Session**:
 A private, ongoing interaction between one Agent and its model runtime. A Session
-may be associated with a Channel.
+belongs to one Workspace, selects one of its Directories as its working
+Directory, and may independently be associated with a Channel.
 
 **Session Association**:
 Whether a Session is standalone or associated with exactly one Channel. The
