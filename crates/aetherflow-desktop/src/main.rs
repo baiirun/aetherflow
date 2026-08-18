@@ -12,10 +12,10 @@ use aetherflow_storage::{DirectoryId, SessionId, Workspace, WorkspaceId};
 use daemon::{DaemonTarget, ManagedDaemon};
 use gpui::{
     Animation, AnimationExt as _, App, Application, AssetSource, Bounds, Context, Div, Entity,
-    ExternalPaths, HighlightStyle, Hsla, KeyBinding, ObjectFit, PathPromptOptions, Pixels,
-    ScrollHandle, SharedString, StyledImage as _, StyledText, Subscription, Timer, TitlebarOptions,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div, ease_out_quint, img,
-    point, prelude::*, px, rgb, rgba, size,
+    ExternalPaths, HighlightStyle, Hsla, KeyBinding, ObjectFit, PathBuilder, PathPromptOptions,
+    Pixels, ScrollHandle, SharedString, StyledImage as _, StyledText, Subscription, Timer,
+    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, canvas, div,
+    ease_out_quint, img, point, prelude::*, px, rgb, rgba, size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::resizable::{h_resizable, resizable_panel};
@@ -45,6 +45,7 @@ const CHAT_FONT_SIZE: f32 = 14.;
 const SESSION_ROW_HEIGHT: f32 = 30.;
 const SESSION_ROW_ACTION_HEIGHT: f32 = 22.;
 const SESSION_ROW_ACTION_TOP: f32 = (SESSION_ROW_HEIGHT - SESSION_ROW_ACTION_HEIGHT) / 2.;
+const WORKSPACE_FOLDER_ANIMATION_DURATION: Duration = Duration::from_millis(160);
 const BOTTOM_FOLLOW_THRESHOLD: f32 = 32.;
 const CONTENT_SHIFT_TIME_CONSTANT: Duration = Duration::from_millis(55);
 const CONTENT_SHIFT_SETTLE_DISTANCE: f32 = 0.5;
@@ -178,6 +179,7 @@ struct DesktopShell {
     expanded_tool_calls: HashSet<String>,
     archived_sessions_collapsed: bool,
     collapsed_workspace_ids: HashSet<WorkspaceId>,
+    workspace_disclosure_transition_versions: HashMap<WorkspaceId, u64>,
     loading_conversations: HashSet<SessionId>,
     conversation_errors: HashMap<SessionId, String>,
     new_session_messages: Vec<ConversationItem>,
@@ -259,6 +261,7 @@ impl DesktopShell {
             expanded_tool_calls: HashSet::new(),
             archived_sessions_collapsed: preferences.archived_sessions_collapsed,
             collapsed_workspace_ids: preferences.collapsed_workspace_ids.into_iter().collect(),
+            workspace_disclosure_transition_versions: HashMap::new(),
             loading_conversations: HashSet::new(),
             conversation_errors: HashMap::new(),
             new_session_messages: Vec::new(),
@@ -297,6 +300,11 @@ impl DesktopShell {
         if !self.collapsed_workspace_ids.remove(&workspace_id) {
             self.collapsed_workspace_ids.insert(workspace_id);
         }
+        let transition_version = self
+            .workspace_disclosure_transition_versions
+            .entry(workspace_id)
+            .or_default();
+        *transition_version = transition_version.saturating_add(1);
         self.save_preferences();
         cx.notify();
     }
@@ -1424,6 +1432,10 @@ impl DesktopShell {
                     let workspace_id = workspace.id;
                     let primary_directory_id = workspace.primary_directory_id;
                     let workspace_collapsed = self.collapsed_workspace_ids.contains(&workspace_id);
+                    let transition_version = self
+                        .workspace_disclosure_transition_versions
+                        .get(&workspace_id)
+                        .copied();
                     let group = format!("workspace-row-{workspace_id}");
                     list = list.child(
                         div()
@@ -1437,15 +1449,11 @@ impl DesktopShell {
                             .items_center()
                             .gap_2()
                             .cursor_pointer()
-                            .child(
-                                Icon::new(if workspace_collapsed {
-                                    IconName::FolderClosed
-                                } else {
-                                    IconName::FolderOpen
-                                })
-                                .size_4()
-                                .text_color(rgb(0xb8bbc0)),
-                            )
+                            .child(render_workspace_folder_icon(
+                                workspace_id,
+                                workspace_collapsed,
+                                transition_version,
+                            ))
                             .child(
                                 div()
                                     .flex_1()
@@ -2486,6 +2494,116 @@ impl Render for DesktopShell {
                 root.child(self.render_workspace_modal(cx))
             })
     }
+}
+
+fn render_workspace_folder_icon(
+    workspace_id: WorkspaceId,
+    collapsed: bool,
+    transition_version: Option<u64>,
+) -> gpui::AnyElement {
+    let target_openness = if collapsed { 0. } else { 1. };
+    let Some(transition_version) = transition_version else {
+        return render_workspace_folder_drawing(target_openness);
+    };
+
+    div()
+        .size_4()
+        .flex_none()
+        .relative()
+        .with_animation(
+            SharedString::from(format!(
+                "workspace-folder-{workspace_id}-{transition_version}"
+            )),
+            Animation::new(WORKSPACE_FOLDER_ANIMATION_DURATION).with_easing(ease_out_quint()),
+            move |folder, progress| {
+                let openness = if collapsed { 1. - progress } else { progress };
+                folder.child(render_workspace_folder_drawing(openness))
+            },
+        )
+        .into_any_element()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WorkspaceFolderGeometry {
+    back_left_end: (f32, f32),
+    back_right_end: (f32, f32),
+    top_left: (f32, f32),
+    top_right: (f32, f32),
+    bottom_right: (f32, f32),
+    bottom_left: (f32, f32),
+}
+
+fn workspace_folder_geometry(openness: f32) -> WorkspaceFolderGeometry {
+    let openness = openness.clamp(0., 1.);
+    WorkspaceFolderGeometry {
+        back_left_end: interpolate_point((3., 17.5), (3., 7.), openness),
+        back_right_end: interpolate_point((21., 17.5), (21., 10.), openness),
+        // The flap starts at the top of the closed folder and travels down and
+        // outward. Starting it at the bottom makes the flap appear to grow up.
+        top_left: interpolate_point((3., 8.5), (4.5, 10.), openness),
+        top_right: interpolate_point((21., 8.5), (21.5, 10.), openness),
+        bottom_right: interpolate_point((21., 17.5), (18.5, 19.), openness),
+        bottom_left: interpolate_point((3., 17.5), (3.5, 19.), openness),
+    }
+}
+
+fn interpolate_point(from: (f32, f32), to: (f32, f32), progress: f32) -> (f32, f32) {
+    (
+        from.0 + (to.0 - from.0) * progress,
+        from.1 + (to.1 - from.1) * progress,
+    )
+}
+
+fn render_workspace_folder_drawing(openness: f32) -> gpui::AnyElement {
+    let geometry = workspace_folder_geometry(openness);
+    canvas(
+        move |bounds, _, _| {
+            let scale = f32::from(bounds.size.width).min(f32::from(bounds.size.height)) / 24.;
+            let stroke_width = px(2. * scale);
+            let position = |(x, y): (f32, f32)| {
+                point(
+                    bounds.origin.x + px(x * scale),
+                    bounds.origin.y + px(y * scale),
+                )
+            };
+
+            let mut back = PathBuilder::stroke(stroke_width);
+            back.move_to(position(geometry.back_left_end));
+            back.line_to(position((3., 6.5)));
+            back.curve_to(position((5.5, 4.)), position((3., 4.)));
+            back.line_to(position((10., 4.)));
+            back.line_to(position((12., 6.)));
+            back.line_to(position((18.5, 6.)));
+            back.curve_to(position((21., 8.5)), position((21., 6.)));
+            back.line_to(position(geometry.back_right_end));
+
+            let mut front = PathBuilder::stroke(stroke_width);
+            front.move_to(position(geometry.top_left));
+            front.line_to(position(geometry.bottom_left));
+            front.line_to(position(geometry.bottom_right));
+            front.line_to(position(geometry.top_right));
+
+            let mut opening = PathBuilder::stroke(stroke_width);
+            opening.move_to(position(geometry.top_left));
+            opening.line_to(position(geometry.top_right));
+
+            (back.build(), front.build(), opening.build())
+        },
+        move |_, (back, front, opening), window, _| {
+            let color = Hsla::from(rgb(0xb8bbc0));
+            if let Ok(back) = back {
+                window.paint_path(back, color);
+            }
+            if let Ok(front) = front {
+                window.paint_path(front, color);
+            }
+            if let Ok(opening) = opening {
+                window.paint_path(opening, color.opacity(openness));
+            }
+        },
+    )
+    .size_4()
+    .into_any_element()
 }
 
 fn short_id(id: SessionId) -> String {
@@ -3740,6 +3858,43 @@ mod tests {
         assert_eq!(
             CONVERSATION_EVENT_PAGE_SIZE,
             DEFAULT_SESSION_EVENT_PAGE_SIZE
+        );
+    }
+
+    #[test]
+    fn workspace_folder_geometry_interpolates_between_closed_and_open_shapes() {
+        assert_eq!(
+            workspace_folder_geometry(0.),
+            WorkspaceFolderGeometry {
+                back_left_end: (3., 17.5),
+                back_right_end: (21., 17.5),
+                top_left: (3., 8.5),
+                top_right: (21., 8.5),
+                bottom_right: (21., 17.5),
+                bottom_left: (3., 17.5),
+            }
+        );
+        assert_eq!(
+            workspace_folder_geometry(0.5),
+            WorkspaceFolderGeometry {
+                back_left_end: (3., 12.25),
+                back_right_end: (21., 13.75),
+                top_left: (3.75, 9.25),
+                top_right: (21.25, 9.25),
+                bottom_right: (19.75, 18.25),
+                bottom_left: (3.25, 18.25),
+            }
+        );
+        assert_eq!(
+            workspace_folder_geometry(1.),
+            WorkspaceFolderGeometry {
+                back_left_end: (3., 7.),
+                back_right_end: (21., 10.),
+                top_left: (4.5, 10.),
+                top_right: (21.5, 10.),
+                bottom_right: (18.5, 19.),
+                bottom_left: (3.5, 19.),
+            }
         );
     }
 }
