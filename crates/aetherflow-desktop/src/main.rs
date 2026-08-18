@@ -80,7 +80,7 @@ impl AssetSource for DesktopAssets {
     }
 }
 
-gpui::actions!(aetherflow, [NewSession, Quit]);
+gpui::actions!(aetherflow, [ArchiveActiveSession, NewSession, Quit]);
 
 #[derive(Default)]
 struct BottomFollowAnimation {
@@ -1188,6 +1188,14 @@ impl DesktopShell {
         })
         .detach();
         cx.notify();
+    }
+
+    fn archive_active_session(&mut self, cx: &mut Context<Self>) {
+        let Some(session_id) = archive_target_session_id(self.selected_session_id, &self.sessions)
+        else {
+            return;
+        };
+        self.set_session_archived(session_id, true, cx);
     }
 
     fn set_session_archived(
@@ -2532,6 +2540,17 @@ fn selection_after_refresh(
         .or_else(|| sessions.first().map(|session| session.id))
 }
 
+fn archive_target_session_id(
+    selected_session_id: Option<SessionId>,
+    sessions: &[SessionDescriptor],
+) -> Option<SessionId> {
+    let selected_session_id = selected_session_id?;
+    sessions
+        .iter()
+        .find(|session| session.id == selected_session_id && !session.archived)
+        .map(|session| session.id)
+}
+
 fn assistant_text_delta(event: &SessionEvent) -> Option<&str> {
     let SessionEventPayload::Pi { message } = &event.payload else {
         return None;
@@ -3157,16 +3176,21 @@ fn is_near_bottom(offset_y: Pixels, max_offset: Pixels) -> bool {
     max_offset + offset_y <= px(BOTTOM_FOLLOW_THRESHOLD)
 }
 
+fn desktop_key_bindings() -> [KeyBinding; 3] {
+    [
+        KeyBinding::new("cmd-shift-a", ArchiveActiveSession, None),
+        KeyBinding::new("cmd-n", NewSession, None),
+        KeyBinding::new("cmd-q", Quit, None),
+    ]
+}
+
 fn main() {
     Application::new()
         .with_assets(DesktopAssets)
         .run(|cx: &mut App| {
             gpui_component::init(cx);
             cx.on_action(|_: &Quit, cx| cx.quit());
-            cx.bind_keys([
-                KeyBinding::new("cmd-n", NewSession, None),
-                KeyBinding::new("cmd-q", Quit, None),
-            ]);
+            cx.bind_keys(desktop_key_bindings());
             let theme = gpui_component::Theme::global_mut(cx);
             theme.background = gpui::transparent_black();
             theme.font_family = "Inter Variable".into();
@@ -3183,6 +3207,12 @@ fn main() {
                 },
                 |window, cx| {
                     let shell = cx.new(|cx| DesktopShell::new(window, cx));
+                    let archive_session_shell = shell.downgrade();
+                    cx.on_action(move |_: &ArchiveActiveSession, cx| {
+                        let _ = archive_session_shell.update(cx, |shell, cx| {
+                            shell.archive_active_session(cx);
+                        });
+                    });
                     let new_session_shell = shell.downgrade();
                     cx.on_action(move |_: &NewSession, cx| {
                         let Some(window_handle) = cx.active_window() else {
@@ -3350,6 +3380,23 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn cmd_shift_a_dispatches_archive_active_session(cx: &mut gpui::TestAppContext) {
+        let dispatch_count = std::rc::Rc::new(std::cell::Cell::new(0));
+        let observed_dispatch_count = dispatch_count.clone();
+        cx.update(|cx| {
+            cx.bind_keys(desktop_key_bindings());
+            cx.on_action(move |_: &ArchiveActiveSession, _| {
+                observed_dispatch_count.set(observed_dispatch_count.get() + 1);
+            });
+        });
+
+        let cx = cx.add_empty_window();
+        cx.simulate_keystrokes("cmd-shift-a");
+
+        assert_eq!(dispatch_count.get(), 1);
+    }
+
     #[test]
     fn refresh_preserves_a_valid_selection_and_falls_back_to_the_first_session() {
         let first = SessionDescriptor {
@@ -3389,6 +3436,45 @@ mod tests {
             Some(first_id)
         );
         assert_eq!(selection_after_refresh(Some(first_id), &[]), None);
+    }
+
+    #[test]
+    fn only_selected_unarchived_sessions_are_archive_targets() {
+        let session = SessionDescriptor {
+            id: SessionId::new(),
+            agent_id: AgentId::new(),
+            association: SessionAssociation::Standalone,
+            workspace: SessionWorkspace {
+                workspace_id: WorkspaceId::new(),
+                working_directory_id: DirectoryId::new(),
+            },
+            title: Some("Selected".to_owned()),
+            archived: false,
+            updated_at_ms: 1,
+        };
+        let session_id = session.id;
+
+        assert_eq!(
+            archive_target_session_id(Some(session_id), std::slice::from_ref(&session)),
+            Some(session_id)
+        );
+        assert_eq!(
+            archive_target_session_id(None, std::slice::from_ref(&session)),
+            None
+        );
+        assert_eq!(
+            archive_target_session_id(Some(SessionId::new()), std::slice::from_ref(&session)),
+            None
+        );
+
+        let archived_session = SessionDescriptor {
+            archived: true,
+            ..session
+        };
+        assert_eq!(
+            archive_target_session_id(Some(session_id), &[archived_session]),
+            None
+        );
     }
 
     #[test]

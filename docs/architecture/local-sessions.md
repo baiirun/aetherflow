@@ -89,6 +89,8 @@ It does not currently provide:
   complete runtime state.
 - Archiving MUST hide a Session from the active desktop list without deleting
   its actor, event history, Pi continuation, or Attachments.
+- `Cmd-Shift-A` MUST archive the selected unarchived Session. It MUST do nothing
+  when there is no selected Session or the selected Session is already archived.
 - The desktop MUST group archived Sessions under a plain-text `Archived`
   heading. Clicking that heading MUST toggle the archived rows without changing
   any Session's archive state.
