@@ -18,7 +18,7 @@ truth.
 | Pi conversation continuation | Pi session JSONL | Aetherflow `SessionId` | Pi process and daemon restart | Pi owns the continuation format; Aetherflow does not reconstruct it from Session Events. |
 | Session discovery and navigation metadata | Session Directory actor SQL | `SessionId` | Directory sleep and daemon restart | Title, archive state, and activity time are a dedicated read model. |
 | Attachment bytes and integrity metadata | Local content-addressed filesystem store | SHA-256 `AttachmentId` | Process restart | Repeated uploads deduplicate; Session commands and events store references only. |
-| Desktop presentation preferences | Local `desktop-preferences.json` | Host user | App relaunch | Presentation only; currently remembers whether the archived Sessions section is collapsed. |
+| Desktop presentation preferences | Local `desktop-preferences.json` | Host user | App relaunch | Presentation only; remembers whether the archived Sessions section and individual Workspace groups are collapsed. |
 | Live event delivery | Rivet subscription | Connection plus Session actor | No | A transient acceleration over durable history. |
 | Desktop transcript and optimistic composer state | GPUI process memory | `SessionId` | No | Derived from Session Events and current user actions. |
 

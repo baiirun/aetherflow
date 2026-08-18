@@ -1,3 +1,4 @@
+use aetherflow_storage::WorkspaceId;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -5,10 +6,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub(crate) struct DesktopPreferences {
     pub(crate) archived_sessions_collapsed: bool,
+    pub(crate) collapsed_workspace_ids: Vec<WorkspaceId>,
 }
 
 impl DesktopPreferences {
@@ -63,20 +65,35 @@ mod tests {
         let preferences = DesktopPreferences::load_from(&directory.path().join("missing.json"))?;
 
         assert!(!preferences.archived_sessions_collapsed);
+        assert!(preferences.collapsed_workspace_ids.is_empty());
         Ok(())
     }
 
     #[test]
-    fn archive_section_state_survives_a_save_and_load() -> Result<()> {
+    fn presentation_state_survives_a_save_and_load() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("desktop-preferences.json");
         let preferences = DesktopPreferences {
             archived_sessions_collapsed: true,
+            collapsed_workspace_ids: vec![WorkspaceId::new(), WorkspaceId::new()],
         };
 
         preferences.save_to(&path)?;
 
         assert_eq!(DesktopPreferences::load_from(&path)?, preferences);
+        Ok(())
+    }
+
+    #[test]
+    fn older_preferences_default_to_no_collapsed_workspaces() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("desktop-preferences.json");
+        fs::write(&path, r#"{"archivedSessionsCollapsed":true}"#)?;
+
+        let preferences = DesktopPreferences::load_from(&path)?;
+
+        assert!(preferences.archived_sessions_collapsed);
+        assert!(preferences.collapsed_workspace_ids.is_empty());
         Ok(())
     }
 }

@@ -97,6 +97,9 @@ It does not currently provide:
 - The `Archived` heading MUST NOT use a chip or disclosure icon. Its expanded or
   collapsed state is desktop preference state that MUST survive an app relaunch
   and MUST NOT be persisted as Session metadata.
+- Clicking a Workspace header MUST toggle the visibility of its active Session
+  rows without changing Workspace or Session data. Its open or closed state is
+  desktop preference state and MUST survive an app relaunch.
 
 ### Attachments
 
@@ -240,6 +243,11 @@ For the desktop archive disclosure, verify manually that clicking the plain
 `Archived` heading hides and restores the archived rows, while restarting the
 desktop restores the most recently chosen disclosure state and does not change
 which Sessions are archived.
+
+For Workspace disclosure, verify manually that clicking a Workspace header
+hides and restores only that Workspace's active Session rows, that its `+`
+action starts a Session without toggling the group, and that restarting the
+desktop restores each Workspace's most recently chosen state.
 
 The following tests are the contract anchors:
 

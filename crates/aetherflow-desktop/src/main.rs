@@ -177,6 +177,7 @@ struct DesktopShell {
     tool_group_expansion: HashMap<String, bool>,
     expanded_tool_calls: HashSet<String>,
     archived_sessions_collapsed: bool,
+    collapsed_workspace_ids: HashSet<WorkspaceId>,
     loading_conversations: HashSet<SessionId>,
     conversation_errors: HashMap<SessionId, String>,
     new_session_messages: Vec<ConversationItem>,
@@ -257,6 +258,7 @@ impl DesktopShell {
             tool_group_expansion: HashMap::new(),
             expanded_tool_calls: HashSet::new(),
             archived_sessions_collapsed: preferences.archived_sessions_collapsed,
+            collapsed_workspace_ids: preferences.collapsed_workspace_ids.into_iter().collect(),
             loading_conversations: HashSet::new(),
             conversation_errors: HashMap::new(),
             new_session_messages: Vec::new(),
@@ -287,13 +289,32 @@ impl DesktopShell {
 
     fn toggle_archived_sessions(&mut self, cx: &mut Context<Self>) {
         self.archived_sessions_collapsed = !self.archived_sessions_collapsed;
+        self.save_preferences();
+        cx.notify();
+    }
+
+    fn toggle_workspace(&mut self, workspace_id: WorkspaceId, cx: &mut Context<Self>) {
+        if !self.collapsed_workspace_ids.remove(&workspace_id) {
+            self.collapsed_workspace_ids.insert(workspace_id);
+        }
+        self.save_preferences();
+        cx.notify();
+    }
+
+    fn save_preferences(&mut self) {
+        let mut collapsed_workspace_ids = self
+            .collapsed_workspace_ids
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        collapsed_workspace_ids.sort_by_key(ToString::to_string);
         let preferences = DesktopPreferences {
             archived_sessions_collapsed: self.archived_sessions_collapsed,
+            collapsed_workspace_ids,
         };
         if let Err(error) = preferences.save() {
             self.action_error = Some(format!("Could not save desktop preferences: {error:#}"));
         }
-        cx.notify();
     }
 
     fn connect_daemon(&mut self, cx: &mut Context<Self>) {
@@ -1402,6 +1423,7 @@ impl DesktopShell {
                 for (workspace_index, workspace) in self.workspaces.iter().enumerate() {
                     let workspace_id = workspace.id;
                     let primary_directory_id = workspace.primary_directory_id;
+                    let workspace_collapsed = self.collapsed_workspace_ids.contains(&workspace_id);
                     let group = format!("workspace-row-{workspace_id}");
                     list = list.child(
                         div()
@@ -1414,10 +1436,15 @@ impl DesktopShell {
                             .flex()
                             .items_center()
                             .gap_2()
+                            .cursor_pointer()
                             .child(
-                                Icon::new(IconName::FolderClosed)
-                                    .size_4()
-                                    .text_color(rgb(0xb8bbc0)),
+                                Icon::new(if workspace_collapsed {
+                                    IconName::FolderClosed
+                                } else {
+                                    IconName::FolderOpen
+                                })
+                                .size_4()
+                                .text_color(rgb(0xb8bbc0)),
                             )
                             .child(
                                 div()
@@ -1451,16 +1478,21 @@ impl DesktopShell {
                                         shell.creating_directory_id = Some(primary_directory_id);
                                         shell.start_new_session(window, cx);
                                     })),
-                            ),
+                            )
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                shell.toggle_workspace(workspace_id, cx);
+                            })),
                     );
-                    for (index, session) in self.sessions.iter().enumerate() {
-                        if !session.archived && session_workspace_id(session) == workspace_id {
-                            list = list.child(self.render_session_row(
-                                session.clone(),
-                                index,
-                                true,
-                                cx,
-                            ));
+                    if !workspace_collapsed {
+                        for (index, session) in self.sessions.iter().enumerate() {
+                            if !session.archived && session_workspace_id(session) == workspace_id {
+                                list = list.child(self.render_session_row(
+                                    session.clone(),
+                                    index,
+                                    true,
+                                    cx,
+                                ));
+                            }
                         }
                     }
                 }
