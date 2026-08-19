@@ -825,19 +825,35 @@ impl DesktopShell {
     }
 
     fn conversation_is_at_bottom(&self, session_id: SessionId) -> bool {
+        let content_offset_y = self
+            .bottom_follow_animations
+            .get(&session_id)
+            .map_or(px(0.), |animation| animation.content_offset_y);
         self.conversation_scrolls
             .get(&session_id)
-            .is_none_or(scroll_handle_is_at_bottom)
+            .is_none_or(|scroll_handle| {
+                is_near_animated_bottom(
+                    scroll_handle.offset().y,
+                    scroll_handle.max_offset().height,
+                    content_offset_y,
+                )
+            })
     }
 
     fn follow_conversation_if(&mut self, session_id: SessionId, follow: bool) {
         if follow {
-            let previous_max_offset = self
-                .conversation_scrolls
+            let content_offset_y = self
+                .bottom_follow_animations
                 .get(&session_id)
-                .expect("selected conversations have a scroll handle")
-                .max_offset()
-                .height;
+                .map_or(px(0.), |animation| animation.content_offset_y);
+            let previous_max_offset = unshifted_max_offset(
+                self.conversation_scrolls
+                    .get(&session_id)
+                    .expect("selected conversations have a scroll handle")
+                    .max_offset()
+                    .height,
+                content_offset_y,
+            );
             self.bottom_follow_animations
                 .entry(session_id)
                 .or_default()
@@ -882,7 +898,10 @@ impl DesktopShell {
                 cx.notify();
                 return;
             }
-            let new_max_offset = scroll_handle.max_offset().height;
+            let new_max_offset = unshifted_max_offset(
+                scroll_handle.max_offset().height,
+                animation.content_offset_y,
+            );
             let (scroll_y, content_offset_y) = pinned_bottom_offsets(
                 previous_max_offset,
                 new_max_offset,
@@ -895,7 +914,11 @@ impl DesktopShell {
             return;
         }
 
-        if !scroll_handle_is_at_bottom(&scroll_handle) {
+        if !is_near_animated_bottom(
+            current_offset.y,
+            scroll_handle.max_offset().height,
+            animation.content_offset_y,
+        ) {
             self.bottom_follow_animations.remove(&session_id);
             cx.notify();
             return;
@@ -2102,23 +2125,27 @@ impl DesktopShell {
                                             cx,
                                         ))
                                     });
-                                if is_transcript_tail {
-                                    div()
-                                        .flex()
-                                        .items_start()
-                                        .gap_3()
-                                        .child(render_agent_blob(session_id, agent_blob_transition))
-                                        .child(message_content.flex_1().min_w_0())
-                                        .into_any_element()
-                                } else {
-                                    message_content.into_any_element()
-                                }
+                                div()
+                                    .flex()
+                                    .items_start()
+                                    .gap_3()
+                                    .child(div().size(px(AGENT_BLOB_SIZE)).flex_none().when(
+                                        is_transcript_tail,
+                                        |slot| {
+                                            slot.child(render_agent_blob(
+                                                session_id,
+                                                agent_blob_transition,
+                                            ))
+                                        },
+                                    ))
+                                    .child(message_content.flex_1().min_w_0().max_w(px(720.)))
+                                    .into_any_element()
                             };
                             transcript.child(
                                 div()
                                     .id(("assistant-message", index))
                                     .w_full()
-                                    .max_w(px(720.))
+                                    .max_w(px(764.))
                                     .text_color(rgb(0xd6d7d9))
                                     .child(content),
                             )
@@ -2163,53 +2190,53 @@ impl DesktopShell {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let group_key = group.key().to_owned();
-        let open = self
-            .tool_group_expansion
-            .get(&group_key)
-            .copied()
-            .unwrap_or_else(|| group.should_open_by_default());
+        let open = tool_group_is_open(self.tool_group_expansion.get(&group_key).copied());
         let toggle_group_key = group_key.clone();
-        let mut container = div().w_full().max_w(px(720.)).text_sm().child(
-            div()
-                .id(SharedString::from(format!("tool-group-{group_key}")))
-                .h(px(36.))
-                .flex()
-                .items_center()
-                .gap_2()
-                .cursor_pointer()
-                .text_color(rgb(0x85898f))
-                .hover(|style| style.text_color(rgb(0xb5b8bd)))
-                .on_click(cx.listener(move |shell, _, _, cx| {
-                    shell
-                        .tool_group_expansion
-                        .insert(toggle_group_key.clone(), !open);
-                    cx.notify();
-                }))
-                .when(show_activity, |header| {
-                    header.child(render_agent_blob(
-                        agent_turn.session_id,
-                        agent_turn.blob_transition,
+        let mut container =
+            div().w_full().max_w(px(764.)).text_sm().child(
+                div()
+                    .id(SharedString::from(format!("tool-group-{group_key}")))
+                    .h(px(36.))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .cursor_pointer()
+                    .text_color(rgb(0x85898f))
+                    .hover(|style| style.text_color(rgb(0xb5b8bd)))
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell
+                            .tool_group_expansion
+                            .insert(toggle_group_key.clone(), !open);
+                        cx.notify();
+                    }))
+                    .child(div().size(px(AGENT_BLOB_SIZE)).flex_none().when(
+                        show_activity,
+                        |slot| {
+                            slot.child(render_agent_blob(
+                                agent_turn.session_id,
+                                agent_turn.blob_transition,
+                            ))
+                        },
                     ))
-                })
-                .child(render_tool_group_summary(
-                    group.summary(),
-                    &group_key,
-                    show_activity,
-                    group.calls.len(),
-                    group
-                        .calls
-                        .iter()
-                        .filter(|call| call.status == ToolStatus::Failed)
-                        .count(),
-                    agent_turn.elapsed,
-                    self.completed_tool_group_durations.get(&group_key).copied(),
-                )),
-        );
+                    .child(render_tool_group_summary(
+                        group.summary(),
+                        &group_key,
+                        show_activity,
+                        group.calls.len(),
+                        group
+                            .calls
+                            .iter()
+                            .filter(|call| call.status == ToolStatus::Failed)
+                            .count(),
+                        agent_turn.elapsed,
+                        self.completed_tool_group_durations.get(&group_key).copied(),
+                    )),
+            );
 
         if open {
             container = container.child(
                 div()
-                    .ml(px(8.))
+                    .ml(px(44.))
                     .pl_4()
                     .border_l_1()
                     .border_color(rgb(0x2c3036))
@@ -3276,6 +3303,10 @@ fn tool_group_shows_activity(
     has_running_tool || (session_has_active_turn && item_index == item_count.saturating_sub(1))
 }
 
+fn tool_group_is_open(explicit_expansion: Option<bool>) -> bool {
+    explicit_expansion.unwrap_or(false)
+}
+
 fn render_tool_group_summary(
     summary: String,
     group_key: &str,
@@ -3430,9 +3461,14 @@ fn render_assistant_markdown(
     window: &mut Window,
     cx: &mut App,
 ) -> gpui::AnyElement {
+    let current_source = if is_live_tail {
+        streaming_markdown_source(&message.text)
+    } else {
+        Cow::Borrowed(message.text.as_str())
+    };
     let current = TextView::markdown(
         assistant_markdown_id(session_id, index, message.text.len(), is_live_tail),
-        message.text.clone(),
+        current_source.into_owned(),
         window,
         cx,
     )
@@ -3461,7 +3497,7 @@ fn render_assistant_markdown(
             "assistant-markdown-{session_id}-{index}-previous-{}",
             previous_text.len()
         )),
-        previous_text.to_owned(),
+        streaming_markdown_source(previous_text).into_owned(),
         window,
         cx,
     )
@@ -3482,6 +3518,102 @@ fn render_assistant_markdown(
         .child(previous)
         .child(current)
         .into_any_element()
+}
+
+fn streaming_markdown_source(markdown: &str) -> Cow<'_, str> {
+    let Some((syntax_start, label_start, label_end)) = incomplete_inline_link(markdown) else {
+        return Cow::Borrowed(markdown);
+    };
+
+    let mut stabilized = String::with_capacity(syntax_start + label_end - label_start);
+    stabilized.push_str(&markdown[..syntax_start]);
+    stabilized.push_str(&markdown[label_start..label_end]);
+    Cow::Owned(stabilized)
+}
+
+fn incomplete_inline_link(markdown: &str) -> Option<(usize, usize, usize)> {
+    let mut label_starts = Vec::new();
+    let mut escaped = false;
+    for (index, character) in markdown.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if character == '[' {
+            label_starts.push(index);
+            continue;
+        }
+        if character != ']' {
+            continue;
+        }
+
+        let label_start = label_starts.pop()?;
+        let destination_start = index + character.len_utf8();
+        if !markdown[destination_start..].starts_with('(') {
+            if destination_start == markdown.len() {
+                return Some((
+                    link_syntax_start(markdown, label_start),
+                    label_start + 1,
+                    index,
+                ));
+            }
+            continue;
+        }
+        let destination_start = destination_start + 1;
+        if markdown_destination_is_closed(&markdown[destination_start..]) {
+            continue;
+        }
+
+        return Some((
+            link_syntax_start(markdown, label_start),
+            label_start + 1,
+            index,
+        ));
+    }
+    label_starts.first().copied().map(|label_start| {
+        (
+            link_syntax_start(markdown, label_start),
+            label_start + 1,
+            markdown.len(),
+        )
+    })
+}
+
+fn link_syntax_start(markdown: &str, label_start: usize) -> usize {
+    label_start
+        .checked_sub(1)
+        .filter(|start| markdown.as_bytes()[*start] == b'!')
+        .unwrap_or(label_start)
+}
+
+fn markdown_destination_is_closed(destination: &str) -> bool {
+    let mut depth = 1_u32;
+    let mut escaped = false;
+    for character in destination.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn assistant_markdown_id(
@@ -3527,8 +3659,12 @@ fn next_content_shift_offset(current: Pixels, elapsed: Duration) -> Pixels {
     current * (1. - progress)
 }
 
-fn scroll_handle_is_at_bottom(scroll_handle: &ScrollHandle) -> bool {
-    is_near_bottom(scroll_handle.offset().y, scroll_handle.max_offset().height)
+fn is_near_animated_bottom(offset_y: Pixels, max_offset: Pixels, content_offset_y: Pixels) -> bool {
+    is_near_bottom(offset_y, unshifted_max_offset(max_offset, content_offset_y))
+}
+
+fn unshifted_max_offset(max_offset: Pixels, content_offset_y: Pixels) -> Pixels {
+    max_offset - content_offset_y
 }
 
 fn is_near_bottom(offset_y: Pixels, max_offset: Pixels) -> bool {
@@ -3731,6 +3867,13 @@ mod tests {
         assert!(!tool_group_shows_activity(true, 1, 3, false));
         assert!(!tool_group_shows_activity(false, 2, 3, false));
         assert!(tool_group_shows_activity(false, 1, 3, true));
+    }
+
+    #[test]
+    fn tool_groups_expand_only_from_explicit_user_state() {
+        assert!(!tool_group_is_open(None));
+        assert!(tool_group_is_open(Some(true)));
+        assert!(!tool_group_is_open(Some(false)));
     }
 
     #[test]
@@ -4005,6 +4148,23 @@ mod tests {
     }
 
     #[test]
+    fn bottom_follow_does_not_treat_its_visual_offset_as_user_scrolling() {
+        assert!(is_near_animated_bottom(px(-140.), px(180.), px(40.)));
+        assert!(!is_near_animated_bottom(px(-100.), px(180.), px(40.)));
+    }
+
+    #[test]
+    fn repeated_growth_does_not_count_the_existing_visual_offset_twice() {
+        let previous_max_offset = unshifted_max_offset(px(180.), px(40.));
+        let new_max_offset = unshifted_max_offset(px(200.), px(40.));
+        let (scroll_y, content_offset_y) =
+            pinned_bottom_offsets(previous_max_offset, new_max_offset, px(40.));
+
+        assert_eq!(scroll_y, px(-160.));
+        assert_eq!(content_offset_y, px(60.));
+    }
+
+    #[test]
     fn another_sessions_active_turn_does_not_disable_a_new_session_composer() {
         let active_session_id = SessionId::new();
         let inactive_session_id = SessionId::new();
@@ -4085,6 +4245,33 @@ mod tests {
         assert_eq!(
             assistant_markdown_id(session_id, 2, 1, false),
             assistant_markdown_id(session_id, 2, 80, false),
+        );
+    }
+
+    #[test]
+    fn incomplete_streamed_links_do_not_render_markdown_syntax_or_destinations() {
+        let complete_link = "See [the docs](file:///tmp/complete.md)";
+        for prefix_end in complete_link
+            .char_indices()
+            .map(|(index, character)| index + character.len_utf8())
+            .filter(|prefix_end| *prefix_end < complete_link.len())
+        {
+            let rendered = streaming_markdown_source(&complete_link[..prefix_end]);
+            assert!(!rendered.contains('['), "rendered {rendered:?}");
+            assert!(!rendered.contains(']'), "rendered {rendered:?}");
+            assert!(!rendered.contains("file:///"), "rendered {rendered:?}");
+        }
+        assert_eq!(
+            streaming_markdown_source("See [the docs](file:///tmp/incomplete"),
+            "See the docs"
+        );
+        assert_eq!(
+            streaming_markdown_source("See [the docs](file:///tmp/a_(draft).md"),
+            "See the docs"
+        );
+        assert_eq!(
+            streaming_markdown_source("See [the docs](file:///tmp/complete.md)"),
+            "See [the docs](file:///tmp/complete.md)"
         );
     }
 

@@ -81,12 +81,6 @@ impl ToolGroup {
             .unwrap_or("empty-tool-group")
     }
 
-    pub fn should_open_by_default(&self) -> bool {
-        self.calls
-            .iter()
-            .any(|call| call.status != ToolStatus::Succeeded)
-    }
-
     pub fn summary(&self) -> String {
         let running = self
             .calls
