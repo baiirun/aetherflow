@@ -119,6 +119,48 @@ enum PromptUpdate {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubmissionKind {
+    NewSession {
+        workspace_id: WorkspaceId,
+        directory_id: DirectoryId,
+    },
+    Prompt(SessionId),
+    Steer(SessionId),
+}
+
+impl SubmissionKind {
+    fn session_id(self) -> Option<SessionId> {
+        match self {
+            Self::NewSession { .. } => None,
+            Self::Prompt(session_id) | Self::Steer(session_id) => Some(session_id),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SessionTurnState {
+    #[default]
+    Idle,
+    Active,
+    Steering,
+    Cancelling,
+}
+
+impl SessionTurnState {
+    fn has_active_turn(self) -> bool {
+        self != Self::Idle
+    }
+
+    fn transition(&mut self, from: Self, to: Self) -> bool {
+        if *self != from {
+            return false;
+        }
+        *self = to;
+        true
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AgentBlobState {
     Idle,
     Thinking,
@@ -228,17 +270,15 @@ struct DesktopShell {
     is_selecting_workspace_directories: bool,
     pending_images: Vec<PendingImage>,
     next_pending_image_id: u64,
-    active_turn_session_ids: HashSet<SessionId>,
+    session_turn_states: HashMap<SessionId, SessionTurnState>,
     active_turn_started_at: HashMap<SessionId, Instant>,
     active_turn_tool_group_keys: HashMap<SessionId, String>,
     agent_blob_transitions: HashMap<SessionId, AgentBlobTransition>,
     creating_turn_started_at: Option<Instant>,
     completed_tool_group_durations: HashMap<String, Duration>,
     working_duration_tick_scheduled: bool,
-    is_creating_session: bool,
+    new_session_turn_state: SessionTurnState,
     is_creating_workspace: bool,
-    cancelling_turn_session_ids: HashSet<SessionId>,
-    steering_session_ids: HashSet<SessionId>,
     pending_steering_messages: HashMap<SessionId, ConversationMessage>,
     load_state: SessionLoadState,
     action_error: Option<String>,
@@ -313,17 +353,15 @@ impl DesktopShell {
             is_selecting_workspace_directories: false,
             pending_images: Vec::new(),
             next_pending_image_id: 0,
-            active_turn_session_ids: HashSet::new(),
+            session_turn_states: HashMap::new(),
             active_turn_started_at: HashMap::new(),
             active_turn_tool_group_keys: HashMap::new(),
             agent_blob_transitions: HashMap::new(),
             creating_turn_started_at: None,
             completed_tool_group_durations: HashMap::new(),
             working_duration_tick_scheduled: false,
-            is_creating_session: false,
+            new_session_turn_state: SessionTurnState::Idle,
             is_creating_workspace: false,
-            cancelling_turn_session_ids: HashSet::new(),
-            steering_session_ids: HashSet::new(),
             pending_steering_messages: HashMap::new(),
             load_state: SessionLoadState::Loading,
             action_error: preferences_error,
@@ -516,6 +554,64 @@ impl DesktopShell {
         self.sessions.iter().find(|session| session.id == selected)
     }
 
+    fn session_turn_state(&self, session_id: SessionId) -> SessionTurnState {
+        self.session_turn_states
+            .get(&session_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn set_session_turn_state(&mut self, session_id: SessionId, state: SessionTurnState) {
+        if state == SessionTurnState::Idle {
+            self.session_turn_states.remove(&session_id);
+        } else {
+            self.session_turn_states.insert(session_id, state);
+        }
+    }
+
+    fn transition_session_turn_state(
+        &mut self,
+        session_id: SessionId,
+        from: SessionTurnState,
+        to: SessionTurnState,
+    ) -> bool {
+        let mut state = self.session_turn_state(session_id);
+        if !state.transition(from, to) {
+            return false;
+        }
+        self.set_session_turn_state(session_id, state);
+        true
+    }
+
+    fn submission_kind(&self) -> Result<Option<SubmissionKind>, &'static str> {
+        if self.creating_new_session {
+            if self.new_session_turn_state != SessionTurnState::Idle {
+                return Ok(None);
+            }
+            let Some((workspace_id, directory_id)) =
+                self.selected_workspace_id.zip(self.creating_directory_id)
+            else {
+                return Err("Open a directory before creating a session.");
+            };
+            return Ok(Some(SubmissionKind::NewSession {
+                workspace_id,
+                directory_id,
+            }));
+        }
+
+        let Some(session_id) = self.selected_session_id else {
+            return Ok(None);
+        };
+        if self.loading_conversations.contains(&session_id) {
+            return Ok(None);
+        }
+        Ok(match self.session_turn_state(session_id) {
+            SessionTurnState::Idle => Some(SubmissionKind::Prompt(session_id)),
+            SessionTurnState::Active => Some(SubmissionKind::Steer(session_id)),
+            SessionTurnState::Steering | SessionTurnState::Cancelling => None,
+        })
+    }
+
     fn select_session(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
         self.creating_new_session = false;
         self.selected_session_id = Some(session_id);
@@ -533,7 +629,7 @@ impl DesktopShell {
     }
 
     fn start_new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.creating_new_session && self.is_creating_session {
+        if self.creating_new_session && self.new_session_turn_state.has_active_turn() {
             return;
         }
         if let Some((workspace_id, directory_id)) =
@@ -944,19 +1040,6 @@ impl DesktopShell {
     }
 
     fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let steering_session_id = self.selected_session_id.filter(|session_id| {
-            !self.creating_new_session && self.active_turn_session_ids.contains(session_id)
-        });
-        if (self.creating_new_session && self.is_creating_session)
-            || self.selected_session_id.is_some_and(|session_id| {
-                self.loading_conversations.contains(&session_id)
-                    || self.steering_session_ids.contains(&session_id)
-                    || self.cancelling_turn_session_ids.contains(&session_id)
-            })
-        {
-            return;
-        }
-
         let prompt = self.composer.read(cx).value().trim().to_owned();
         let conversation_images = self
             .pending_images
@@ -966,63 +1049,62 @@ impl DesktopShell {
         if prompt.is_empty() && conversation_images.is_empty() {
             return;
         }
+        let submission = match self.submission_kind() {
+            Ok(Some(submission)) => submission,
+            Ok(None) => return,
+            Err(error) => {
+                self.action_error = Some(error.to_owned());
+                cx.notify();
+                return;
+            }
+        };
         let attachment_uploads = conversation_images
             .iter()
             .map(|image| (image.mime_type.clone(), image.data().to_vec()))
             .collect::<Vec<_>>();
 
-        let create_new = self.creating_new_session;
-        let new_session_workspace =
-            create_new.then(|| self.selected_workspace_id.zip(self.creating_directory_id));
-        let new_session_workspace = match new_session_workspace {
-            Some(Some(selection)) => Some(selection),
-            Some(None) => {
-                self.action_error = Some("Open a directory before creating a session.".to_owned());
-                cx.notify();
-                return;
-            }
-            None => None,
-        };
-        let session_id = if create_new {
-            None
-        } else {
-            self.selected_session_id
-        };
+        let session_id = submission.session_id();
         let user_message = ConversationMessage {
             role: ConversationRole::User,
             text: prompt.clone(),
             images: conversation_images,
         };
-        if let Some(session_id) = steering_session_id {
-            self.pending_steering_messages
-                .insert(session_id, user_message);
-        } else if let Some(session_id) = session_id {
-            let follow = self.conversation_is_at_bottom(session_id);
-            self.conversations
-                .entry(session_id)
-                .or_default()
-                .extend(turn_messages(user_message));
-            self.follow_conversation_if(session_id, follow);
-        } else if create_new {
-            self.new_session_messages.extend(turn_messages(user_message));
-        } else {
-            return;
+        match submission {
+            SubmissionKind::Steer(session_id) => {
+                self.pending_steering_messages
+                    .insert(session_id, user_message);
+            }
+            SubmissionKind::Prompt(session_id) => {
+                let follow = self.conversation_is_at_bottom(session_id);
+                self.conversations
+                    .entry(session_id)
+                    .or_default()
+                    .extend(turn_messages(user_message));
+                self.follow_conversation_if(session_id, follow);
+            }
+            SubmissionKind::NewSession { .. } => {
+                self.new_session_messages
+                    .extend(turn_messages(user_message));
+            }
         }
 
         self.composer
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.pending_images.clear();
-        if let Some(session_id) = steering_session_id {
-            self.steering_session_ids.insert(session_id);
-        } else if let Some(session_id) = session_id {
-            self.active_turn_session_ids.insert(session_id);
-            self.active_turn_started_at
-                .insert(session_id, Instant::now());
-            self.cancelling_turn_session_ids.remove(&session_id);
-            self.set_agent_blob_state(session_id, AgentBlobState::Thinking);
-        } else {
-            self.is_creating_session = true;
-            self.creating_turn_started_at = Some(Instant::now());
+        match submission {
+            SubmissionKind::Steer(session_id) => {
+                self.set_session_turn_state(session_id, SessionTurnState::Steering);
+            }
+            SubmissionKind::Prompt(session_id) => {
+                self.set_session_turn_state(session_id, SessionTurnState::Active);
+                self.active_turn_started_at
+                    .insert(session_id, Instant::now());
+                self.set_agent_blob_state(session_id, AgentBlobState::Thinking);
+            }
+            SubmissionKind::NewSession { .. } => {
+                self.new_session_turn_state = SessionTurnState::Active;
+                self.creating_turn_started_at = Some(Instant::now());
+            }
         }
         self.schedule_working_duration_tick(cx);
         self.action_error = None;
@@ -1036,20 +1118,19 @@ impl DesktopShell {
                     Ok(attachment) => attachments.push(attachment),
                     Err(error) => {
                         let error = format!("Could not upload attachment: {error:#}");
-                        let update = if let Some(session_id) = steering_session_id {
-                            PromptUpdate::SteeringFinished {
+                        let update = match submission {
+                            SubmissionKind::Steer(session_id) => PromptUpdate::SteeringFinished {
                                 session_id,
                                 error: Some(error),
-                            }
-                        } else {
-                            PromptUpdate::Failed { session_id, error }
+                            },
+                            _ => PromptUpdate::Failed { session_id, error },
                         };
                         let _ = updates.send(update);
                         return;
                     }
                 }
             }
-            if let Some(session_id) = steering_session_id {
+            if let SubmissionKind::Steer(session_id) = submission {
                 let error = client
                     .steer_session_with_attachments(session_id, prompt, attachments)
                     .await
@@ -1058,12 +1139,12 @@ impl DesktopShell {
                 let _ = updates.send(PromptUpdate::SteeringFinished { session_id, error });
                 return;
             }
-            let session_id = match session_id {
-                Some(session_id) => session_id,
-                None => {
-                    let Some((workspace_id, directory_id)) = new_session_workspace else {
-                        unreachable!("new sessions require a workspace")
-                    };
+            let session_id = match submission {
+                SubmissionKind::Prompt(session_id) => session_id,
+                SubmissionKind::NewSession {
+                    workspace_id,
+                    directory_id,
+                } => {
                     let mut options = CreateSessionOptions::new(workspace_id);
                     options.directory_id = Some(directory_id);
                     match client.create_session(options).await {
@@ -1080,6 +1161,7 @@ impl DesktopShell {
                         }
                     }
                 }
+                SubmissionKind::Steer(_) => unreachable!("steering submissions return above"),
             };
 
             let mut stream = match client
@@ -1163,8 +1245,8 @@ impl DesktopShell {
             PromptUpdate::Created(session_id) => {
                 self.selected_session_id = Some(session_id);
                 self.creating_new_session = false;
-                self.is_creating_session = false;
-                self.active_turn_session_ids.insert(session_id);
+                self.new_session_turn_state = SessionTurnState::Idle;
+                self.set_session_turn_state(session_id, SessionTurnState::Active);
                 self.active_turn_started_at.insert(
                     session_id,
                     self.creating_turn_started_at
@@ -1209,14 +1291,17 @@ impl DesktopShell {
             }
             PromptUpdate::Finished(session_id) => {
                 self.previous_stream_texts.remove(&session_id);
-                self.active_turn_session_ids.remove(&session_id);
+                self.set_session_turn_state(session_id, SessionTurnState::Idle);
                 self.set_agent_blob_state(session_id, AgentBlobState::Idle);
                 self.finish_turn_timing(session_id);
-                self.cancelling_turn_session_ids.remove(&session_id);
                 self.load_sessions(cx);
             }
             PromptUpdate::SteeringFinished { session_id, error } => {
-                self.steering_session_ids.remove(&session_id);
+                self.transition_session_turn_state(
+                    session_id,
+                    SessionTurnState::Steering,
+                    SessionTurnState::Active,
+                );
                 let message = self.pending_steering_messages.remove(&session_id);
                 if let Some(error) = error {
                     self.action_error = Some(error);
@@ -1233,12 +1318,11 @@ impl DesktopShell {
             PromptUpdate::Failed { session_id, error } => {
                 if let Some(session_id) = session_id {
                     self.previous_stream_texts.remove(&session_id);
-                    self.active_turn_session_ids.remove(&session_id);
+                    self.set_session_turn_state(session_id, SessionTurnState::Idle);
                     self.set_agent_blob_state(session_id, AgentBlobState::Error);
                     self.finish_turn_timing(session_id);
-                    self.cancelling_turn_session_ids.remove(&session_id);
                 } else {
-                    self.is_creating_session = false;
+                    self.new_session_turn_state = SessionTurnState::Idle;
                     self.creating_turn_started_at = None;
                 }
                 self.action_error = Some(error);
@@ -1285,7 +1369,9 @@ impl DesktopShell {
             shell
                 .update(cx, |shell, cx| {
                     shell.working_duration_tick_scheduled = false;
-                    if shell.is_creating_session || !shell.active_turn_session_ids.is_empty() {
+                    if shell.new_session_turn_state.has_active_turn()
+                        || !shell.session_turn_states.is_empty()
+                    {
                         cx.notify();
                         shell.schedule_working_duration_tick(cx);
                     }
@@ -1296,13 +1382,14 @@ impl DesktopShell {
     }
 
     fn cancel_turn(&mut self, cx: &mut Context<Self>) {
-        let Some(session_id) = self
-            .selected_session_id
-            .filter(|session_id| self.active_turn_session_ids.contains(session_id))
-        else {
+        let Some(session_id) = self.selected_session_id else {
             return;
         };
-        if !self.cancelling_turn_session_ids.insert(session_id) {
+        if !self.transition_session_turn_state(
+            session_id,
+            SessionTurnState::Active,
+            SessionTurnState::Cancelling,
+        ) {
             return;
         }
 
@@ -1322,7 +1409,11 @@ impl DesktopShell {
                 .and_then(|result| result);
             let _ = shell.update(cx, |shell, cx| {
                 if let Err(error) = result {
-                    shell.cancelling_turn_session_ids.remove(&session_id);
+                    shell.transition_session_turn_state(
+                        session_id,
+                        SessionTurnState::Cancelling,
+                        SessionTurnState::Active,
+                    );
                     shell.action_error = Some(error);
                 }
                 cx.notify();
@@ -2050,7 +2141,7 @@ impl DesktopShell {
         }
 
         let messages = messages.expect("non-empty conversations were checked above");
-        let session_has_active_turn = self.active_turn_session_ids.contains(&session_id);
+        let session_has_active_turn = self.session_turn_state(session_id).has_active_turn();
         let active_turn_elapsed = self
             .active_turn_started_at
             .get(&session_id)
@@ -2487,14 +2578,20 @@ impl DesktopShell {
     }
 
     fn render_composer(&self, cx: &mut Context<Self>) -> Div {
-        let active_session_id = self.selected_session_id.filter(|session_id| {
-            !self.creating_new_session && self.active_turn_session_ids.contains(session_id)
-        });
-        let disabled = (self.creating_new_session && self.is_creating_session)
+        let selected_turn_state = self
+            .selected_session_id
+            .map(|session_id| self.session_turn_state(session_id))
+            .unwrap_or_default();
+        let active_session_id = self
+            .selected_session_id
+            .filter(|_| !self.creating_new_session && selected_turn_state.has_active_turn());
+        let disabled = (self.creating_new_session && self.new_session_turn_state.has_active_turn())
             || self.selected_session_id.is_some_and(|session_id| {
                 self.loading_conversations.contains(&session_id)
-                    || self.steering_session_ids.contains(&session_id)
-                    || self.cancelling_turn_session_ids.contains(&session_id)
+                    || matches!(
+                        self.session_turn_state(session_id),
+                        SessionTurnState::Steering | SessionTurnState::Cancelling
+                    )
             });
         let send = div()
             .id("send-prompt")
@@ -2518,13 +2615,11 @@ impl DesktopShell {
             .on_click(cx.listener(|shell, _, window, cx| {
                 shell.submit_prompt(window, cx);
             }));
-        let action = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(send)
-            .when_some(active_session_id, |actions, session_id| {
-                let cancel_enabled = !self.cancelling_turn_session_ids.contains(&session_id);
+        let action = div().flex().items_center().gap_2().child(send).when_some(
+            active_session_id,
+            |actions, session_id| {
+                let cancel_enabled =
+                    self.session_turn_state(session_id) == SessionTurnState::Active;
                 actions.child(
                     div()
                         .id("stop-turn")
@@ -2549,7 +2644,8 @@ impl DesktopShell {
                             shell.cancel_turn(cx);
                         })),
                 )
-            });
+            },
+        );
         div()
             .w_full()
             .px_8()
@@ -3791,6 +3887,22 @@ mod tests {
     fn truncation_is_unicode_safe() {
         assert_eq!(truncate("hello", 5), "hello");
         assert_eq!(truncate("héllo world", 5), "héllo…");
+    }
+
+    #[test]
+    fn stale_completion_does_not_overwrite_a_newer_turn_state() {
+        let mut state = SessionTurnState::Idle;
+
+        assert!(!state.transition(SessionTurnState::Steering, SessionTurnState::Active));
+        assert_eq!(state, SessionTurnState::Idle);
+    }
+
+    #[test]
+    fn matching_turn_transition_updates_the_state() {
+        let mut state = SessionTurnState::Steering;
+
+        assert!(state.transition(SessionTurnState::Steering, SessionTurnState::Active));
+        assert_eq!(state, SessionTurnState::Active);
     }
 
     #[test]

@@ -644,8 +644,8 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let store = LocalAttachmentStore::new(temp.path());
 
-        let command = SessionCommand::steer("steer", "focus on the tests", Vec::new())
-            .into_pi(&store)?;
+        let command =
+            SessionCommand::steer("steer", "focus on the tests", Vec::new()).into_pi(&store)?;
 
         assert!(matches!(
             command,
