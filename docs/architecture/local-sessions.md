@@ -75,6 +75,10 @@ It does not currently provide:
   event whose sequence was already replayed.
 - A prompt-scoped stream MUST finish on Pi `agent_end` or a terminal Session
   failure. Durable following remains a separate, open-ended observation mode.
+- The desktop MUST use one durable follower per loaded Session rather than own
+  Pi events through individual prompt requests.
+- Desktop streaming and queue state MUST be derived from replayed and live Pi
+  events. Local request state is limited to command dispatch work in flight.
 - Known Pi records SHOULD decode into distinct Rust union variants. Unknown Pi
   event kinds MUST retain their raw JSON object so protocol additions do not
   destroy fields; inline Attachment bytes remain subject to externalization.
@@ -118,8 +122,8 @@ It does not currently provide:
 
 - The desktop groups active Sessions beneath their named Workspaces, lists
   archived Sessions, creates multi-Directory Workspaces and Sessions, opens
-  durable transcript history, prompts and cancels turns, and renders live Pi
-  text/tool activity.
+  durable transcript history, prompts and steers active turns, cancels turns,
+  and renders live Pi text/tool activity.
 - `af workspace` exposes create, list, and add-Directory operations.
 - `af session` exposes create, list, state, archive, unarchive, prompt, and
   cursored event operations against the same client contract.
