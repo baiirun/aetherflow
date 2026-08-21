@@ -209,19 +209,53 @@ impl ToolCallView {
 pub fn conversation_from_events(events: &[SessionEvent]) -> Vec<ConversationItem> {
     let mut items = Vec::new();
     for event in events {
-        let SessionEventPayload::Pi { message } = &event.payload else {
-            continue;
-        };
-        match message.event() {
-            PiEvent::MessageEnd(completed) => {
-                if let Some(message) = completed_conversation_message(&completed.message) {
-                    items.push(ConversationItem::Message(message));
-                }
-            }
-            event => apply_tool_event(&mut items, event),
-        }
+        apply_conversation_event(&mut items, event);
     }
     items
+}
+
+pub fn apply_conversation_event(items: &mut Vec<ConversationItem>, event: &SessionEvent) {
+    let SessionEventPayload::Pi { message } = &event.payload else {
+        return;
+    };
+    match message.event() {
+        PiEvent::MessageUpdate(update) => {
+            if let aetherflow_pi::AssistantMessageEvent::TextDelta { delta, .. } =
+                &update.assistant_message_event
+            {
+                append_assistant_delta(items, delta);
+            }
+        }
+        PiEvent::MessageEnd(completed) => {
+            let Some(completed) = completed_conversation_message(&completed.message) else {
+                return;
+            };
+            if let [
+                ..,
+                ConversationItem::Message(current),
+                ConversationItem::Message(placeholder),
+            ] = items.as_slice()
+                && completed.role == ConversationRole::User
+                && *current == completed
+                && placeholder.role == ConversationRole::Assistant
+                && placeholder.text.is_empty()
+                && placeholder.images.is_empty()
+            {
+                return;
+            }
+            match items.last_mut() {
+                Some(ConversationItem::Message(current))
+                    if current.role == ConversationRole::Assistant
+                        && completed.role == ConversationRole::Assistant =>
+                {
+                    *current = completed;
+                }
+                Some(ConversationItem::Message(current)) if *current == completed => {}
+                _ => items.push(ConversationItem::Message(completed)),
+            }
+        }
+        event => apply_tool_event(items, event),
+    }
 }
 
 pub fn append_assistant_delta(items: &mut Vec<ConversationItem>, delta: &str) {
@@ -433,6 +467,38 @@ mod tests {
                 ),
             },
         }
+    }
+
+    #[test]
+    fn completed_user_event_does_not_duplicate_an_optimistic_prompt() {
+        let user = ConversationMessage {
+            role: ConversationRole::User,
+            text: "Inspect it".to_owned(),
+            images: Vec::new(),
+        };
+        let mut items = vec![
+            ConversationItem::Message(user.clone()),
+            ConversationItem::Message(ConversationMessage {
+                role: ConversationRole::Assistant,
+                text: String::new(),
+                images: Vec::new(),
+            }),
+        ];
+        let event = session_event(
+            1,
+            json!({
+                "type": "message_end",
+                "message": {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "Inspect it" }]
+                }
+            }),
+        );
+
+        apply_conversation_event(&mut items, &event);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], ConversationItem::Message(user));
     }
 
     #[test]

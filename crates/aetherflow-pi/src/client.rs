@@ -356,6 +356,32 @@ impl AetherflowClient {
         message: impl Into<String>,
         attachments: Vec<AttachmentRef>,
     ) -> Result<SessionEventStream> {
+        let connection = self.session_handle(session_id).connect();
+        let (events, event_rx) = mpsc::unbounded_channel();
+        let subscription = connection
+            .on::<SessionEvent>(move |event| {
+                let _ = events.send(event);
+            })
+            .await;
+
+        self.send_prompt_session_with_attachments(session_id, message, attachments)
+            .await?;
+
+        Ok(SessionEventStream {
+            session_id,
+            connection,
+            subscription,
+            events: event_rx,
+            finished: false,
+        })
+    }
+
+    pub async fn send_prompt_session_with_attachments(
+        &self,
+        session_id: SessionId,
+        message: impl Into<String>,
+        attachments: Vec<AttachmentRef>,
+    ) -> Result<()> {
         let message = message.into();
         let title =
             session_title(&message).or_else(|| (!attachments.is_empty()).then(|| "Image".into()));
@@ -368,28 +394,12 @@ impl AetherflowClient {
             .await
             .with_context(|| format!("record activity for session {session_id}"))?;
 
-        let connection = self.session_handle(session_id).connect();
-        let (events, event_rx) = mpsc::unbounded_channel();
-        let subscription = connection
-            .on::<SessionEvent>(move |event| {
-                let _ = events.send(event);
-            })
-            .await;
-
-        connection
+        self.session_handle(session_id)
             .send(SendSessionCommand {
                 command: SessionCommand::prompt("prompt", message, attachments),
             })
             .await
-            .with_context(|| format!("prompt session {session_id}"))?;
-
-        Ok(SessionEventStream {
-            session_id,
-            connection,
-            subscription,
-            events: event_rx,
-            finished: false,
-        })
+            .with_context(|| format!("prompt session {session_id}"))
     }
 
     pub async fn steer_session_with_attachments(
@@ -610,6 +620,14 @@ pub struct SessionEventSubscription {
 }
 
 impl SessionEventSubscription {
+    pub fn take_replay(&mut self) -> Vec<SessionEvent> {
+        let replay = self.replay.drain(..).collect::<Vec<_>>();
+        if let Some(event) = replay.last() {
+            self.last_sequence = event.sequence;
+        }
+        replay
+    }
+
     pub async fn next(&mut self) -> Result<Option<SessionEvent>> {
         if let Some(event) = self.replay.pop_front() {
             self.last_sequence = event.sequence;

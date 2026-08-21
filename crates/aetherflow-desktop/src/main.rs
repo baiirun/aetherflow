@@ -5,8 +5,8 @@ mod transcript;
 use aetherflow_pi::{
     AetherflowClient, AetherflowClientOptions, AssistantMessageEvent, CreateSessionOptions,
     DEFAULT_SESSION_DIRECTORY_KEY, DEFAULT_SESSION_EVENT_PAGE_SIZE, DEFAULT_WORKSPACE_CATALOG_KEY,
-    PiEvent, SESSION_DIRECTORY_ACTOR_NAME, SessionDescriptor, SessionEvent, SessionEventPayload,
-    WORKSPACE_CATALOG_ACTOR_NAME,
+    PiEvent, RpcResponse, SESSION_DIRECTORY_ACTOR_NAME, SessionDescriptor, SessionEvent,
+    SessionEventPayload, WORKSPACE_CATALOG_ACTOR_NAME,
 };
 use aetherflow_storage::{DirectoryId, SessionId, Workspace, WorkspaceId};
 use daemon::{DaemonTarget, ManagedDaemon};
@@ -35,7 +35,7 @@ use std::{
 use tokio::runtime::Runtime;
 use transcript::{
     ConversationImage, ConversationItem, ConversationMessage, ConversationRole, ToolCallView,
-    ToolGroup, ToolStatus, append_assistant_delta, apply_tool_event, conversation_from_events,
+    ToolGroup, ToolStatus, apply_conversation_event, conversation_from_events,
 };
 
 const SIDEBAR_WIDTH: f32 = 280.;
@@ -99,21 +99,28 @@ enum SessionLoadState {
 
 enum PromptUpdate {
     Created(SessionId),
-    TextDelta {
+    PromptDispatchFinished {
         session_id: SessionId,
-        delta: String,
+        error: Option<String>,
     },
-    ToolEvent {
-        session_id: SessionId,
-        event: Box<PiEvent>,
-    },
-    Finished(SessionId),
     SteeringFinished {
         session_id: SessionId,
         error: Option<String>,
     },
     Failed {
         session_id: Option<SessionId>,
+        error: String,
+    },
+}
+
+enum SessionFollowerUpdate {
+    Loaded {
+        session_id: SessionId,
+        events: Vec<SessionEvent>,
+    },
+    Event(SessionEvent),
+    Failed {
+        session_id: SessionId,
         error: String,
     },
 }
@@ -138,19 +145,15 @@ impl SubmissionKind {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum SessionTurnState {
+enum SessionRequestState {
     #[default]
     Idle,
-    Active,
+    Submitting,
     Steering,
     Cancelling,
 }
 
-impl SessionTurnState {
-    fn has_active_turn(self) -> bool {
-        self != Self::Idle
-    }
-
+impl SessionRequestState {
     fn transition(&mut self, from: Self, to: Self) -> bool {
         if *self != from {
             return false;
@@ -158,6 +161,13 @@ impl SessionTurnState {
         *self = to;
         true
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct SessionRuntimeState {
+    is_streaming: bool,
+    steering_queue: Vec<String>,
+    follow_up_queue: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,14 +280,16 @@ struct DesktopShell {
     is_selecting_workspace_directories: bool,
     pending_images: Vec<PendingImage>,
     next_pending_image_id: u64,
-    session_turn_states: HashMap<SessionId, SessionTurnState>,
+    session_runtime_states: HashMap<SessionId, SessionRuntimeState>,
+    session_request_states: HashMap<SessionId, SessionRequestState>,
+    followed_session_ids: HashSet<SessionId>,
     active_turn_started_at: HashMap<SessionId, Instant>,
     active_turn_tool_group_keys: HashMap<SessionId, String>,
     agent_blob_transitions: HashMap<SessionId, AgentBlobTransition>,
     creating_turn_started_at: Option<Instant>,
     completed_tool_group_durations: HashMap<String, Duration>,
     working_duration_tick_scheduled: bool,
-    new_session_turn_state: SessionTurnState,
+    new_session_request_state: SessionRequestState,
     is_creating_workspace: bool,
     pending_steering_messages: HashMap<SessionId, ConversationMessage>,
     load_state: SessionLoadState,
@@ -353,14 +365,16 @@ impl DesktopShell {
             is_selecting_workspace_directories: false,
             pending_images: Vec::new(),
             next_pending_image_id: 0,
-            session_turn_states: HashMap::new(),
+            session_runtime_states: HashMap::new(),
+            session_request_states: HashMap::new(),
+            followed_session_ids: HashSet::new(),
             active_turn_started_at: HashMap::new(),
             active_turn_tool_group_keys: HashMap::new(),
             agent_blob_transitions: HashMap::new(),
             creating_turn_started_at: None,
             completed_tool_group_durations: HashMap::new(),
             working_duration_tick_scheduled: false,
-            new_session_turn_state: SessionTurnState::Idle,
+            new_session_request_state: SessionRequestState::Idle,
             is_creating_workspace: false,
             pending_steering_messages: HashMap::new(),
             load_state: SessionLoadState::Loading,
@@ -554,38 +568,45 @@ impl DesktopShell {
         self.sessions.iter().find(|session| session.id == selected)
     }
 
-    fn session_turn_state(&self, session_id: SessionId) -> SessionTurnState {
-        self.session_turn_states
+    fn session_runtime_state(&self, session_id: SessionId) -> SessionRuntimeState {
+        self.session_runtime_states
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn session_request_state(&self, session_id: SessionId) -> SessionRequestState {
+        self.session_request_states
             .get(&session_id)
             .copied()
             .unwrap_or_default()
     }
 
-    fn set_session_turn_state(&mut self, session_id: SessionId, state: SessionTurnState) {
-        if state == SessionTurnState::Idle {
-            self.session_turn_states.remove(&session_id);
+    fn set_session_request_state(&mut self, session_id: SessionId, state: SessionRequestState) {
+        if state == SessionRequestState::Idle {
+            self.session_request_states.remove(&session_id);
         } else {
-            self.session_turn_states.insert(session_id, state);
+            self.session_request_states.insert(session_id, state);
         }
     }
 
-    fn transition_session_turn_state(
+    fn transition_session_request_state(
         &mut self,
         session_id: SessionId,
-        from: SessionTurnState,
-        to: SessionTurnState,
+        from: SessionRequestState,
+        to: SessionRequestState,
     ) -> bool {
-        let mut state = self.session_turn_state(session_id);
+        let mut state = self.session_request_state(session_id);
         if !state.transition(from, to) {
             return false;
         }
-        self.set_session_turn_state(session_id, state);
+        self.set_session_request_state(session_id, state);
         true
     }
 
     fn submission_kind(&self) -> Result<Option<SubmissionKind>, &'static str> {
         if self.creating_new_session {
-            if self.new_session_turn_state != SessionTurnState::Idle {
+            if self.new_session_request_state != SessionRequestState::Idle {
                 return Ok(None);
             }
             let Some((workspace_id, directory_id)) =
@@ -605,11 +626,16 @@ impl DesktopShell {
         if self.loading_conversations.contains(&session_id) {
             return Ok(None);
         }
-        Ok(match self.session_turn_state(session_id) {
-            SessionTurnState::Idle => Some(SubmissionKind::Prompt(session_id)),
-            SessionTurnState::Active => Some(SubmissionKind::Steer(session_id)),
-            SessionTurnState::Steering | SessionTurnState::Cancelling => None,
-        })
+        if self.session_request_state(session_id) != SessionRequestState::Idle {
+            return Ok(None);
+        }
+        Ok(Some(
+            if self.session_runtime_state(session_id).is_streaming {
+                SubmissionKind::Steer(session_id)
+            } else {
+                SubmissionKind::Prompt(session_id)
+            },
+        ))
     }
 
     fn select_session(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
@@ -629,7 +655,8 @@ impl DesktopShell {
     }
 
     fn start_new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.creating_new_session && self.new_session_turn_state.has_active_turn() {
+        if self.creating_new_session && self.new_session_request_state != SessionRequestState::Idle
+        {
             return;
         }
         if let Some((workspace_id, directory_id)) =
@@ -861,62 +888,247 @@ impl DesktopShell {
 
     fn load_conversation(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
         self.conversation_scrolls.entry(session_id).or_default();
-        if self.conversations.contains_key(&session_id)
-            || !self.loading_conversations.insert(session_id)
-        {
+        if !self.followed_session_ids.insert(session_id) {
             return;
         }
+        self.loading_conversations.insert(session_id);
         self.conversation_errors.remove(&session_id);
 
         let client = self.client.clone();
-        let request = self.runtime.spawn(async move {
-            let mut after_sequence = 0;
-            let mut events = Vec::new();
-            loop {
-                let page = client
-                    .session_events(session_id, after_sequence, CONVERSATION_EVENT_PAGE_SIZE)
-                    .await
-                    .map_err(|error| format!("Could not load session messages: {error:#}"))?;
-                let page_len = page.len();
-                if let Some(event) = page.last() {
-                    after_sequence = event.sequence;
+        let (updates, mut update_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.runtime.spawn(async move {
+            let mut subscription = match client
+                .follow_session_events(session_id, 0, CONVERSATION_EVENT_PAGE_SIZE)
+                .await
+            {
+                Ok(subscription) => subscription,
+                Err(error) => {
+                    let _ = updates.send(SessionFollowerUpdate::Failed {
+                        session_id,
+                        error: format!("Could not follow session messages: {error:#}"),
+                    });
+                    return;
                 }
-                events.extend(page);
-                if page_len < CONVERSATION_EVENT_PAGE_SIZE as usize {
-                    break;
+            };
+            let mut replay = subscription.take_replay();
+            if let Err(error) = client.hydrate_events_attachments(&mut replay).await {
+                let _ = updates.send(SessionFollowerUpdate::Failed {
+                    session_id,
+                    error: format!("Could not load session attachments: {error:#}"),
+                });
+                return;
+            }
+            if updates
+                .send(SessionFollowerUpdate::Loaded {
+                    session_id,
+                    events: replay,
+                })
+                .is_err()
+            {
+                return;
+            }
+            loop {
+                let mut event = match subscription.next().await {
+                    Ok(Some(event)) => event,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        let _ = updates.send(SessionFollowerUpdate::Failed {
+                            session_id,
+                            error: format!("Session event follower failed: {error:#}"),
+                        });
+                        return;
+                    }
+                };
+                if let Err(error) = client.hydrate_event_attachments(&mut event).await {
+                    let _ = updates.send(SessionFollowerUpdate::Failed {
+                        session_id,
+                        error: format!("Could not load session attachment: {error:#}"),
+                    });
+                    return;
+                }
+                if updates.send(SessionFollowerUpdate::Event(event)).is_err() {
+                    return;
                 }
             }
-            client
-                .hydrate_events_attachments(&mut events)
-                .await
-                .map_err(|error| format!("Could not load session attachments: {error:#}"))?;
-            Ok::<_, String>(conversation_from_events(&events))
         });
 
         cx.spawn(async move |shell, cx| {
-            let result = request
-                .await
-                .map_err(|error| format!("session message task failed: {error}"))
-                .and_then(|result| result);
-            let _ = shell.update(cx, |shell, cx| {
-                shell.loading_conversations.remove(&session_id);
-                match result {
-                    Ok(messages) => {
-                        shell.conversations.insert(session_id, messages);
-                        shell
-                            .conversation_scrolls
-                            .get(&session_id)
-                            .expect("loaded conversations have a scroll handle")
-                            .scroll_to_bottom();
-                    }
-                    Err(error) => {
-                        shell.conversation_errors.insert(session_id, error);
-                    }
-                }
-                cx.notify();
-            });
+            while let Some(update) = update_rx.recv().await {
+                let _ = shell.update(cx, |shell, cx| {
+                    shell.apply_session_follower_update(update, cx);
+                    cx.notify();
+                });
+            }
         })
         .detach();
+    }
+
+    fn apply_session_follower_update(
+        &mut self,
+        update: SessionFollowerUpdate,
+        cx: &mut Context<Self>,
+    ) {
+        match update {
+            SessionFollowerUpdate::Loaded { session_id, events } => {
+                self.loading_conversations.remove(&session_id);
+                let runtime_state = runtime_state_from_events(&events);
+                if runtime_state.is_streaming {
+                    self.transition_session_request_state(
+                        session_id,
+                        SessionRequestState::Submitting,
+                        SessionRequestState::Idle,
+                    );
+                    self.active_turn_started_at
+                        .entry(session_id)
+                        .or_insert_with(Instant::now);
+                    self.set_agent_blob_state(session_id, AgentBlobState::Thinking);
+                    self.schedule_working_duration_tick(cx);
+                }
+                self.session_runtime_states
+                    .insert(session_id, runtime_state);
+                self.conversations
+                    .insert(session_id, conversation_from_events(&events));
+                self.conversation_scrolls
+                    .get(&session_id)
+                    .expect("loaded conversations have a scroll handle")
+                    .scroll_to_bottom();
+            }
+            SessionFollowerUpdate::Event(event) => {
+                let session_id = event.session_id;
+                let follow = self.conversation_is_at_bottom(session_id);
+                apply_runtime_event(
+                    self.session_runtime_states.entry(session_id).or_default(),
+                    &event,
+                );
+                self.apply_session_presentation_event(&event, cx);
+                apply_conversation_event(self.conversations.entry(session_id).or_default(), &event);
+                if let SessionEventPayload::Pi { message } = &event.payload
+                    && is_tool_event(message.event())
+                    && let Some(group_key) =
+                        self.conversations[&session_id]
+                            .iter()
+                            .rev()
+                            .find_map(|item| match item {
+                                ConversationItem::ToolGroup(group) => Some(group.key().to_owned()),
+                                ConversationItem::Message(_) => None,
+                            })
+                {
+                    self.active_turn_tool_group_keys
+                        .insert(session_id, group_key);
+                }
+                self.follow_conversation_if(session_id, follow);
+            }
+            SessionFollowerUpdate::Failed { session_id, error } => {
+                self.loading_conversations.remove(&session_id);
+                self.followed_session_ids.remove(&session_id);
+                self.set_session_request_state(session_id, SessionRequestState::Idle);
+                self.conversation_errors.insert(session_id, error);
+            }
+        }
+    }
+
+    fn apply_session_presentation_event(&mut self, event: &SessionEvent, cx: &mut Context<Self>) {
+        let session_id = event.session_id;
+        match &event.payload {
+            SessionEventPayload::Stopped { error } => {
+                self.set_session_request_state(session_id, SessionRequestState::Idle);
+                self.previous_stream_texts.remove(&session_id);
+                self.set_agent_blob_state(session_id, AgentBlobState::Error);
+                self.finish_turn_timing(session_id);
+                if let Some(error) = error {
+                    self.action_error = Some(error.clone());
+                }
+            }
+            SessionEventPayload::Pi { message } => match message.event() {
+                PiEvent::AgentStart => {
+                    self.transition_session_request_state(
+                        session_id,
+                        SessionRequestState::Submitting,
+                        SessionRequestState::Idle,
+                    );
+                    self.active_turn_started_at
+                        .entry(session_id)
+                        .or_insert_with(Instant::now);
+                    self.set_agent_blob_state(session_id, AgentBlobState::Thinking);
+                    self.schedule_working_duration_tick(cx);
+                }
+                PiEvent::AgentEnd(_) => {
+                    self.set_session_request_state(session_id, SessionRequestState::Idle);
+                    self.previous_stream_texts.remove(&session_id);
+                    self.set_agent_blob_state(session_id, AgentBlobState::Idle);
+                    self.finish_turn_timing(session_id);
+                    self.load_sessions(cx);
+                }
+                PiEvent::Response(RpcResponse::Steer { .. }) => {
+                    self.transition_session_request_state(
+                        session_id,
+                        SessionRequestState::Steering,
+                        SessionRequestState::Idle,
+                    );
+                    if let Some(message) = self.pending_steering_messages.remove(&session_id) {
+                        let follow = self.conversation_is_at_bottom(session_id);
+                        self.conversations
+                            .entry(session_id)
+                            .or_default()
+                            .push(ConversationItem::Message(message));
+                        self.follow_conversation_if(session_id, follow);
+                        self.load_sessions(cx);
+                    }
+                }
+                PiEvent::Response(RpcResponse::Error { command, error, .. }) => {
+                    match command.as_str() {
+                        "prompt" => {
+                            self.transition_session_request_state(
+                                session_id,
+                                SessionRequestState::Submitting,
+                                SessionRequestState::Idle,
+                            );
+                            self.set_agent_blob_state(session_id, AgentBlobState::Error);
+                            self.finish_turn_timing(session_id);
+                        }
+                        "steer" => {
+                            self.transition_session_request_state(
+                                session_id,
+                                SessionRequestState::Steering,
+                                SessionRequestState::Idle,
+                            );
+                            self.pending_steering_messages.remove(&session_id);
+                        }
+                        "abort" => {
+                            self.transition_session_request_state(
+                                session_id,
+                                SessionRequestState::Cancelling,
+                                SessionRequestState::Idle,
+                            );
+                        }
+                        _ => {}
+                    }
+                    self.action_error = Some(error.clone());
+                }
+                PiEvent::MessageUpdate(update)
+                    if matches!(
+                        update.assistant_message_event,
+                        AssistantMessageEvent::TextDelta { .. }
+                    ) =>
+                {
+                    if let Some(previous) = trailing_assistant_text(
+                        self.conversations
+                            .get(&session_id)
+                            .map_or(&[], Vec::as_slice),
+                    ) {
+                        self.previous_stream_texts
+                            .insert(session_id, previous.to_owned());
+                    } else {
+                        self.previous_stream_texts.remove(&session_id);
+                    }
+                    self.set_agent_blob_state(session_id, AgentBlobState::Responding);
+                }
+                event if is_tool_event(event) => {
+                    self.set_agent_blob_state(session_id, AgentBlobState::Working);
+                }
+                _ => {}
+            },
+        }
     }
 
     fn conversation_is_at_bottom(&self, session_id: SessionId) -> bool {
@@ -1093,16 +1305,16 @@ impl DesktopShell {
         self.pending_images.clear();
         match submission {
             SubmissionKind::Steer(session_id) => {
-                self.set_session_turn_state(session_id, SessionTurnState::Steering);
+                self.set_session_request_state(session_id, SessionRequestState::Steering);
             }
             SubmissionKind::Prompt(session_id) => {
-                self.set_session_turn_state(session_id, SessionTurnState::Active);
+                self.set_session_request_state(session_id, SessionRequestState::Submitting);
                 self.active_turn_started_at
                     .insert(session_id, Instant::now());
                 self.set_agent_blob_state(session_id, AgentBlobState::Thinking);
             }
             SubmissionKind::NewSession { .. } => {
-                self.new_session_turn_state = SessionTurnState::Active;
+                self.new_session_request_state = SessionRequestState::Submitting;
                 self.creating_turn_started_at = Some(Instant::now());
             }
         }
@@ -1164,66 +1376,19 @@ impl DesktopShell {
                 SubmissionKind::Steer(_) => unreachable!("steering submissions return above"),
             };
 
-            let mut stream = match client
-                .prompt_session_with_attachments(session_id, prompt, attachments)
+            let error = client
+                .send_prompt_session_with_attachments(session_id, prompt, attachments)
                 .await
-            {
-                Ok(stream) => stream,
-                Err(error) => {
-                    let _ = updates.send(PromptUpdate::Failed {
-                        session_id: Some(session_id),
-                        error: format!("Could not prompt session: {error:#}"),
-                    });
-                    return;
-                }
-            };
-
-            loop {
-                match stream.next().await {
-                    Ok(Some(event)) => {
-                        if let Some(error) = stopped_error(&event) {
-                            let _ = updates.send(PromptUpdate::Failed {
-                                session_id: Some(session_id),
-                                error,
-                            });
-                            return;
-                        }
-                        if let Some(delta) = assistant_text_delta(&event) {
-                            let _ = updates.send(PromptUpdate::TextDelta {
-                                session_id,
-                                delta: delta.to_owned(),
-                            });
-                        }
-                        if is_tool_event(&event) {
-                            let SessionEventPayload::Pi { message } = event.payload else {
-                                unreachable!("tool events are Pi events")
-                            };
-                            let _ = updates.send(PromptUpdate::ToolEvent {
-                                session_id,
-                                event: Box::new(message.event().clone()),
-                            });
-                        }
-                    }
-                    Ok(None) => {
-                        let _ = updates.send(PromptUpdate::Finished(session_id));
-                        return;
-                    }
-                    Err(error) => {
-                        let _ = updates.send(PromptUpdate::Failed {
-                            session_id: Some(session_id),
-                            error: format!("Session stream failed: {error:#}"),
-                        });
-                        return;
-                    }
-                }
-            }
+                .err()
+                .map(|error| format!("Could not prompt session: {error:#}"));
+            let _ = updates.send(PromptUpdate::PromptDispatchFinished { session_id, error });
         });
 
         cx.spawn(async move |shell, cx| {
             while let Some(update) = update_rx.recv().await {
                 let finished = matches!(
                     update,
-                    PromptUpdate::Finished(_)
+                    PromptUpdate::PromptDispatchFinished { .. }
                         | PromptUpdate::SteeringFinished { .. }
                         | PromptUpdate::Failed { .. }
                 );
@@ -1245,8 +1410,8 @@ impl DesktopShell {
             PromptUpdate::Created(session_id) => {
                 self.selected_session_id = Some(session_id);
                 self.creating_new_session = false;
-                self.new_session_turn_state = SessionTurnState::Idle;
-                self.set_session_turn_state(session_id, SessionTurnState::Active);
+                self.new_session_request_state = SessionRequestState::Idle;
+                self.set_session_request_state(session_id, SessionRequestState::Submitting);
                 self.active_turn_started_at.insert(
                     session_id,
                     self.creating_turn_started_at
@@ -1260,69 +1425,36 @@ impl DesktopShell {
                     .entry(session_id)
                     .or_default()
                     .scroll_to_bottom();
+                self.load_conversation(session_id, cx);
                 self.load_sessions(cx);
             }
-            PromptUpdate::TextDelta { session_id, delta } => {
-                self.set_agent_blob_state(session_id, AgentBlobState::Responding);
-                let follow = self.conversation_is_at_bottom(session_id);
-                let conversation = self.conversations.entry(session_id).or_default();
-                if let Some(previous) = trailing_assistant_text(conversation) {
-                    self.previous_stream_texts
-                        .insert(session_id, previous.to_owned());
-                } else {
-                    self.previous_stream_texts.remove(&session_id);
+            PromptUpdate::PromptDispatchFinished { session_id, error } => {
+                if let Some(error) = error {
+                    self.set_session_request_state(session_id, SessionRequestState::Idle);
+                    self.set_agent_blob_state(session_id, AgentBlobState::Error);
+                    self.finish_turn_timing(session_id);
+                    self.action_error = Some(error);
                 }
-                append_assistant_delta(conversation, &delta);
-                self.follow_conversation_if(session_id, follow);
-            }
-            PromptUpdate::ToolEvent { session_id, event } => {
-                self.set_agent_blob_state(session_id, AgentBlobState::Working);
-                let follow = self.conversation_is_at_bottom(session_id);
-                let conversation = self.conversations.entry(session_id).or_default();
-                apply_tool_event(conversation, &event);
-                if let Some(group_key) = conversation.iter().rev().find_map(|item| match item {
-                    ConversationItem::ToolGroup(group) => Some(group.key().to_owned()),
-                    ConversationItem::Message(_) => None,
-                }) {
-                    self.active_turn_tool_group_keys
-                        .insert(session_id, group_key);
-                }
-                self.follow_conversation_if(session_id, follow);
-            }
-            PromptUpdate::Finished(session_id) => {
-                self.previous_stream_texts.remove(&session_id);
-                self.set_session_turn_state(session_id, SessionTurnState::Idle);
-                self.set_agent_blob_state(session_id, AgentBlobState::Idle);
-                self.finish_turn_timing(session_id);
-                self.load_sessions(cx);
             }
             PromptUpdate::SteeringFinished { session_id, error } => {
-                self.transition_session_turn_state(
-                    session_id,
-                    SessionTurnState::Steering,
-                    SessionTurnState::Active,
-                );
-                let message = self.pending_steering_messages.remove(&session_id);
                 if let Some(error) = error {
+                    self.transition_session_request_state(
+                        session_id,
+                        SessionRequestState::Steering,
+                        SessionRequestState::Idle,
+                    );
+                    self.pending_steering_messages.remove(&session_id);
                     self.action_error = Some(error);
-                } else if let Some(message) = message {
-                    let follow = self.conversation_is_at_bottom(session_id);
-                    self.conversations
-                        .entry(session_id)
-                        .or_default()
-                        .push(ConversationItem::Message(message));
-                    self.follow_conversation_if(session_id, follow);
-                    self.load_sessions(cx);
                 }
             }
             PromptUpdate::Failed { session_id, error } => {
                 if let Some(session_id) = session_id {
                     self.previous_stream_texts.remove(&session_id);
-                    self.set_session_turn_state(session_id, SessionTurnState::Idle);
+                    self.set_session_request_state(session_id, SessionRequestState::Idle);
                     self.set_agent_blob_state(session_id, AgentBlobState::Error);
                     self.finish_turn_timing(session_id);
                 } else {
-                    self.new_session_turn_state = SessionTurnState::Idle;
+                    self.new_session_request_state = SessionRequestState::Idle;
                     self.creating_turn_started_at = None;
                 }
                 self.action_error = Some(error);
@@ -1369,8 +1501,11 @@ impl DesktopShell {
             shell
                 .update(cx, |shell, cx| {
                     shell.working_duration_tick_scheduled = false;
-                    if shell.new_session_turn_state.has_active_turn()
-                        || !shell.session_turn_states.is_empty()
+                    if shell.new_session_request_state != SessionRequestState::Idle
+                        || shell
+                            .session_runtime_states
+                            .values()
+                            .any(|state| state.is_streaming)
                     {
                         cx.notify();
                         shell.schedule_working_duration_tick(cx);
@@ -1385,11 +1520,13 @@ impl DesktopShell {
         let Some(session_id) = self.selected_session_id else {
             return;
         };
-        if !self.transition_session_turn_state(
-            session_id,
-            SessionTurnState::Active,
-            SessionTurnState::Cancelling,
-        ) {
+        if !self.session_runtime_state(session_id).is_streaming
+            || !self.transition_session_request_state(
+                session_id,
+                SessionRequestState::Idle,
+                SessionRequestState::Cancelling,
+            )
+        {
             return;
         }
 
@@ -1409,10 +1546,10 @@ impl DesktopShell {
                 .and_then(|result| result);
             let _ = shell.update(cx, |shell, cx| {
                 if let Err(error) = result {
-                    shell.transition_session_turn_state(
+                    shell.transition_session_request_state(
                         session_id,
-                        SessionTurnState::Cancelling,
-                        SessionTurnState::Active,
+                        SessionRequestState::Cancelling,
+                        SessionRequestState::Idle,
                     );
                     shell.action_error = Some(error);
                 }
@@ -2141,7 +2278,8 @@ impl DesktopShell {
         }
 
         let messages = messages.expect("non-empty conversations were checked above");
-        let session_has_active_turn = self.session_turn_state(session_id).has_active_turn();
+        let session_has_active_turn = self.session_runtime_state(session_id).is_streaming
+            || self.session_request_state(session_id) == SessionRequestState::Submitting;
         let active_turn_elapsed = self
             .active_turn_started_at
             .get(&session_id)
@@ -2578,20 +2716,22 @@ impl DesktopShell {
     }
 
     fn render_composer(&self, cx: &mut Context<Self>) -> Div {
-        let selected_turn_state = self
+        let selected_runtime_state = self
             .selected_session_id
-            .map(|session_id| self.session_turn_state(session_id))
+            .map(|session_id| self.session_runtime_state(session_id))
+            .unwrap_or_default();
+        let selected_request_state = self
+            .selected_session_id
+            .map(|session_id| self.session_request_state(session_id))
             .unwrap_or_default();
         let active_session_id = self
             .selected_session_id
-            .filter(|_| !self.creating_new_session && selected_turn_state.has_active_turn());
-        let disabled = (self.creating_new_session && self.new_session_turn_state.has_active_turn())
+            .filter(|_| !self.creating_new_session && selected_runtime_state.is_streaming);
+        let disabled = (self.creating_new_session
+            && self.new_session_request_state != SessionRequestState::Idle)
             || self.selected_session_id.is_some_and(|session_id| {
                 self.loading_conversations.contains(&session_id)
-                    || matches!(
-                        self.session_turn_state(session_id),
-                        SessionTurnState::Steering | SessionTurnState::Cancelling
-                    )
+                    || self.session_request_state(session_id) != SessionRequestState::Idle
             });
         let send = div()
             .id("send-prompt")
@@ -2617,9 +2757,8 @@ impl DesktopShell {
             }));
         let action = div().flex().items_center().gap_2().child(send).when_some(
             active_session_id,
-            |actions, session_id| {
-                let cancel_enabled =
-                    self.session_turn_state(session_id) == SessionTurnState::Active;
+            |actions, _session_id| {
+                let cancel_enabled = selected_request_state == SessionRequestState::Idle;
                 actions.child(
                     div()
                         .id("stop-turn")
@@ -2938,17 +3077,27 @@ fn archive_target_session_id(
         .map(|session| session.id)
 }
 
-fn assistant_text_delta(event: &SessionEvent) -> Option<&str> {
-    let SessionEventPayload::Pi { message } = &event.payload else {
-        return None;
-    };
-    let PiEvent::MessageUpdate(update) = message.event() else {
-        return None;
-    };
-    let AssistantMessageEvent::TextDelta { delta, .. } = &update.assistant_message_event else {
-        return None;
-    };
-    Some(delta)
+fn runtime_state_from_events(events: &[SessionEvent]) -> SessionRuntimeState {
+    let mut state = SessionRuntimeState::default();
+    for event in events {
+        apply_runtime_event(&mut state, event);
+    }
+    state
+}
+
+fn apply_runtime_event(state: &mut SessionRuntimeState, event: &SessionEvent) {
+    match &event.payload {
+        SessionEventPayload::Stopped { .. } => state.is_streaming = false,
+        SessionEventPayload::Pi { message } => match message.event() {
+            PiEvent::AgentStart => state.is_streaming = true,
+            PiEvent::AgentEnd(_) => state.is_streaming = false,
+            PiEvent::QueueUpdate(update) => {
+                state.steering_queue.clone_from(&update.steering);
+                state.follow_up_queue.clone_from(&update.follow_up);
+            }
+            _ => {}
+        },
+    }
 }
 
 fn turn_messages(user: ConversationMessage) -> [ConversationItem; 2] {
@@ -2979,26 +3128,12 @@ fn should_render_conversation_item(
     !is_empty_assistant || (session_has_active_turn && index.checked_add(1) == Some(item_count))
 }
 
-fn is_tool_event(event: &SessionEvent) -> bool {
-    let SessionEventPayload::Pi { message } = &event.payload else {
-        return false;
-    };
+fn is_tool_event(event: &PiEvent) -> bool {
     matches!(
-        message.event(),
+        event,
         PiEvent::ToolExecutionStart(_)
             | PiEvent::ToolExecutionUpdate(_)
             | PiEvent::ToolExecutionEnd(_)
-    )
-}
-
-fn stopped_error(event: &SessionEvent) -> Option<String> {
-    let SessionEventPayload::Stopped { error } = &event.payload else {
-        return None;
-    };
-    Some(
-        error
-            .clone()
-            .unwrap_or_else(|| "The session stopped before completing the response.".to_owned()),
     )
 }
 
@@ -3890,19 +4025,45 @@ mod tests {
     }
 
     #[test]
-    fn stale_completion_does_not_overwrite_a_newer_turn_state() {
-        let mut state = SessionTurnState::Idle;
+    fn stale_completion_does_not_overwrite_a_newer_request_state() {
+        let mut state = SessionRequestState::Idle;
 
-        assert!(!state.transition(SessionTurnState::Steering, SessionTurnState::Active));
-        assert_eq!(state, SessionTurnState::Idle);
+        assert!(!state.transition(SessionRequestState::Steering, SessionRequestState::Idle));
+        assert_eq!(state, SessionRequestState::Idle);
     }
 
     #[test]
-    fn matching_turn_transition_updates_the_state() {
-        let mut state = SessionTurnState::Steering;
+    fn matching_request_transition_updates_the_state() {
+        let mut state = SessionRequestState::Steering;
 
-        assert!(state.transition(SessionTurnState::Steering, SessionTurnState::Active));
-        assert_eq!(state, SessionTurnState::Active);
+        assert!(state.transition(SessionRequestState::Steering, SessionRequestState::Idle));
+        assert_eq!(state, SessionRequestState::Idle);
+    }
+
+    #[test]
+    fn runtime_state_is_derived_from_pi_events() {
+        let events = [
+            session_event(json!({ "type": "agent_start" })),
+            session_event(json!({
+                "type": "queue_update",
+                "steering": ["focus the tests"],
+                "followUp": ["then update docs"]
+            })),
+            session_event(json!({
+                "type": "agent_end",
+                "messages": [],
+                "willRetry": false
+            })),
+        ];
+
+        assert_eq!(
+            runtime_state_from_events(&events),
+            SessionRuntimeState {
+                is_streaming: false,
+                steering_queue: vec!["focus the tests".to_owned()],
+                follow_up_queue: vec!["then update docs".to_owned()],
+            }
+        );
     }
 
     #[test]
@@ -4172,7 +4333,7 @@ mod tests {
             images: Vec::new(),
         })];
 
-        append_assistant_delta(&mut messages, ", world");
+        transcript::append_assistant_delta(&mut messages, ", world");
 
         let ConversationItem::Message(message) = &messages[0] else {
             panic!("message expected")
@@ -4184,7 +4345,7 @@ mod tests {
     fn assistant_delta_creates_a_response_when_needed() {
         let mut messages = Vec::new();
 
-        append_assistant_delta(&mut messages, "Hello");
+        transcript::append_assistant_delta(&mut messages, "Hello");
 
         assert_eq!(
             messages,
@@ -4211,7 +4372,7 @@ mod tests {
             }),
         ];
 
-        append_assistant_delta(&mut messages, "Second response.");
+        transcript::append_assistant_delta(&mut messages, "Second response.");
 
         assert_eq!(messages.len(), 3);
         let ConversationItem::Message(first) = &messages[0] else {
