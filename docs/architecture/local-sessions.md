@@ -118,8 +118,8 @@ It does not currently provide:
 
 - The desktop groups active Sessions beneath their named Workspaces, lists
   archived Sessions, creates multi-Directory Workspaces and Sessions, opens
-  durable transcript history, prompts and cancels turns, and renders live Pi
-  text/tool activity.
+  durable transcript history, prompts and steers active turns, cancels turns,
+  and renders live Pi text/tool activity.
 - `af workspace` exposes create, list, and add-Directory operations.
 - `af session` exposes create, list, state, archive, unarchive, prompt, and
   cursored event operations against the same client contract.

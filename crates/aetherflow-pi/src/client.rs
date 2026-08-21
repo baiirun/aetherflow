@@ -392,6 +392,31 @@ impl AetherflowClient {
         })
     }
 
+    pub async fn steer_session_with_attachments(
+        &self,
+        session_id: SessionId,
+        message: impl Into<String>,
+        attachments: Vec<AttachmentRef>,
+    ) -> Result<()> {
+        let message = message.into();
+        self.session_directory()
+            .send(RecordSessionActivity {
+                session_id,
+                title: session_title(&message)
+                    .or_else(|| (!attachments.is_empty()).then(|| "Image".into())),
+                updated_at_ms: current_time_ms()?,
+            })
+            .await
+            .with_context(|| format!("record activity for session {session_id}"))?;
+
+        self.session_handle(session_id)
+            .send(SendSessionCommand {
+                command: SessionCommand::steer("steer", message, attachments),
+            })
+            .await
+            .with_context(|| format!("steer active turn for session {session_id}"))
+    }
+
     pub async fn upload_attachment(
         &self,
         media_type: &str,
