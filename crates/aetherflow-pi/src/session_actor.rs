@@ -149,6 +149,18 @@ impl SessionCommand {
         }
     }
 
+    pub fn steer(
+        id: impl Into<String>,
+        message: impl Into<String>,
+        attachments: Vec<AttachmentRef>,
+    ) -> Self {
+        Self::Steer {
+            id: Some(id.into()),
+            message: message.into(),
+            attachments,
+        }
+    }
+
     fn into_pi(self, store: &LocalAttachmentStore) -> Result<RpcCommand> {
         let load_images = |attachments: Vec<AttachmentRef>| -> Result<Option<Vec<ImageContent>>> {
             let images = attachments
@@ -624,6 +636,25 @@ mod tests {
 
         let pi_command = command.into_pi(&store)?;
         assert!(serde_json::to_vec(&pi_command)?.len() > 96 * 1024);
+        Ok(())
+    }
+
+    #[test]
+    fn steer_command_maps_to_pi_steering() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = LocalAttachmentStore::new(temp.path());
+
+        let command = SessionCommand::steer("steer", "focus on the tests", Vec::new())
+            .into_pi(&store)?;
+
+        assert!(matches!(
+            command,
+            RpcCommand::Steer {
+                id: Some(id),
+                message,
+                images: None,
+            } if id == "steer" && message == "focus on the tests"
+        ));
         Ok(())
     }
 

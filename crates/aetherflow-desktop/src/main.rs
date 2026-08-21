@@ -108,6 +108,10 @@ enum PromptUpdate {
         event: Box<PiEvent>,
     },
     Finished(SessionId),
+    SteeringFinished {
+        session_id: SessionId,
+        error: Option<String>,
+    },
     Failed {
         session_id: Option<SessionId>,
         error: String,
@@ -234,6 +238,8 @@ struct DesktopShell {
     is_creating_session: bool,
     is_creating_workspace: bool,
     cancelling_turn_session_ids: HashSet<SessionId>,
+    steering_session_ids: HashSet<SessionId>,
+    pending_steering_messages: HashMap<SessionId, ConversationMessage>,
     load_state: SessionLoadState,
     action_error: Option<String>,
     _subscriptions: Vec<Subscription>,
@@ -317,6 +323,8 @@ impl DesktopShell {
             is_creating_session: false,
             is_creating_workspace: false,
             cancelling_turn_session_ids: HashSet::new(),
+            steering_session_ids: HashSet::new(),
+            pending_steering_messages: HashMap::new(),
             load_state: SessionLoadState::Loading,
             action_error: preferences_error,
             _subscriptions: vec![input_subscription, workspace_name_subscription],
@@ -755,15 +763,6 @@ impl DesktopShell {
         cx.notify();
     }
 
-    fn composer_is_sending(&self) -> bool {
-        composer_is_sending(
-            self.creating_new_session,
-            self.is_creating_session,
-            self.selected_session_id,
-            &self.active_turn_session_ids,
-        )
-    }
-
     fn load_conversation(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
         self.conversation_scrolls.entry(session_id).or_default();
         if self.conversations.contains_key(&session_id)
@@ -945,10 +944,15 @@ impl DesktopShell {
     }
 
     fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.composer_is_sending()
-            || self
-                .selected_session_id
-                .is_some_and(|session_id| self.loading_conversations.contains(&session_id))
+        let steering_session_id = self.selected_session_id.filter(|session_id| {
+            !self.creating_new_session && self.active_turn_session_ids.contains(session_id)
+        });
+        if (self.creating_new_session && self.is_creating_session)
+            || self.selected_session_id.is_some_and(|session_id| {
+                self.loading_conversations.contains(&session_id)
+                    || self.steering_session_ids.contains(&session_id)
+                    || self.cancelling_turn_session_ids.contains(&session_id)
+            })
         {
             return;
         }
@@ -984,27 +988,23 @@ impl DesktopShell {
         } else {
             self.selected_session_id
         };
-        let messages = [
-            ConversationItem::Message(ConversationMessage {
-                role: ConversationRole::User,
-                text: prompt.clone(),
-                images: conversation_images,
-            }),
-            ConversationItem::Message(ConversationMessage {
-                role: ConversationRole::Assistant,
-                text: String::new(),
-                images: Vec::new(),
-            }),
-        ];
-        if let Some(session_id) = session_id {
+        let user_message = ConversationMessage {
+            role: ConversationRole::User,
+            text: prompt.clone(),
+            images: conversation_images,
+        };
+        if let Some(session_id) = steering_session_id {
+            self.pending_steering_messages
+                .insert(session_id, user_message);
+        } else if let Some(session_id) = session_id {
             let follow = self.conversation_is_at_bottom(session_id);
             self.conversations
                 .entry(session_id)
                 .or_default()
-                .extend(messages);
+                .extend(turn_messages(user_message));
             self.follow_conversation_if(session_id, follow);
         } else if create_new {
-            self.new_session_messages.extend(messages);
+            self.new_session_messages.extend(turn_messages(user_message));
         } else {
             return;
         }
@@ -1012,7 +1012,9 @@ impl DesktopShell {
         self.composer
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.pending_images.clear();
-        if let Some(session_id) = session_id {
+        if let Some(session_id) = steering_session_id {
+            self.steering_session_ids.insert(session_id);
+        } else if let Some(session_id) = session_id {
             self.active_turn_session_ids.insert(session_id);
             self.active_turn_started_at
                 .insert(session_id, Instant::now());
@@ -1033,13 +1035,28 @@ impl DesktopShell {
                 match client.upload_attachment(&media_type, bytes).await {
                     Ok(attachment) => attachments.push(attachment),
                     Err(error) => {
-                        let _ = updates.send(PromptUpdate::Failed {
-                            session_id,
-                            error: format!("Could not upload attachment: {error:#}"),
-                        });
+                        let error = format!("Could not upload attachment: {error:#}");
+                        let update = if let Some(session_id) = steering_session_id {
+                            PromptUpdate::SteeringFinished {
+                                session_id,
+                                error: Some(error),
+                            }
+                        } else {
+                            PromptUpdate::Failed { session_id, error }
+                        };
+                        let _ = updates.send(update);
                         return;
                     }
                 }
+            }
+            if let Some(session_id) = steering_session_id {
+                let error = client
+                    .steer_session_with_attachments(session_id, prompt, attachments)
+                    .await
+                    .err()
+                    .map(|error| format!("Could not steer active turn: {error:#}"));
+                let _ = updates.send(PromptUpdate::SteeringFinished { session_id, error });
+                return;
             }
             let session_id = match session_id {
                 Some(session_id) => session_id,
@@ -1124,7 +1141,9 @@ impl DesktopShell {
             while let Some(update) = update_rx.recv().await {
                 let finished = matches!(
                     update,
-                    PromptUpdate::Finished(_) | PromptUpdate::Failed { .. }
+                    PromptUpdate::Finished(_)
+                        | PromptUpdate::SteeringFinished { .. }
+                        | PromptUpdate::Failed { .. }
                 );
                 let _ = shell.update(cx, |shell, cx| {
                     shell.apply_prompt_update(update, cx);
@@ -1195,6 +1214,21 @@ impl DesktopShell {
                 self.finish_turn_timing(session_id);
                 self.cancelling_turn_session_ids.remove(&session_id);
                 self.load_sessions(cx);
+            }
+            PromptUpdate::SteeringFinished { session_id, error } => {
+                self.steering_session_ids.remove(&session_id);
+                let message = self.pending_steering_messages.remove(&session_id);
+                if let Some(error) = error {
+                    self.action_error = Some(error);
+                } else if let Some(message) = message {
+                    let follow = self.conversation_is_at_bottom(session_id);
+                    self.conversations
+                        .entry(session_id)
+                        .or_default()
+                        .push(ConversationItem::Message(message));
+                    self.follow_conversation_if(session_id, follow);
+                    self.load_sessions(cx);
+                }
             }
             PromptUpdate::Failed { session_id, error } => {
                 if let Some(session_id) = session_id {
@@ -2453,62 +2487,69 @@ impl DesktopShell {
     }
 
     fn render_composer(&self, cx: &mut Context<Self>) -> Div {
-        let is_sending = self.composer_is_sending();
-        let disabled = is_sending
-            || self
-                .selected_session_id
-                .is_some_and(|session_id| self.loading_conversations.contains(&session_id));
-        let action = if is_sending {
-            let cancel_enabled = self.selected_session_id.is_some_and(|session_id| {
-                self.active_turn_session_ids.contains(&session_id)
-                    && !self.cancelling_turn_session_ids.contains(&session_id)
+        let active_session_id = self.selected_session_id.filter(|session_id| {
+            !self.creating_new_session && self.active_turn_session_ids.contains(session_id)
+        });
+        let disabled = (self.creating_new_session && self.is_creating_session)
+            || self.selected_session_id.is_some_and(|session_id| {
+                self.loading_conversations.contains(&session_id)
+                    || self.steering_session_ids.contains(&session_id)
+                    || self.cancelling_turn_session_ids.contains(&session_id)
             });
-            div()
-                .id("stop-turn")
-                .size(px(34.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_lg()
-                .text_xs()
-                .when(cancel_enabled, |style| {
-                    style
-                        .bg(rgb(0xe7eaf0))
-                        .text_color(rgb(0x17191d))
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgb(0xffffff)))
-                })
-                .when(!cancel_enabled, |style| {
-                    style.bg(rgb(0x303238)).text_color(rgb(0x777a80))
-                })
-                .child("■")
-                .on_click(cx.listener(|shell, _, _, cx| {
-                    shell.cancel_turn(cx);
-                }))
-        } else {
-            div()
-                .id("send-prompt")
-                .size(px(34.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_lg()
-                .text_base()
-                .when(disabled, |style| {
-                    style.bg(rgb(0x303238)).text_color(rgb(0x777a80))
-                })
-                .when(!disabled, |style| {
-                    style
-                        .bg(rgb(0xe7eaf0))
-                        .text_color(rgb(0x17191d))
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgb(0xffffff)))
-                })
-                .child("↑")
-                .on_click(cx.listener(|shell, _, window, cx| {
-                    shell.submit_prompt(window, cx);
-                }))
-        };
+        let send = div()
+            .id("send-prompt")
+            .size(px(34.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_lg()
+            .text_base()
+            .when(disabled, |style| {
+                style.bg(rgb(0x303238)).text_color(rgb(0x777a80))
+            })
+            .when(!disabled, |style| {
+                style
+                    .bg(rgb(0xe7eaf0))
+                    .text_color(rgb(0x17191d))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(0xffffff)))
+            })
+            .child("↑")
+            .on_click(cx.listener(|shell, _, window, cx| {
+                shell.submit_prompt(window, cx);
+            }));
+        let action = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(send)
+            .when_some(active_session_id, |actions, session_id| {
+                let cancel_enabled = !self.cancelling_turn_session_ids.contains(&session_id);
+                actions.child(
+                    div()
+                        .id("stop-turn")
+                        .size(px(34.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_lg()
+                        .text_xs()
+                        .when(cancel_enabled, |style| {
+                            style
+                                .bg(rgb(0xe7eaf0))
+                                .text_color(rgb(0x17191d))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0xffffff)))
+                        })
+                        .when(!cancel_enabled, |style| {
+                            style.bg(rgb(0x303238)).text_color(rgb(0x777a80))
+                        })
+                        .child("■")
+                        .on_click(cx.listener(|shell, _, _, cx| {
+                            shell.cancel_turn(cx);
+                        })),
+                )
+            });
         div()
             .w_full()
             .px_8()
@@ -2814,17 +2855,15 @@ fn assistant_text_delta(event: &SessionEvent) -> Option<&str> {
     Some(delta)
 }
 
-fn composer_is_sending(
-    creating_new_session: bool,
-    is_creating_session: bool,
-    selected_session_id: Option<SessionId>,
-    active_turn_session_ids: &HashSet<SessionId>,
-) -> bool {
-    if creating_new_session {
-        is_creating_session
-    } else {
-        selected_session_id.is_some_and(|session_id| active_turn_session_ids.contains(&session_id))
-    }
+fn turn_messages(user: ConversationMessage) -> [ConversationItem; 2] {
+    [
+        ConversationItem::Message(user),
+        ConversationItem::Message(ConversationMessage {
+            role: ConversationRole::Assistant,
+            text: String::new(),
+            images: Vec::new(),
+        }),
+    ]
 }
 
 fn should_render_conversation_item(
@@ -4162,28 +4201,6 @@ mod tests {
 
         assert_eq!(scroll_y, px(-160.));
         assert_eq!(content_offset_y, px(60.));
-    }
-
-    #[test]
-    fn another_sessions_active_turn_does_not_disable_a_new_session_composer() {
-        let active_session_id = SessionId::new();
-        let inactive_session_id = SessionId::new();
-        let active_turn_session_ids = HashSet::from([active_session_id]);
-        let disabled = composer_is_sending(true, false, None, &active_turn_session_ids);
-
-        assert!(!disabled);
-        assert!(!composer_is_sending(
-            false,
-            false,
-            Some(inactive_session_id),
-            &active_turn_session_ids,
-        ));
-        assert!(composer_is_sending(
-            false,
-            false,
-            Some(active_session_id),
-            &active_turn_session_ids,
-        ));
     }
 
     #[test]
