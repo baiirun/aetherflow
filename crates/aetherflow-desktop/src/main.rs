@@ -25,17 +25,22 @@ use preferences::DesktopPreferences;
 use std::{
     borrow::Cow,
     cmp::Reverse,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     io::Cursor,
     ops::Range,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::runtime::Runtime;
+use tokio::sync::oneshot;
 use transcript::{
     ConversationImage, ConversationItem, ConversationMessage, ConversationRole, ToolCallView,
-    ToolGroup, ToolStatus, apply_conversation_event, conversation_from_events,
+    ToolGroup, ToolStatus, apply_conversation_event, completed_user_message,
+    conversation_from_events,
 };
 
 const SIDEBAR_WIDTH: f32 = 280.;
@@ -116,13 +121,30 @@ enum PromptUpdate {
 enum SessionFollowerUpdate {
     Loaded {
         session_id: SessionId,
+        generation: u64,
         events: Vec<SessionEvent>,
     },
-    Event(SessionEvent),
+    Event {
+        generation: u64,
+        event: SessionEvent,
+    },
     Failed {
         session_id: SessionId,
+        generation: u64,
         error: String,
     },
+}
+
+struct SessionFollowerHandle {
+    generation: u64,
+    cancel: oneshot::Sender<()>,
+    cursor: Arc<AtomicU64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingUserMessage {
+    after_sequence: u64,
+    message: ConversationMessage,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +166,8 @@ impl SubmissionKind {
     }
 }
 
+/// Tracks only local command dispatch. Durable Pi events own transcript and
+/// agent-turn lifecycle state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum SessionRequestState {
     #[default]
@@ -163,11 +187,30 @@ impl SessionRequestState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SessionTurnPhase {
+    /// Replay has not yet observed a lifecycle event, so local dispatch state
+    /// cannot safely be interpreted as idle or settled.
+    #[default]
+    Unknown,
+    /// An `agent_start` has occurred without a later settlement boundary.
+    Active,
+    /// Pi emitted `agent_settled`, or the Session terminated.
+    Settled,
+}
+
+/// Reconstructed exclusively from replayed and live Session Events.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct SessionRuntimeState {
-    is_streaming: bool,
+    turn_phase: SessionTurnPhase,
     steering_queue: Vec<String>,
     follow_up_queue: Vec<String>,
+}
+
+impl SessionRuntimeState {
+    fn has_active_turn(&self) -> bool {
+        self.turn_phase == SessionTurnPhase::Active
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -282,7 +325,11 @@ struct DesktopShell {
     next_pending_image_id: u64,
     session_runtime_states: HashMap<SessionId, SessionRuntimeState>,
     session_request_states: HashMap<SessionId, SessionRequestState>,
-    followed_session_ids: HashSet<SessionId>,
+    // Outlives dispatch state until a newer matching durable user event or a
+    // terminal failure reconciles the optimistic prompt.
+    pending_prompt_messages: HashMap<SessionId, PendingUserMessage>,
+    session_followers: HashMap<SessionId, SessionFollowerHandle>,
+    next_follower_generation: u64,
     active_turn_started_at: HashMap<SessionId, Instant>,
     active_turn_tool_group_keys: HashMap<SessionId, String>,
     agent_blob_transitions: HashMap<SessionId, AgentBlobTransition>,
@@ -291,10 +338,20 @@ struct DesktopShell {
     working_duration_tick_scheduled: bool,
     new_session_request_state: SessionRequestState,
     is_creating_workspace: bool,
-    pending_steering_messages: HashMap<SessionId, ConversationMessage>,
+    // Steer acknowledgements leave FIFO presentation entries intact until the
+    // matching durable message arrives; dispatch failure removes the newest.
+    pending_steering_messages: HashMap<SessionId, VecDeque<PendingUserMessage>>,
     load_state: SessionLoadState,
     action_error: Option<String>,
     _subscriptions: Vec<Subscription>,
+}
+
+impl Drop for DesktopShell {
+    fn drop(&mut self) {
+        for (_, follower) in self.session_followers.drain() {
+            let _ = follower.cancel.send(());
+        }
+    }
 }
 
 impl DesktopShell {
@@ -367,7 +424,9 @@ impl DesktopShell {
             next_pending_image_id: 0,
             session_runtime_states: HashMap::new(),
             session_request_states: HashMap::new(),
-            followed_session_ids: HashSet::new(),
+            pending_prompt_messages: HashMap::new(),
+            session_followers: HashMap::new(),
+            next_follower_generation: 0,
             active_turn_started_at: HashMap::new(),
             active_turn_tool_group_keys: HashMap::new(),
             agent_blob_transitions: HashMap::new(),
@@ -544,7 +603,7 @@ impl DesktopShell {
     }
 
     fn replace_sessions(&mut self, sessions: Vec<SessionDescriptor>) {
-        self.selected_session_id = selection_after_refresh(self.selected_session_id, &sessions);
+        self.replace_selected_session(selection_after_refresh(self.selected_session_id, &sessions));
         if sessions.is_empty() {
             self.creating_new_session = true;
         }
@@ -582,12 +641,62 @@ impl DesktopShell {
             .unwrap_or_default()
     }
 
+    fn replace_selected_session(&mut self, selected_session_id: Option<SessionId>) {
+        let previous_session_id =
+            std::mem::replace(&mut self.selected_session_id, selected_session_id);
+        if previous_session_id != selected_session_id
+            && let Some(previous_session_id) = previous_session_id
+        {
+            self.release_dormant_session_follower(previous_session_id);
+        }
+    }
+
+    fn release_dormant_session_follower(&mut self, session_id: SessionId) {
+        let should_retain = should_retain_session_follower(
+            self.selected_session_id == Some(session_id),
+            &self.session_runtime_state(session_id),
+            self.session_request_state(session_id),
+        );
+        if should_retain {
+            return;
+        }
+        cancel_session_follower(&mut self.session_followers, session_id);
+        self.loading_conversations.remove(&session_id);
+    }
+
     fn set_session_request_state(&mut self, session_id: SessionId, state: SessionRequestState) {
         if state == SessionRequestState::Idle {
             self.session_request_states.remove(&session_id);
         } else {
             self.session_request_states.insert(session_id, state);
         }
+    }
+
+    fn set_session_submitting(
+        &mut self,
+        session_id: SessionId,
+        submitted_message: ConversationMessage,
+    ) {
+        let baseline = self.current_follower_cursor(session_id);
+        self.pending_prompt_messages.insert(
+            session_id,
+            PendingUserMessage {
+                after_sequence: baseline,
+                message: submitted_message,
+            },
+        );
+        self.session_request_states
+            .insert(session_id, SessionRequestState::Submitting);
+    }
+
+    fn follower_is_current(&self, session_id: SessionId, generation: u64) -> bool {
+        session_follower_is_current(&self.session_followers, session_id, generation)
+    }
+
+    fn current_follower_cursor(&self, session_id: SessionId) -> u64 {
+        self.session_followers
+            .get(&session_id)
+            .map_or(0, |follower| follower.cursor.load(Ordering::Acquire))
     }
 
     fn transition_session_request_state(
@@ -626,11 +735,14 @@ impl DesktopShell {
         if self.loading_conversations.contains(&session_id) {
             return Ok(None);
         }
+        if !self.session_followers.contains_key(&session_id) {
+            return Err("Reconnect to the session before sending another message.");
+        }
         if self.session_request_state(session_id) != SessionRequestState::Idle {
             return Ok(None);
         }
         Ok(Some(
-            if self.session_runtime_state(session_id).is_streaming {
+            if self.session_runtime_state(session_id).has_active_turn() {
                 SubmissionKind::Steer(session_id)
             } else {
                 SubmissionKind::Prompt(session_id)
@@ -640,7 +752,7 @@ impl DesktopShell {
 
     fn select_session(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
         self.creating_new_session = false;
-        self.selected_session_id = Some(session_id);
+        self.replace_selected_session(Some(session_id));
         if let Some((workspace_id, directory_id)) = self
             .sessions
             .iter()
@@ -685,7 +797,7 @@ impl DesktopShell {
                 .map(|workspace| workspace.primary_directory_id);
         }
         self.creating_new_session = true;
-        self.selected_session_id = None;
+        self.replace_selected_session(None);
         self.new_session_messages.clear();
         self.pending_images.clear();
         self.action_error = None;
@@ -831,7 +943,7 @@ impl DesktopShell {
                         shell.workspace_draft_directories.clear();
                         shell.workspace_modal_error = None;
                         shell.creating_new_session = true;
-                        shell.selected_session_id = None;
+                        shell.replace_selected_session(None);
                         shell.new_session_messages.clear();
                         shell.pending_images.clear();
                         shell.action_error = None;
@@ -888,65 +1000,121 @@ impl DesktopShell {
 
     fn load_conversation(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
         self.conversation_scrolls.entry(session_id).or_default();
-        if !self.followed_session_ids.insert(session_id) {
+        if self.session_followers.contains_key(&session_id) {
             return;
         }
+        let (cancel, mut cancelled) = oneshot::channel();
+        let cursor = Arc::new(AtomicU64::new(0));
+        let follower_cursor = Arc::clone(&cursor);
+        let generation = self.next_follower_generation;
+        self.next_follower_generation = self.next_follower_generation.wrapping_add(1);
+        self.session_followers.insert(
+            session_id,
+            SessionFollowerHandle {
+                generation,
+                cancel,
+                cursor,
+            },
+        );
         self.loading_conversations.insert(session_id);
         self.conversation_errors.remove(&session_id);
 
         let client = self.client.clone();
         let (updates, mut update_rx) = tokio::sync::mpsc::unbounded_channel();
         self.runtime.spawn(async move {
-            let mut subscription = match client
-                .follow_session_events(session_id, 0, CONVERSATION_EVENT_PAGE_SIZE)
-                .await
-            {
+            let subscription = tokio::select! {
+                _ = &mut cancelled => return,
+                result = client.follow_session_events(
+                    session_id,
+                    0,
+                    CONVERSATION_EVENT_PAGE_SIZE,
+                ) => result,
+            };
+            let mut subscription = match subscription {
                 Ok(subscription) => subscription,
                 Err(error) => {
                     let _ = updates.send(SessionFollowerUpdate::Failed {
                         session_id,
+                        generation,
                         error: format!("Could not follow session messages: {error:#}"),
                     });
                     return;
                 }
             };
             let mut replay = subscription.take_replay();
-            if let Err(error) = client.hydrate_events_attachments(&mut replay).await {
+            let hydration = tokio::select! {
+                _ = &mut cancelled => {
+                    subscription.close().await;
+                    return;
+                }
+                result = client.hydrate_events_attachments(&mut replay) => result,
+            };
+            if let Err(error) = hydration {
                 let _ = updates.send(SessionFollowerUpdate::Failed {
                     session_id,
+                    generation,
                     error: format!("Could not load session attachments: {error:#}"),
                 });
+                subscription.close().await;
                 return;
+            }
+            if let Some(last_event) = replay.last() {
+                follower_cursor.store(last_event.sequence, Ordering::Release);
             }
             if updates
                 .send(SessionFollowerUpdate::Loaded {
                     session_id,
+                    generation,
                     events: replay,
                 })
                 .is_err()
             {
+                subscription.close().await;
                 return;
             }
             loop {
-                let mut event = match subscription.next().await {
+                let next = tokio::select! {
+                    _ = &mut cancelled => {
+                        subscription.close().await;
+                        return;
+                    }
+                    result = subscription.next() => result,
+                };
+                let mut event = match next {
                     Ok(Some(event)) => event,
                     Ok(None) => continue,
                     Err(error) => {
                         let _ = updates.send(SessionFollowerUpdate::Failed {
                             session_id,
+                            generation,
                             error: format!("Session event follower failed: {error:#}"),
                         });
+                        subscription.close().await;
                         return;
                     }
                 };
-                if let Err(error) = client.hydrate_event_attachments(&mut event).await {
+                follower_cursor.store(event.sequence, Ordering::Release);
+                let hydration = tokio::select! {
+                    _ = &mut cancelled => {
+                        subscription.close().await;
+                        return;
+                    }
+                    result = client.hydrate_event_attachments(&mut event) => result,
+                };
+                if let Err(error) = hydration {
                     let _ = updates.send(SessionFollowerUpdate::Failed {
                         session_id,
+                        generation,
                         error: format!("Could not load session attachment: {error:#}"),
                     });
+                    subscription.close().await;
                     return;
                 }
-                if updates.send(SessionFollowerUpdate::Event(event)).is_err() {
+                if updates
+                    .send(SessionFollowerUpdate::Event { generation, event })
+                    .is_err()
+                {
+                    subscription.close().await;
                     return;
                 }
             }
@@ -969,32 +1137,82 @@ impl DesktopShell {
         cx: &mut Context<Self>,
     ) {
         match update {
-            SessionFollowerUpdate::Loaded { session_id, events } => {
+            SessionFollowerUpdate::Loaded {
+                session_id,
+                generation,
+                events,
+            } => {
+                if !self.follower_is_current(session_id, generation) {
+                    return;
+                }
                 self.loading_conversations.remove(&session_id);
                 let runtime_state = runtime_state_from_events(&events);
-                if runtime_state.is_streaming {
-                    self.transition_session_request_state(
-                        session_id,
-                        SessionRequestState::Submitting,
-                        SessionRequestState::Idle,
-                    );
-                    self.active_turn_started_at
-                        .entry(session_id)
-                        .or_insert_with(Instant::now);
-                    self.set_agent_blob_state(session_id, AgentBlobState::Thinking);
-                    self.schedule_working_duration_tick(cx);
+                reconcile_pending_steering_from_replay(
+                    &mut self.pending_steering_messages,
+                    session_id,
+                    &events,
+                    runtime_state.turn_phase,
+                );
+                let current_request_state = self.session_request_state(session_id);
+                let pending_prompt = self.pending_prompt_messages.get(&session_id);
+                let request_baseline = pending_prompt.map(|pending| pending.after_sequence);
+                let request_turn_phase = request_baseline
+                    .map_or(runtime_state.turn_phase, |baseline| {
+                        runtime_state_from_events_after(&events, baseline).turn_phase
+                    });
+                let request_state =
+                    reconcile_replayed_request_state(current_request_state, request_turn_phase);
+                let replay_confirms_submission = pending_prompt.is_some_and(|pending| {
+                    replay_contains_completed_user_after(
+                        &events,
+                        pending.after_sequence,
+                        &pending.message,
+                    )
+                });
+                let has_pending_prompt = pending_prompt.is_some();
+                let replace_conversation = should_replace_conversation_from_replay(
+                    self.conversations.contains_key(&session_id),
+                    events.is_empty(),
+                    has_pending_prompt,
+                    replay_confirms_submission,
+                );
+                if replay_confirms_submission
+                    || (has_pending_prompt && request_turn_phase == SessionTurnPhase::Settled)
+                {
+                    self.pending_prompt_messages.remove(&session_id);
+                }
+                self.set_session_request_state(session_id, request_state);
+                match runtime_state.turn_phase {
+                    SessionTurnPhase::Active => {
+                        self.active_turn_started_at
+                            .entry(session_id)
+                            .or_insert_with(Instant::now);
+                        self.set_agent_blob_state(session_id, AgentBlobState::Thinking);
+                        self.schedule_working_duration_tick(cx);
+                    }
+                    SessionTurnPhase::Settled => {
+                        self.previous_stream_texts.remove(&session_id);
+                        self.set_agent_blob_state(session_id, AgentBlobState::Idle);
+                        self.finish_turn_timing(session_id);
+                    }
+                    SessionTurnPhase::Unknown => {}
                 }
                 self.session_runtime_states
                     .insert(session_id, runtime_state);
-                self.conversations
-                    .insert(session_id, conversation_from_events(&events));
+                if replace_conversation {
+                    self.conversations
+                        .insert(session_id, conversation_from_events(&events));
+                }
                 self.conversation_scrolls
                     .get(&session_id)
                     .expect("loaded conversations have a scroll handle")
                     .scroll_to_bottom();
             }
-            SessionFollowerUpdate::Event(event) => {
+            SessionFollowerUpdate::Event { generation, event } => {
                 let session_id = event.session_id;
+                if !self.follower_is_current(session_id, generation) {
+                    return;
+                }
                 let follow = self.conversation_is_at_bottom(session_id);
                 apply_runtime_event(
                     self.session_runtime_states.entry(session_id).or_default(),
@@ -1018,10 +1236,19 @@ impl DesktopShell {
                 }
                 self.follow_conversation_if(session_id, follow);
             }
-            SessionFollowerUpdate::Failed { session_id, error } => {
+            SessionFollowerUpdate::Failed {
+                session_id,
+                generation,
+                error,
+            } => {
+                if !self.follower_is_current(session_id, generation) {
+                    return;
+                }
                 self.loading_conversations.remove(&session_id);
-                self.followed_session_ids.remove(&session_id);
-                self.set_session_request_state(session_id, SessionRequestState::Idle);
+                self.session_followers.remove(&session_id);
+                if self.session_request_state(session_id) != SessionRequestState::Submitting {
+                    self.set_session_request_state(session_id, SessionRequestState::Idle);
+                }
                 self.conversation_errors.insert(session_id, error);
             }
         }
@@ -1033,11 +1260,14 @@ impl DesktopShell {
             SessionEventPayload::Stopped { error } => {
                 self.set_session_request_state(session_id, SessionRequestState::Idle);
                 self.previous_stream_texts.remove(&session_id);
+                self.pending_prompt_messages.remove(&session_id);
+                self.pending_steering_messages.remove(&session_id);
                 self.set_agent_blob_state(session_id, AgentBlobState::Error);
                 self.finish_turn_timing(session_id);
                 if let Some(error) = error {
                     self.action_error = Some(error.clone());
                 }
+                self.release_dormant_session_follower(session_id);
             }
             SessionEventPayload::Pi { message } => match message.event() {
                 PiEvent::AgentStart => {
@@ -1052,12 +1282,16 @@ impl DesktopShell {
                     self.set_agent_blob_state(session_id, AgentBlobState::Thinking);
                     self.schedule_working_duration_tick(cx);
                 }
-                PiEvent::AgentEnd(_) => {
+                PiEvent::AgentEnd(_) => {}
+                PiEvent::AgentSettled => {
                     self.set_session_request_state(session_id, SessionRequestState::Idle);
                     self.previous_stream_texts.remove(&session_id);
+                    self.pending_prompt_messages.remove(&session_id);
+                    self.pending_steering_messages.remove(&session_id);
                     self.set_agent_blob_state(session_id, AgentBlobState::Idle);
                     self.finish_turn_timing(session_id);
                     self.load_sessions(cx);
+                    self.release_dormant_session_follower(session_id);
                 }
                 PiEvent::Response(RpcResponse::Steer { .. }) => {
                     self.transition_session_request_state(
@@ -1065,15 +1299,7 @@ impl DesktopShell {
                         SessionRequestState::Steering,
                         SessionRequestState::Idle,
                     );
-                    if let Some(message) = self.pending_steering_messages.remove(&session_id) {
-                        let follow = self.conversation_is_at_bottom(session_id);
-                        self.conversations
-                            .entry(session_id)
-                            .or_default()
-                            .push(ConversationItem::Message(message));
-                        self.follow_conversation_if(session_id, follow);
-                        self.load_sessions(cx);
-                    }
+                    self.load_sessions(cx);
                 }
                 PiEvent::Response(RpcResponse::Error { command, error, .. }) => {
                     match command.as_str() {
@@ -1085,6 +1311,7 @@ impl DesktopShell {
                             );
                             self.set_agent_blob_state(session_id, AgentBlobState::Error);
                             self.finish_turn_timing(session_id);
+                            self.pending_prompt_messages.remove(&session_id);
                         }
                         "steer" => {
                             self.transition_session_request_state(
@@ -1092,7 +1319,10 @@ impl DesktopShell {
                                 SessionRequestState::Steering,
                                 SessionRequestState::Idle,
                             );
-                            self.pending_steering_messages.remove(&session_id);
+                            discard_latest_pending_steering(
+                                &mut self.pending_steering_messages,
+                                session_id,
+                            );
                         }
                         "abort" => {
                             self.transition_session_request_state(
@@ -1122,6 +1352,22 @@ impl DesktopShell {
                         self.previous_stream_texts.remove(&session_id);
                     }
                     self.set_agent_blob_state(session_id, AgentBlobState::Responding);
+                }
+                PiEvent::MessageEnd(_) => {
+                    if let Some(completed) = completed_user_message(message.event()) {
+                        reconcile_pending_prompt_message(
+                            &mut self.pending_prompt_messages,
+                            session_id,
+                            event.sequence,
+                            &completed,
+                        );
+                        reconcile_pending_steering_message(
+                            &mut self.pending_steering_messages,
+                            session_id,
+                            event.sequence,
+                            &completed,
+                        );
+                    }
                 }
                 event if is_tool_event(event) => {
                     self.set_agent_blob_state(session_id, AgentBlobState::Working);
@@ -1281,10 +1527,17 @@ impl DesktopShell {
             text: prompt.clone(),
             images: conversation_images,
         };
+        let submitted_message = user_message.clone();
         match submission {
             SubmissionKind::Steer(session_id) => {
+                let after_sequence = self.current_follower_cursor(session_id);
                 self.pending_steering_messages
-                    .insert(session_id, user_message);
+                    .entry(session_id)
+                    .or_default()
+                    .push_back(PendingUserMessage {
+                        after_sequence,
+                        message: user_message,
+                    });
             }
             SubmissionKind::Prompt(session_id) => {
                 let follow = self.conversation_is_at_bottom(session_id);
@@ -1308,7 +1561,7 @@ impl DesktopShell {
                 self.set_session_request_state(session_id, SessionRequestState::Steering);
             }
             SubmissionKind::Prompt(session_id) => {
-                self.set_session_request_state(session_id, SessionRequestState::Submitting);
+                self.set_session_submitting(session_id, submitted_message);
                 self.active_turn_started_at
                     .insert(session_id, Instant::now());
                 self.set_agent_blob_state(session_id, AgentBlobState::Thinking);
@@ -1408,10 +1661,9 @@ impl DesktopShell {
     fn apply_prompt_update(&mut self, update: PromptUpdate, cx: &mut Context<Self>) {
         match update {
             PromptUpdate::Created(session_id) => {
-                self.selected_session_id = Some(session_id);
+                self.replace_selected_session(Some(session_id));
                 self.creating_new_session = false;
                 self.new_session_request_state = SessionRequestState::Idle;
-                self.set_session_request_state(session_id, SessionRequestState::Submitting);
                 self.active_turn_started_at.insert(
                     session_id,
                     self.creating_turn_started_at
@@ -1420,6 +1672,10 @@ impl DesktopShell {
                 );
                 self.set_agent_blob_state(session_id, AgentBlobState::Thinking);
                 let messages = std::mem::take(&mut self.new_session_messages);
+                let submitted_message = optimistic_prompt_message(&messages)
+                    .cloned()
+                    .expect("new sessions have an optimistic prompt");
+                self.set_session_submitting(session_id, submitted_message);
                 self.conversations.insert(session_id, messages);
                 self.conversation_scrolls
                     .entry(session_id)
@@ -1431,6 +1687,7 @@ impl DesktopShell {
             PromptUpdate::PromptDispatchFinished { session_id, error } => {
                 if let Some(error) = error {
                     self.set_session_request_state(session_id, SessionRequestState::Idle);
+                    self.pending_prompt_messages.remove(&session_id);
                     self.set_agent_blob_state(session_id, AgentBlobState::Error);
                     self.finish_turn_timing(session_id);
                     self.action_error = Some(error);
@@ -1443,7 +1700,10 @@ impl DesktopShell {
                         SessionRequestState::Steering,
                         SessionRequestState::Idle,
                     );
-                    self.pending_steering_messages.remove(&session_id);
+                    discard_latest_pending_steering(
+                        &mut self.pending_steering_messages,
+                        session_id,
+                    );
                     self.action_error = Some(error);
                 }
             }
@@ -1451,6 +1711,7 @@ impl DesktopShell {
                 if let Some(session_id) = session_id {
                     self.previous_stream_texts.remove(&session_id);
                     self.set_session_request_state(session_id, SessionRequestState::Idle);
+                    self.pending_prompt_messages.remove(&session_id);
                     self.set_agent_blob_state(session_id, AgentBlobState::Error);
                     self.finish_turn_timing(session_id);
                 } else {
@@ -1505,7 +1766,7 @@ impl DesktopShell {
                         || shell
                             .session_runtime_states
                             .values()
-                            .any(|state| state.is_streaming)
+                            .any(SessionRuntimeState::has_active_turn)
                     {
                         cx.notify();
                         shell.schedule_working_duration_tick(cx);
@@ -1520,7 +1781,7 @@ impl DesktopShell {
         let Some(session_id) = self.selected_session_id else {
             return;
         };
-        if !self.session_runtime_state(session_id).is_streaming
+        if !self.session_runtime_state(session_id).has_active_turn()
             || !self.transition_session_request_state(
                 session_id,
                 SessionRequestState::Idle,
@@ -1822,7 +2083,6 @@ impl DesktopShell {
                                     )
                                     .on_click(cx.listener(move |shell, _, window, cx| {
                                         cx.stop_propagation();
-                                        shell.selected_session_id = None;
                                         shell.selected_workspace_id = Some(workspace_id);
                                         shell.creating_directory_id = Some(primary_directory_id);
                                         shell.start_new_session(window, cx);
@@ -2268,8 +2528,15 @@ impl DesktopShell {
                 );
         }
 
-        let messages = self.conversations.get(&session_id);
-        if messages.is_none_or(Vec::is_empty) {
+        let messages = self
+            .conversations
+            .get(&session_id)
+            .map_or(&[][..], Vec::as_slice);
+        let has_pending_steering_messages = self
+            .pending_steering_messages
+            .get(&session_id)
+            .is_some_and(|messages| !messages.is_empty());
+        if messages.is_empty() && !has_pending_steering_messages {
             return conversation
                 .items_center()
                 .justify_center()
@@ -2277,8 +2544,7 @@ impl DesktopShell {
                 .child("Send a message to continue this session.");
         }
 
-        let messages = messages.expect("non-empty conversations were checked above");
-        let session_has_active_turn = self.session_runtime_state(session_id).is_streaming
+        let session_has_active_turn = self.session_runtime_state(session_id).has_active_turn()
             || self.session_request_state(session_id) == SessionRequestState::Submitting;
         let active_turn_elapsed = self
             .active_turn_started_at
@@ -2439,6 +2705,55 @@ impl DesktopShell {
                     ))
                 }
             };
+        }
+
+        for (index, pending) in self
+            .pending_steering_messages
+            .get(&session_id)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            let message = &pending.message;
+            transcript = transcript.child(
+                div()
+                    .id(("pending-steering-message", index))
+                    .w_full()
+                    .flex()
+                    .justify_end()
+                    .opacity(0.72)
+                    .child(
+                        div()
+                            .max_w(px(640.))
+                            .px_4()
+                            .py_3()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .rounded_xl()
+                            .bg(rgb(0x25282d))
+                            .when(!message.images.is_empty(), |bubble| {
+                                bubble.child(render_conversation_images(
+                                    &message.images,
+                                    format!("pending-steering-{session_id}-{index}"),
+                                ))
+                            })
+                            .when(!message.text.is_empty(), |bubble| {
+                                bubble.child(
+                                    TextView::markdown(
+                                        ("pending-steering-markdown", index),
+                                        message.text.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                    .style(conversation_markdown_style(cx))
+                                    .selectable(true)
+                                    .w_full(),
+                                )
+                            })
+                            .child(div().text_xs().text_color(rgb(0x85898f)).child("Steering…")),
+                    ),
+            );
         }
 
         conversation.child(transcript)
@@ -2726,11 +3041,12 @@ impl DesktopShell {
             .unwrap_or_default();
         let active_session_id = self
             .selected_session_id
-            .filter(|_| !self.creating_new_session && selected_runtime_state.is_streaming);
+            .filter(|_| !self.creating_new_session && selected_runtime_state.has_active_turn());
         let disabled = (self.creating_new_session
             && self.new_session_request_state != SessionRequestState::Idle)
             || self.selected_session_id.is_some_and(|session_id| {
                 self.loading_conversations.contains(&session_id)
+                    || !self.session_followers.contains_key(&session_id)
                     || self.session_request_state(session_id) != SessionRequestState::Idle
             });
         let send = div()
@@ -3085,18 +3401,194 @@ fn runtime_state_from_events(events: &[SessionEvent]) -> SessionRuntimeState {
     state
 }
 
+fn runtime_state_from_events_after(
+    events: &[SessionEvent],
+    after_sequence: u64,
+) -> SessionRuntimeState {
+    let mut state = SessionRuntimeState::default();
+    for event in events
+        .iter()
+        .filter(|event| event.sequence > after_sequence)
+    {
+        apply_runtime_event(&mut state, event);
+    }
+    state
+}
+
 fn apply_runtime_event(state: &mut SessionRuntimeState, event: &SessionEvent) {
     match &event.payload {
-        SessionEventPayload::Stopped { .. } => state.is_streaming = false,
+        SessionEventPayload::Stopped { .. } => {
+            state.turn_phase = SessionTurnPhase::Settled;
+            state.steering_queue.clear();
+            state.follow_up_queue.clear();
+        }
         SessionEventPayload::Pi { message } => match message.event() {
-            PiEvent::AgentStart => state.is_streaming = true,
-            PiEvent::AgentEnd(_) => state.is_streaming = false,
+            PiEvent::AgentStart => state.turn_phase = SessionTurnPhase::Active,
+            PiEvent::AgentEnd(_) => {}
+            PiEvent::AgentSettled => {
+                state.turn_phase = SessionTurnPhase::Settled;
+                state.steering_queue.clear();
+                state.follow_up_queue.clear();
+            }
             PiEvent::QueueUpdate(update) => {
                 state.steering_queue.clone_from(&update.steering);
                 state.follow_up_queue.clone_from(&update.follow_up);
             }
             _ => {}
         },
+    }
+}
+
+fn reconcile_replayed_request_state(
+    request_state: SessionRequestState,
+    turn_phase: SessionTurnPhase,
+) -> SessionRequestState {
+    if request_state == SessionRequestState::Submitting && turn_phase != SessionTurnPhase::Unknown {
+        SessionRequestState::Idle
+    } else {
+        request_state
+    }
+}
+
+fn should_replace_conversation_from_replay(
+    has_cached_conversation: bool,
+    replay_is_empty: bool,
+    has_pending_prompt: bool,
+    replay_confirms_submission: bool,
+) -> bool {
+    if !has_cached_conversation {
+        return true;
+    }
+    if has_pending_prompt && !replay_confirms_submission {
+        return false;
+    }
+    !replay_is_empty
+}
+
+fn optimistic_prompt_message(items: &[ConversationItem]) -> Option<&ConversationMessage> {
+    let [
+        ..,
+        ConversationItem::Message(user),
+        ConversationItem::Message(placeholder),
+    ] = items
+    else {
+        return None;
+    };
+    (user.role == ConversationRole::User
+        && placeholder.role == ConversationRole::Assistant
+        && placeholder.text.is_empty()
+        && placeholder.images.is_empty())
+    .then_some(user)
+}
+
+fn replay_contains_completed_user_after(
+    events: &[SessionEvent],
+    after_sequence: u64,
+    expected: &ConversationMessage,
+) -> bool {
+    events.iter().any(|event| {
+        event.sequence > after_sequence
+            && matches!(
+                &event.payload,
+                SessionEventPayload::Pi { message }
+                    if completed_user_message(message.event()).as_ref() == Some(expected)
+            )
+    })
+}
+
+fn should_retain_session_follower(
+    is_selected: bool,
+    runtime_state: &SessionRuntimeState,
+    request_state: SessionRequestState,
+) -> bool {
+    is_selected || runtime_state.has_active_turn() || request_state != SessionRequestState::Idle
+}
+
+fn cancel_session_follower(
+    followers: &mut HashMap<SessionId, SessionFollowerHandle>,
+    session_id: SessionId,
+) {
+    if let Some(follower) = followers.remove(&session_id) {
+        let _ = follower.cancel.send(());
+    }
+}
+
+fn session_follower_is_current(
+    followers: &HashMap<SessionId, SessionFollowerHandle>,
+    session_id: SessionId,
+    generation: u64,
+) -> bool {
+    followers
+        .get(&session_id)
+        .is_some_and(|follower| follower.generation == generation)
+}
+
+fn reconcile_pending_prompt_message(
+    pending_messages: &mut HashMap<SessionId, PendingUserMessage>,
+    session_id: SessionId,
+    completed_sequence: u64,
+    completed: &ConversationMessage,
+) {
+    let matches = pending_messages.get(&session_id).is_some_and(|pending| {
+        completed_sequence > pending.after_sequence && &pending.message == completed
+    });
+    if matches {
+        pending_messages.remove(&session_id);
+    }
+}
+
+fn reconcile_pending_steering_message(
+    pending_messages: &mut HashMap<SessionId, VecDeque<PendingUserMessage>>,
+    session_id: SessionId,
+    completed_sequence: u64,
+    completed: &ConversationMessage,
+) {
+    let Some(messages) = pending_messages.get_mut(&session_id) else {
+        return;
+    };
+    if let Some(index) = messages.iter().position(|pending| {
+        completed_sequence > pending.after_sequence && &pending.message == completed
+    }) {
+        messages.remove(index);
+    }
+    if messages.is_empty() {
+        pending_messages.remove(&session_id);
+    }
+}
+
+fn reconcile_pending_steering_from_replay(
+    pending_messages: &mut HashMap<SessionId, VecDeque<PendingUserMessage>>,
+    session_id: SessionId,
+    events: &[SessionEvent],
+    turn_phase: SessionTurnPhase,
+) {
+    for event in events {
+        if let SessionEventPayload::Pi { message } = &event.payload
+            && let Some(completed) = completed_user_message(message.event())
+        {
+            reconcile_pending_steering_message(
+                pending_messages,
+                session_id,
+                event.sequence,
+                &completed,
+            );
+        }
+    }
+    if turn_phase == SessionTurnPhase::Settled {
+        pending_messages.remove(&session_id);
+    }
+}
+
+fn discard_latest_pending_steering(
+    pending_messages: &mut HashMap<SessionId, VecDeque<PendingUserMessage>>,
+    session_id: SessionId,
+) {
+    let Some(messages) = pending_messages.get_mut(&session_id) else {
+        return;
+    };
+    messages.pop_back();
+    if messages.is_empty() {
+        pending_messages.remove(&session_id);
     }
 }
 
@@ -4059,11 +4551,315 @@ mod tests {
         assert_eq!(
             runtime_state_from_events(&events),
             SessionRuntimeState {
-                is_streaming: false,
+                turn_phase: SessionTurnPhase::Active,
                 steering_queue: vec!["focus the tests".to_owned()],
                 follow_up_queue: vec!["then update docs".to_owned()],
             }
         );
+    }
+
+    #[test]
+    fn agent_end_does_not_settle_the_turn() {
+        let mut state = SessionRuntimeState::default();
+
+        apply_runtime_event(&mut state, &session_event(json!({ "type": "agent_start" })));
+        apply_runtime_event(
+            &mut state,
+            &session_event(json!({
+                "type": "agent_end",
+                "messages": [],
+                "willRetry": false
+            })),
+        );
+        assert!(state.has_active_turn());
+
+        apply_runtime_event(
+            &mut state,
+            &session_event(json!({ "type": "agent_settled" })),
+        );
+        assert_eq!(state.turn_phase, SessionTurnPhase::Settled);
+    }
+
+    #[test]
+    fn replay_reconciles_submitting_only_after_observing_a_turn_lifecycle() {
+        assert_eq!(
+            reconcile_replayed_request_state(
+                SessionRequestState::Submitting,
+                SessionTurnPhase::Unknown,
+            ),
+            SessionRequestState::Submitting,
+        );
+        assert_eq!(
+            reconcile_replayed_request_state(
+                SessionRequestState::Submitting,
+                SessionTurnPhase::Active,
+            ),
+            SessionRequestState::Idle,
+        );
+        assert_eq!(
+            reconcile_replayed_request_state(
+                SessionRequestState::Submitting,
+                SessionTurnPhase::Settled,
+            ),
+            SessionRequestState::Idle,
+        );
+    }
+
+    #[test]
+    fn replay_ignores_lifecycle_events_at_the_submission_baseline() {
+        let mut historical_settled = session_event(json!({ "type": "agent_settled" }));
+        historical_settled.sequence = 5;
+        let mut current_start = session_event(json!({ "type": "agent_start" }));
+        current_start.sequence = 6;
+
+        assert_eq!(
+            runtime_state_from_events_after(&[historical_settled.clone()], 5).turn_phase,
+            SessionTurnPhase::Unknown,
+        );
+        assert_eq!(
+            runtime_state_from_events_after(&[historical_settled, current_start], 5).turn_phase,
+            SessionTurnPhase::Active,
+        );
+    }
+
+    #[test]
+    fn inconclusive_replay_preserves_an_optimistic_submission() {
+        let optimistic = ConversationMessage {
+            role: ConversationRole::User,
+            text: "new prompt".to_owned(),
+            images: Vec::new(),
+        };
+        let mut agent_start = session_event(json!({ "type": "agent_start" }));
+        agent_start.sequence = 6;
+        let replay_confirms_submission =
+            replay_contains_completed_user_after(&[agent_start], 5, &optimistic);
+
+        assert!(!replay_confirms_submission);
+        assert!(!should_replace_conversation_from_replay(
+            true,
+            false,
+            true,
+            replay_confirms_submission,
+        ));
+        assert!(should_replace_conversation_from_replay(
+            true, false, true, true,
+        ));
+    }
+
+    #[test]
+    fn dormant_followers_are_retained_only_for_visible_or_active_sessions() {
+        let idle = SessionRuntimeState {
+            turn_phase: SessionTurnPhase::Settled,
+            ..Default::default()
+        };
+        let active = SessionRuntimeState {
+            turn_phase: SessionTurnPhase::Active,
+            ..Default::default()
+        };
+
+        assert!(!should_retain_session_follower(
+            false,
+            &idle,
+            SessionRequestState::Idle,
+        ));
+        assert!(should_retain_session_follower(
+            true,
+            &idle,
+            SessionRequestState::Idle,
+        ));
+        assert!(should_retain_session_follower(
+            false,
+            &active,
+            SessionRequestState::Idle,
+        ));
+        assert!(should_retain_session_follower(
+            false,
+            &idle,
+            SessionRequestState::Submitting,
+        ));
+    }
+
+    #[test]
+    fn cancelling_a_follower_removes_its_owner_and_signals_the_task() {
+        let session_id = SessionId::new();
+        let (cancel, mut cancelled) = oneshot::channel();
+        let mut followers = HashMap::from([(
+            session_id,
+            SessionFollowerHandle {
+                generation: 7,
+                cancel,
+                cursor: Arc::new(AtomicU64::new(0)),
+            },
+        )]);
+
+        cancel_session_follower(&mut followers, session_id);
+
+        assert!(!followers.contains_key(&session_id));
+        assert_eq!(cancelled.try_recv(), Ok(()));
+    }
+
+    #[test]
+    fn stale_follower_generation_cannot_match_its_replacement() {
+        let session_id = SessionId::new();
+        let (cancel, _) = oneshot::channel();
+        let followers = HashMap::from([(
+            session_id,
+            SessionFollowerHandle {
+                generation: 8,
+                cancel,
+                cursor: Arc::new(AtomicU64::new(0)),
+            },
+        )]);
+
+        assert!(!session_follower_is_current(&followers, session_id, 7));
+        assert!(session_follower_is_current(&followers, session_id, 8));
+    }
+
+    #[test]
+    fn durable_steering_message_replaces_pending_presentation_after_tools() {
+        let session_id = SessionId::new();
+        let steering = ConversationMessage {
+            role: ConversationRole::User,
+            text: "steering".to_owned(),
+            images: Vec::new(),
+        };
+        let mut pending = HashMap::from([(
+            session_id,
+            VecDeque::from([PendingUserMessage {
+                after_sequence: 10,
+                message: steering.clone(),
+            }]),
+        )]);
+        let mut transcript = Vec::new();
+        apply_conversation_event(
+            &mut transcript,
+            &session_event(json!({
+                "type": "tool_execution_start",
+                "toolCallId": "call-1",
+                "toolName": "read",
+                "args": { "path": "src/main.rs" }
+            })),
+        );
+        let mut completed = session_event(json!({
+            "type": "message_end",
+            "message": {
+                "role": "user",
+                "content": [{ "type": "text", "text": "steering" }]
+            }
+        }));
+        completed.sequence = 11;
+        let completed_message = match &completed.payload {
+            SessionEventPayload::Pi { message } => {
+                completed_user_message(message.event()).expect("completed user message")
+            }
+            SessionEventPayload::Stopped { .. } => unreachable!(),
+        };
+
+        reconcile_pending_steering_message(
+            &mut pending,
+            session_id,
+            completed.sequence,
+            &completed_message,
+        );
+        apply_conversation_event(&mut transcript, &completed);
+
+        assert!(!pending.contains_key(&session_id));
+        assert_eq!(
+            transcript
+                .iter()
+                .filter(|item| **item == ConversationItem::Message(steering.clone()))
+                .count(),
+            1,
+        );
+    }
+
+    #[test]
+    fn replay_reconciles_pending_steering_with_durable_messages() {
+        let session_id = SessionId::new();
+        let steering = ConversationMessage {
+            role: ConversationRole::User,
+            text: "steering".to_owned(),
+            images: Vec::new(),
+        };
+        let mut pending = HashMap::from([(
+            session_id,
+            VecDeque::from([PendingUserMessage {
+                after_sequence: 0,
+                message: steering,
+            }]),
+        )]);
+        let events = [session_event(json!({
+            "type": "message_end",
+            "message": {
+                "role": "user",
+                "content": [{ "type": "text", "text": "steering" }]
+            }
+        }))];
+
+        reconcile_pending_steering_from_replay(
+            &mut pending,
+            session_id,
+            &events,
+            SessionTurnPhase::Active,
+        );
+
+        assert!(!pending.contains_key(&session_id));
+    }
+
+    #[test]
+    fn replay_does_not_match_steering_before_its_dispatch_baseline() {
+        let session_id = SessionId::new();
+        let steering = ConversationMessage {
+            role: ConversationRole::User,
+            text: "same words".to_owned(),
+            images: Vec::new(),
+        };
+        let mut pending = HashMap::from([(
+            session_id,
+            VecDeque::from([PendingUserMessage {
+                after_sequence: 5,
+                message: steering,
+            }]),
+        )]);
+        let older = session_event(json!({
+            "type": "message_end",
+            "message": {
+                "role": "user",
+                "content": [{ "type": "text", "text": "same words" }]
+            }
+        }));
+
+        reconcile_pending_steering_from_replay(
+            &mut pending,
+            session_id,
+            &[older],
+            SessionTurnPhase::Active,
+        );
+
+        assert!(pending.contains_key(&session_id));
+    }
+
+    #[test]
+    fn pending_prompt_survives_until_a_newer_matching_durable_message() {
+        let session_id = SessionId::new();
+        let message = ConversationMessage {
+            role: ConversationRole::User,
+            text: "prompt".to_owned(),
+            images: Vec::new(),
+        };
+        let mut pending = HashMap::from([(
+            session_id,
+            PendingUserMessage {
+                after_sequence: 5,
+                message: message.clone(),
+            },
+        )]);
+
+        reconcile_pending_prompt_message(&mut pending, session_id, 5, &message);
+        assert!(pending.contains_key(&session_id));
+
+        reconcile_pending_prompt_message(&mut pending, session_id, 6, &message);
+        assert!(!pending.contains_key(&session_id));
     }
 
     #[test]

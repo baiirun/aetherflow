@@ -75,10 +75,26 @@ It does not currently provide:
   event whose sequence was already replayed.
 - A prompt-scoped stream MUST finish on Pi `agent_end` or a terminal Session
   failure. Durable following remains a separate, open-ended observation mode.
-- The desktop MUST use one durable follower per loaded Session rather than own
-  Pi events through individual prompt requests.
+- The desktop MUST use one durable follower for the selected Session and for
+  each background Session with an active turn or command in flight. It MUST
+  close a dormant follower when that Session is no longer selected.
 - Desktop streaming and queue state MUST be derived from replayed and live Pi
   events. Local request state is limited to command dispatch work in flight.
+- Replay MUST reconcile a local submitting request only after observing an
+  active or settled lifecycle event whose sequence is newer than the dispatch
+  baseline. Older history and an empty replay provide no lifecycle evidence
+  for that request and MUST preserve the local request and optimistic prompt.
+- Pi `agent_end` MUST end only the current agent run. The desktop MUST keep the
+  turn active through retries, compaction, and queued continuation until Pi
+  emits `agent_settled` or the Session emits a terminal failure.
+- A successful prompt or steer response MUST be treated only as a command
+  acknowledgement. Normal prompts may appear optimistically and reconcile with
+  their matching durable event; this optimistic identity MUST outlive dispatch
+  acknowledgement until reconciliation. Pending steering text is temporary
+  presentation state; its completed durable Pi user message is the transcript
+  authority and MUST replace the pending presentation. Prompt and steering
+  reconciliation MUST ignore matching history at or before that command's
+  dispatch baseline.
 - Known Pi records SHOULD decode into distinct Rust union variants. Unknown Pi
   event kinds MUST retain their raw JSON object so protocol additions do not
   destroy fields; inline Attachment bytes remain subject to externalization.
@@ -191,31 +207,59 @@ sequenceDiagram
     end
 ```
 
-### Prompt and streaming
+### Desktop following and command dispatch
 
 ```mermaid
 sequenceDiagram
-    participant C as Desktop or CLI
+    participant UI as Desktop
     participant AC as Aetherflow client
     participant D as Session Directory
     participant S as Session actor
     participant P as Pi RPC process
 
-    C->>AC: Prompt(SessionId, text, AttachmentRefs)
+    UI->>AC: Follow Session from cursor
+    AC->>S: Subscribe before replay
+    S-->>AC: Replay then sequenced live events
+    AC-->>UI: Durable transcript and runtime updates
+    UI->>AC: Prompt or steer
     AC->>D: Record activity/title
-    AC->>S: Subscribe to Session Events
-    AC->>S: Send prompt command
+    AC->>S: Send command independently of follower
     S->>S: Hydrate AttachmentRefs
-    S->>P: JSONL prompt
+    S->>P: JSONL command
     loop Pi output
         P-->>S: JSONL record
         S->>S: Externalize bytes and persist event
         S-->>AC: Publish sequenced Session Event
-        AC-->>C: Typed live update
+        AC-->>UI: Typed durable update
     end
     P-->>S: agent_end
-    S-->>AC: Persisted terminal Pi event
-    AC-->>C: Prompt stream complete
+    S-->>AC: Persisted run-end event
+    AC-->>UI: Follower remains active
+    P-->>S: agent_settled
+    S-->>AC: Persisted settled event
+    AC-->>UI: Mark turn idle
+```
+
+### CLI prompt-scoped streaming
+
+```mermaid
+sequenceDiagram
+    participant CLI
+    participant AC as Aetherflow client
+    participant S as Session actor
+    participant P as Pi RPC process
+
+    CLI->>AC: Prompt Session
+    AC->>S: Subscribe to Session Events
+    AC->>S: Send prompt command
+    S->>P: JSONL prompt
+    loop Current agent run
+        P-->>S: JSONL record
+        S-->>AC: Persisted Session Event
+        AC-->>CLI: Typed live update
+    end
+    P-->>S: agent_end
+    AC-->>CLI: Prompt-scoped stream completes
 ```
 
 ### Replay and follow
@@ -263,6 +307,10 @@ The following tests are the contract anchors:
 | Event pages are bounded | `event_page_limit_is_bounded` |
 | Replay uses persisted sequence | `persisted_event_rows_recover_their_sequence` |
 | Replay plus live suppresses overlap | `client_creates_lists_prompts_and_resumes_a_session` |
+| Agent end remains active until settled | `agent_end_does_not_settle_the_turn` |
+| Current-turn replay reconciles submitting state | `replay_reconciles_submitting_only_after_observing_a_turn_lifecycle`, `replay_ignores_lifecycle_events_at_the_submission_baseline`, `inconclusive_replay_preserves_an_optimistic_submission`, and `pending_prompt_survives_until_a_newer_matching_durable_message` |
+| Durable steering replaces pending presentation | `durable_steering_message_replaces_pending_presentation_after_tools`, `replay_reconciles_pending_steering_with_durable_messages`, and `replay_does_not_match_steering_before_its_dispatch_baseline` |
+| Dormant desktop follower policy and cancellation | `dormant_followers_are_retained_only_for_visible_or_active_sessions`, `cancelling_a_follower_removes_its_owner_and_signals_the_task`, and `stale_follower_generation_cannot_match_its_replacement` |
 | Pi records remain typed and forward-compatible | `unknown_event_round_trips_without_losing_fields` |
 | Actor messages exclude attachment bytes | `large_prompt_attachments_stay_outside_the_actor_message` |
 | Persisted events externalize attachment bytes | `externalized_events_carry_references_instead_of_base64` |

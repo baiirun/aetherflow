@@ -258,6 +258,14 @@ pub fn apply_conversation_event(items: &mut Vec<ConversationItem>, event: &Sessi
     }
 }
 
+pub fn completed_user_message(event: &PiEvent) -> Option<ConversationMessage> {
+    let PiEvent::MessageEnd(completed) = event else {
+        return None;
+    };
+    let message = completed_conversation_message(&completed.message)?;
+    (message.role == ConversationRole::User).then_some(message)
+}
+
 pub fn append_assistant_delta(items: &mut Vec<ConversationItem>, delta: &str) {
     if let Some(ConversationItem::Message(message)) = items.last_mut()
         && message.role == ConversationRole::Assistant
