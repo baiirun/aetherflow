@@ -29,6 +29,7 @@ use std::{
 };
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
+use uuid::Uuid;
 
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:6420";
 pub const DEFAULT_ATTACHMENT_ADDRESS: &str = "127.0.0.1:6422";
@@ -39,6 +40,10 @@ pub const DEFAULT_POOL: &str = "rivetkit-rust";
 const SESSION_LIST_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKSPACE_LIST_TIMEOUT: Duration = Duration::from_secs(10);
 const ATTACHMENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub fn new_session_command_id(command: &str) -> String {
+    format!("aetherflow-{command}-{}", Uuid::new_v4())
+}
 
 #[derive(Clone, Debug)]
 pub struct AetherflowClientOptions {
@@ -240,7 +245,11 @@ impl AetherflowClient {
         if let Some(prompt) = initial_prompt {
             self.session_handle(session.id)
                 .send(SendSessionCommand {
-                    command: SessionCommand::prompt("prompt", prompt, Vec::new()),
+                    command: SessionCommand::prompt(
+                        new_session_command_id("prompt"),
+                        prompt,
+                        Vec::new(),
+                    ),
                 })
                 .await
                 .with_context(|| format!("prompt new session {}", session.id))?;
@@ -382,6 +391,22 @@ impl AetherflowClient {
         message: impl Into<String>,
         attachments: Vec<AttachmentRef>,
     ) -> Result<()> {
+        self.send_prompt_session_with_attachments_with_command_id(
+            session_id,
+            new_session_command_id("prompt"),
+            message,
+            attachments,
+        )
+        .await
+    }
+
+    pub async fn send_prompt_session_with_attachments_with_command_id(
+        &self,
+        session_id: SessionId,
+        command_id: impl Into<String>,
+        message: impl Into<String>,
+        attachments: Vec<AttachmentRef>,
+    ) -> Result<()> {
         let message = message.into();
         let title =
             session_title(&message).or_else(|| (!attachments.is_empty()).then(|| "Image".into()));
@@ -396,7 +421,7 @@ impl AetherflowClient {
 
         self.session_handle(session_id)
             .send(SendSessionCommand {
-                command: SessionCommand::prompt("prompt", message, attachments),
+                command: SessionCommand::prompt(command_id, message, attachments),
             })
             .await
             .with_context(|| format!("prompt session {session_id}"))
@@ -405,6 +430,22 @@ impl AetherflowClient {
     pub async fn steer_session_with_attachments(
         &self,
         session_id: SessionId,
+        message: impl Into<String>,
+        attachments: Vec<AttachmentRef>,
+    ) -> Result<()> {
+        self.steer_session_with_attachments_with_command_id(
+            session_id,
+            new_session_command_id("steer"),
+            message,
+            attachments,
+        )
+        .await
+    }
+
+    pub async fn steer_session_with_attachments_with_command_id(
+        &self,
+        session_id: SessionId,
+        command_id: impl Into<String>,
         message: impl Into<String>,
         attachments: Vec<AttachmentRef>,
     ) -> Result<()> {
@@ -421,7 +462,7 @@ impl AetherflowClient {
 
         self.session_handle(session_id)
             .send(SendSessionCommand {
-                command: SessionCommand::steer("steer", message, attachments),
+                command: SessionCommand::steer(command_id, message, attachments),
             })
             .await
             .with_context(|| format!("steer active turn for session {session_id}"))
@@ -518,9 +559,18 @@ impl AetherflowClient {
     }
 
     pub async fn cancel_turn(&self, session_id: SessionId) -> Result<()> {
+        self.cancel_turn_with_command_id(session_id, new_session_command_id("abort"))
+            .await
+    }
+
+    pub async fn cancel_turn_with_command_id(
+        &self,
+        session_id: SessionId,
+        command_id: impl Into<String>,
+    ) -> Result<()> {
         self.session_handle(session_id)
             .send(SendSessionCommand {
-                command: SessionCommand::abort("abort"),
+                command: SessionCommand::abort(command_id),
             })
             .await
             .with_context(|| format!("cancel active turn for session {session_id}"))
@@ -753,6 +803,16 @@ mod tests {
             .expect("attachment endpoint port");
 
         assert!(![6420, 6421].contains(&port));
+    }
+
+    #[test]
+    fn session_command_ids_are_unique_and_describe_the_command() {
+        let first = new_session_command_id("prompt");
+        let second = new_session_command_id("prompt");
+
+        assert_ne!(first, second);
+        assert!(first.starts_with("aetherflow-prompt-"));
+        assert!(second.starts_with("aetherflow-prompt-"));
     }
 
     #[test]

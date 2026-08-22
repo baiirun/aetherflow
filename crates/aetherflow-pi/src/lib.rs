@@ -19,7 +19,7 @@ pub use attachment_store::{LocalAttachmentStore, MAX_ATTACHMENT_BYTES};
 pub use client::{
     AetherflowClient, AetherflowClientOptions, CreateSessionOptions, DEFAULT_ATTACHMENT_ADDRESS,
     DEFAULT_ATTACHMENT_ENDPOINT, DEFAULT_ENDPOINT, DEFAULT_NAMESPACE, DEFAULT_POOL, DEFAULT_TOKEN,
-    SessionEventStream, SessionEventSubscription,
+    SessionEventStream, SessionEventSubscription, new_session_command_id,
 };
 
 pub use protocol::{

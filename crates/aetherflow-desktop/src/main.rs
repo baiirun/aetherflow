@@ -6,7 +6,7 @@ use aetherflow_pi::{
     AetherflowClient, AetherflowClientOptions, AssistantMessageEvent, CreateSessionOptions,
     DEFAULT_SESSION_DIRECTORY_KEY, DEFAULT_SESSION_EVENT_PAGE_SIZE, DEFAULT_WORKSPACE_CATALOG_KEY,
     PiEvent, RpcResponse, SESSION_DIRECTORY_ACTOR_NAME, SessionDescriptor, SessionEvent,
-    SessionEventPayload, WORKSPACE_CATALOG_ACTOR_NAME,
+    SessionEventPayload, WORKSPACE_CATALOG_ACTOR_NAME, new_session_command_id,
 };
 use aetherflow_storage::{DirectoryId, SessionId, Workspace, WorkspaceId};
 use daemon::{DaemonTarget, ManagedDaemon};
@@ -37,6 +37,7 @@ use std::{
 };
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
+use tokio::time::sleep;
 use transcript::{
     ConversationImage, ConversationItem, ConversationMessage, ConversationRole, ToolCallView,
     ToolGroup, ToolStatus, apply_conversation_event, completed_user_message,
@@ -55,6 +56,8 @@ const BOTTOM_FOLLOW_THRESHOLD: f32 = 32.;
 const CONTENT_SHIFT_TIME_CONSTANT: Duration = Duration::from_millis(55);
 const CONTENT_SHIFT_SETTLE_DISTANCE: f32 = 0.5;
 const CONVERSATION_EVENT_PAGE_SIZE: u32 = DEFAULT_SESSION_EVENT_PAGE_SIZE;
+const SESSION_FOLLOW_RECONNECT_ATTEMPTS: u32 = 5;
+const SESSION_FOLLOW_RECONNECT_INITIAL_DELAY: Duration = Duration::from_millis(100);
 const TOOL_GROUP_SHIMMER_DURATION: Duration = Duration::from_millis(1_600);
 const TOOL_GROUP_SHIMMER_BAND_WIDTH: f32 = 0.24;
 const AGENT_BLOB_SIZE: f32 = 32.;
@@ -103,7 +106,10 @@ enum SessionLoadState {
 }
 
 enum PromptUpdate {
-    Created(SessionId),
+    Created {
+        session_id: SessionId,
+        command_id: String,
+    },
     PromptDispatchFinished {
         session_id: SessionId,
         error: Option<String>,
@@ -123,10 +129,12 @@ enum SessionFollowerUpdate {
         session_id: SessionId,
         generation: u64,
         events: Vec<SessionEvent>,
+        attachment_warnings: Vec<String>,
     },
     Event {
         generation: u64,
         event: SessionEvent,
+        attachment_warning: Option<String>,
     },
     Failed {
         session_id: SessionId,
@@ -314,6 +322,7 @@ struct DesktopShell {
     workspace_disclosure_transition_versions: HashMap<WorkspaceId, u64>,
     loading_conversations: HashSet<SessionId>,
     conversation_errors: HashMap<SessionId, String>,
+    conversation_warnings: HashMap<SessionId, String>,
     new_session_messages: Vec<ConversationItem>,
     composer: Entity<InputState>,
     workspace_name: Entity<InputState>,
@@ -325,6 +334,7 @@ struct DesktopShell {
     next_pending_image_id: u64,
     session_runtime_states: HashMap<SessionId, SessionRuntimeState>,
     session_request_states: HashMap<SessionId, SessionRequestState>,
+    session_request_command_ids: HashMap<SessionId, String>,
     // Outlives dispatch state until a newer matching durable user event or a
     // terminal failure reconciles the optimistic prompt.
     pending_prompt_messages: HashMap<SessionId, PendingUserMessage>,
@@ -413,6 +423,7 @@ impl DesktopShell {
             workspace_disclosure_transition_versions: HashMap::new(),
             loading_conversations: HashSet::new(),
             conversation_errors: HashMap::new(),
+            conversation_warnings: HashMap::new(),
             new_session_messages: Vec::new(),
             composer,
             workspace_name,
@@ -424,6 +435,7 @@ impl DesktopShell {
             next_pending_image_id: 0,
             session_runtime_states: HashMap::new(),
             session_request_states: HashMap::new(),
+            session_request_command_ids: HashMap::new(),
             pending_prompt_messages: HashMap::new(),
             session_followers: HashMap::new(),
             next_follower_generation: 0,
@@ -667,15 +679,45 @@ impl DesktopShell {
     fn set_session_request_state(&mut self, session_id: SessionId, state: SessionRequestState) {
         if state == SessionRequestState::Idle {
             self.session_request_states.remove(&session_id);
+            self.session_request_command_ids.remove(&session_id);
         } else {
             self.session_request_states.insert(session_id, state);
         }
+    }
+
+    fn begin_session_request(
+        &mut self,
+        session_id: SessionId,
+        state: SessionRequestState,
+        command_id: String,
+    ) {
+        debug_assert_ne!(state, SessionRequestState::Idle);
+        self.session_request_states.insert(session_id, state);
+        self.session_request_command_ids
+            .insert(session_id, command_id);
+    }
+
+    fn response_matches_session_request(
+        &self,
+        session_id: SessionId,
+        state: SessionRequestState,
+        response_id: Option<&str>,
+    ) -> bool {
+        session_response_matches_request(
+            self.session_request_state(session_id),
+            self.session_request_command_ids
+                .get(&session_id)
+                .map(String::as_str),
+            state,
+            response_id,
+        )
     }
 
     fn set_session_submitting(
         &mut self,
         session_id: SessionId,
         submitted_message: ConversationMessage,
+        command_id: String,
     ) {
         let baseline = self.current_follower_cursor(session_id);
         self.pending_prompt_messages.insert(
@@ -685,8 +727,7 @@ impl DesktopShell {
                 message: submitted_message,
             },
         );
-        self.session_request_states
-            .insert(session_id, SessionRequestState::Submitting);
+        self.begin_session_request(session_id, SessionRequestState::Submitting, command_id);
     }
 
     fn follower_is_current(&self, session_id: SessionId, generation: u64) -> bool {
@@ -1018,6 +1059,7 @@ impl DesktopShell {
         );
         self.loading_conversations.insert(session_id);
         self.conversation_errors.remove(&session_id);
+        self.conversation_warnings.remove(&session_id);
 
         let client = self.client.clone();
         let (updates, mut update_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1042,36 +1084,39 @@ impl DesktopShell {
                 }
             };
             let mut replay = subscription.take_replay();
-            let hydration = tokio::select! {
-                _ = &mut cancelled => {
-                    subscription.close().await;
-                    return;
+            let mut attachment_warnings = Vec::new();
+            for event in &mut replay {
+                let hydration = tokio::select! {
+                    _ = &mut cancelled => {
+                        subscription.close().await;
+                        return;
+                    }
+                    result = client.hydrate_event_attachments(event) => result,
+                };
+                if let Err(error) = hydration {
+                    attachment_warnings.push(format!(
+                        "Could not load attachment for event {}: {error:#}",
+                        event.sequence
+                    ));
                 }
-                result = client.hydrate_events_attachments(&mut replay) => result,
-            };
-            if let Err(error) = hydration {
-                let _ = updates.send(SessionFollowerUpdate::Failed {
-                    session_id,
-                    generation,
-                    error: format!("Could not load session attachments: {error:#}"),
-                });
-                subscription.close().await;
-                return;
             }
-            if let Some(last_event) = replay.last() {
-                follower_cursor.store(last_event.sequence, Ordering::Release);
-            }
+            let replay_cursor = replay.last().map(|event| event.sequence);
             if updates
                 .send(SessionFollowerUpdate::Loaded {
                     session_id,
                     generation,
                     events: replay,
+                    attachment_warnings,
                 })
                 .is_err()
             {
                 subscription.close().await;
                 return;
             }
+            if let Some(replay_cursor) = replay_cursor {
+                follower_cursor.store(replay_cursor, Ordering::Release);
+            }
+            let mut reconnect_attempt = 0;
             loop {
                 let next = tokio::select! {
                     _ = &mut cancelled => {
@@ -1081,19 +1126,89 @@ impl DesktopShell {
                     result = subscription.next() => result,
                 };
                 let mut event = match next {
-                    Ok(Some(event)) => event,
-                    Ok(None) => continue,
+                    Ok(Some(event)) => {
+                        reconnect_attempt = 0;
+                        event
+                    }
+                    Ok(None) => unreachable!("session subscriptions report closure as an error"),
                     Err(error) => {
-                        let _ = updates.send(SessionFollowerUpdate::Failed {
-                            session_id,
-                            generation,
-                            error: format!("Session event follower failed: {error:#}"),
-                        });
                         subscription.close().await;
-                        return;
+                        let mut last_error = error;
+                        loop {
+                            reconnect_attempt += 1;
+                            if reconnect_attempt > SESSION_FOLLOW_RECONNECT_ATTEMPTS {
+                                let cursor = follower_cursor.load(Ordering::Acquire);
+                                let _ = updates.send(SessionFollowerUpdate::Failed {
+                                    session_id,
+                                    generation,
+                                    error: format!(
+                                        "Session event follower failed after {} reconnect attempts from sequence {cursor}: {last_error:#}",
+                                        SESSION_FOLLOW_RECONNECT_ATTEMPTS,
+                                    ),
+                                });
+                                return;
+                            }
+                            let delay = session_follow_reconnect_delay(reconnect_attempt);
+                            tokio::select! {
+                                _ = &mut cancelled => return,
+                                _ = sleep(delay) => {}
+                            }
+                            let cursor = follower_cursor.load(Ordering::Acquire);
+                            let reconnect = tokio::select! {
+                                _ = &mut cancelled => return,
+                                result = client.follow_session_events(
+                                    session_id,
+                                    cursor,
+                                    CONVERSATION_EVENT_PAGE_SIZE,
+                                ) => result,
+                            };
+                            match reconnect {
+                                Ok(mut replacement) => {
+                                    // Reconnect replay extends the transcript. Sending another
+                                    // Loaded update would rebuild it and reintroduce the visual
+                                    // reset that durable following is meant to avoid.
+                                    let replay = replacement.take_replay();
+                                    let made_progress = !replay.is_empty();
+                                    for mut recovered in replay {
+                                        let hydration = tokio::select! {
+                                            _ = &mut cancelled => {
+                                                replacement.close().await;
+                                                return;
+                                            }
+                                            result = client.hydrate_event_attachments(&mut recovered) => result,
+                                        };
+                                        let attachment_warning = hydration.err().map(|error| {
+                                            format!(
+                                                "Could not load attachment for event {}: {error:#}",
+                                                recovered.sequence
+                                            )
+                                        });
+                                        let sequence = recovered.sequence;
+                                        if updates
+                                            .send(SessionFollowerUpdate::Event {
+                                                generation,
+                                                event: recovered,
+                                                attachment_warning,
+                                            })
+                                            .is_err()
+                                        {
+                                            replacement.close().await;
+                                            return;
+                                        }
+                                        follower_cursor.store(sequence, Ordering::Release);
+                                    }
+                                    subscription = replacement;
+                                    if made_progress {
+                                        reconnect_attempt = 0;
+                                    }
+                                    break;
+                                }
+                                Err(error) => last_error = error,
+                            }
+                        }
+                        continue;
                     }
                 };
-                follower_cursor.store(event.sequence, Ordering::Release);
                 let hydration = tokio::select! {
                     _ = &mut cancelled => {
                         subscription.close().await;
@@ -1101,22 +1216,25 @@ impl DesktopShell {
                     }
                     result = client.hydrate_event_attachments(&mut event) => result,
                 };
-                if let Err(error) = hydration {
-                    let _ = updates.send(SessionFollowerUpdate::Failed {
-                        session_id,
-                        generation,
-                        error: format!("Could not load session attachment: {error:#}"),
-                    });
-                    subscription.close().await;
-                    return;
-                }
+                let attachment_warning = hydration.err().map(|error| {
+                    format!(
+                        "Could not load attachment for event {}: {error:#}",
+                        event.sequence
+                    )
+                });
+                let sequence = event.sequence;
                 if updates
-                    .send(SessionFollowerUpdate::Event { generation, event })
+                    .send(SessionFollowerUpdate::Event {
+                        generation,
+                        event,
+                        attachment_warning,
+                    })
                     .is_err()
                 {
                     subscription.close().await;
                     return;
                 }
+                follower_cursor.store(sequence, Ordering::Release);
             }
         });
 
@@ -1131,6 +1249,13 @@ impl DesktopShell {
         .detach();
     }
 
+    fn retry_conversation(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
+        cancel_session_follower(&mut self.session_followers, session_id);
+        self.conversation_errors.remove(&session_id);
+        self.load_conversation(session_id, cx);
+        cx.notify();
+    }
+
     fn apply_session_follower_update(
         &mut self,
         update: SessionFollowerUpdate,
@@ -1141,11 +1266,20 @@ impl DesktopShell {
                 session_id,
                 generation,
                 events,
+                attachment_warnings,
             } => {
                 if !self.follower_is_current(session_id, generation) {
                     return;
                 }
                 self.loading_conversations.remove(&session_id);
+                if attachment_warnings.is_empty() {
+                    self.conversation_warnings.remove(&session_id);
+                } else {
+                    self.conversation_warnings.insert(
+                        session_id,
+                        summarize_attachment_warnings(&attachment_warnings),
+                    );
+                }
                 let runtime_state = runtime_state_from_events(&events);
                 reconcile_pending_steering_from_replay(
                     &mut self.pending_steering_messages,
@@ -1208,10 +1342,17 @@ impl DesktopShell {
                     .expect("loaded conversations have a scroll handle")
                     .scroll_to_bottom();
             }
-            SessionFollowerUpdate::Event { generation, event } => {
+            SessionFollowerUpdate::Event {
+                generation,
+                event,
+                attachment_warning,
+            } => {
                 let session_id = event.session_id;
                 if !self.follower_is_current(session_id, generation) {
                     return;
+                }
+                if let Some(warning) = attachment_warning {
+                    self.conversation_warnings.insert(session_id, warning);
                 }
                 let follow = self.conversation_is_at_bottom(session_id);
                 apply_runtime_event(
@@ -1293,45 +1434,62 @@ impl DesktopShell {
                     self.load_sessions(cx);
                     self.release_dormant_session_follower(session_id);
                 }
-                PiEvent::Response(RpcResponse::Steer { .. }) => {
-                    self.transition_session_request_state(
+                PiEvent::Response(response @ RpcResponse::Steer { .. }) => {
+                    if self.response_matches_session_request(
                         session_id,
                         SessionRequestState::Steering,
-                        SessionRequestState::Idle,
-                    );
-                    self.load_sessions(cx);
+                        response.id(),
+                    ) {
+                        self.set_session_request_state(session_id, SessionRequestState::Idle);
+                        self.load_sessions(cx);
+                    }
                 }
-                PiEvent::Response(RpcResponse::Error { command, error, .. }) => {
+                PiEvent::Response(response @ RpcResponse::Abort { .. }) => {
+                    if self.response_matches_session_request(
+                        session_id,
+                        SessionRequestState::Cancelling,
+                        response.id(),
+                    ) {
+                        self.set_session_request_state(session_id, SessionRequestState::Idle);
+                    }
+                }
+                PiEvent::Response(response @ RpcResponse::Error { command, error, .. }) => {
                     match command.as_str() {
-                        "prompt" => {
-                            self.transition_session_request_state(
+                        "prompt"
+                            if self.response_matches_session_request(
                                 session_id,
                                 SessionRequestState::Submitting,
-                                SessionRequestState::Idle,
-                            );
+                                response.id(),
+                            ) =>
+                        {
+                            self.set_session_request_state(session_id, SessionRequestState::Idle);
                             self.set_agent_blob_state(session_id, AgentBlobState::Error);
                             self.finish_turn_timing(session_id);
                             self.pending_prompt_messages.remove(&session_id);
                         }
-                        "steer" => {
-                            self.transition_session_request_state(
+                        "steer"
+                            if self.response_matches_session_request(
                                 session_id,
                                 SessionRequestState::Steering,
-                                SessionRequestState::Idle,
-                            );
+                                response.id(),
+                            ) =>
+                        {
+                            self.set_session_request_state(session_id, SessionRequestState::Idle);
                             discard_latest_pending_steering(
                                 &mut self.pending_steering_messages,
                                 session_id,
                             );
                         }
-                        "abort" => {
-                            self.transition_session_request_state(
+                        "abort"
+                            if self.response_matches_session_request(
                                 session_id,
                                 SessionRequestState::Cancelling,
-                                SessionRequestState::Idle,
-                            );
+                                response.id(),
+                            ) =>
+                        {
+                            self.set_session_request_state(session_id, SessionRequestState::Idle);
                         }
-                        _ => {}
+                        _ => return,
                     }
                     self.action_error = Some(error.clone());
                 }
@@ -1528,6 +1686,12 @@ impl DesktopShell {
             images: conversation_images,
         };
         let submitted_message = user_message.clone();
+        let command_id = match submission {
+            SubmissionKind::Steer(_) => new_session_command_id("steer"),
+            SubmissionKind::Prompt(_) | SubmissionKind::NewSession { .. } => {
+                new_session_command_id("prompt")
+            }
+        };
         match submission {
             SubmissionKind::Steer(session_id) => {
                 let after_sequence = self.current_follower_cursor(session_id);
@@ -1558,10 +1722,14 @@ impl DesktopShell {
         self.pending_images.clear();
         match submission {
             SubmissionKind::Steer(session_id) => {
-                self.set_session_request_state(session_id, SessionRequestState::Steering);
+                self.begin_session_request(
+                    session_id,
+                    SessionRequestState::Steering,
+                    command_id.clone(),
+                );
             }
             SubmissionKind::Prompt(session_id) => {
-                self.set_session_submitting(session_id, submitted_message);
+                self.set_session_submitting(session_id, submitted_message, command_id.clone());
                 self.active_turn_started_at
                     .insert(session_id, Instant::now());
                 self.set_agent_blob_state(session_id, AgentBlobState::Thinking);
@@ -1597,7 +1765,12 @@ impl DesktopShell {
             }
             if let SubmissionKind::Steer(session_id) = submission {
                 let error = client
-                    .steer_session_with_attachments(session_id, prompt, attachments)
+                    .steer_session_with_attachments_with_command_id(
+                        session_id,
+                        command_id,
+                        prompt,
+                        attachments,
+                    )
                     .await
                     .err()
                     .map(|error| format!("Could not steer active turn: {error:#}"));
@@ -1614,7 +1787,10 @@ impl DesktopShell {
                     options.directory_id = Some(directory_id);
                     match client.create_session(options).await {
                         Ok(session_id) => {
-                            let _ = updates.send(PromptUpdate::Created(session_id));
+                            let _ = updates.send(PromptUpdate::Created {
+                                session_id,
+                                command_id: command_id.clone(),
+                            });
                             session_id
                         }
                         Err(error) => {
@@ -1630,7 +1806,12 @@ impl DesktopShell {
             };
 
             let error = client
-                .send_prompt_session_with_attachments(session_id, prompt, attachments)
+                .send_prompt_session_with_attachments_with_command_id(
+                    session_id,
+                    command_id,
+                    prompt,
+                    attachments,
+                )
                 .await
                 .err()
                 .map(|error| format!("Could not prompt session: {error:#}"));
@@ -1660,7 +1841,10 @@ impl DesktopShell {
 
     fn apply_prompt_update(&mut self, update: PromptUpdate, cx: &mut Context<Self>) {
         match update {
-            PromptUpdate::Created(session_id) => {
+            PromptUpdate::Created {
+                session_id,
+                command_id,
+            } => {
                 self.replace_selected_session(Some(session_id));
                 self.creating_new_session = false;
                 self.new_session_request_state = SessionRequestState::Idle;
@@ -1675,7 +1859,7 @@ impl DesktopShell {
                 let submitted_message = optimistic_prompt_message(&messages)
                     .cloned()
                     .expect("new sessions have an optimistic prompt");
-                self.set_session_submitting(session_id, submitted_message);
+                self.set_session_submitting(session_id, submitted_message, command_id);
                 self.conversations.insert(session_id, messages);
                 self.conversation_scrolls
                     .entry(session_id)
@@ -1781,21 +1965,23 @@ impl DesktopShell {
         let Some(session_id) = self.selected_session_id else {
             return;
         };
+        let command_id = new_session_command_id("abort");
         if !self.session_runtime_state(session_id).has_active_turn()
-            || !self.transition_session_request_state(
-                session_id,
-                SessionRequestState::Idle,
-                SessionRequestState::Cancelling,
-            )
+            || self.session_request_state(session_id) != SessionRequestState::Idle
         {
             return;
         }
+        self.begin_session_request(
+            session_id,
+            SessionRequestState::Cancelling,
+            command_id.clone(),
+        );
 
         self.action_error = None;
         let client = self.client.clone();
         let request = self.runtime.spawn(async move {
             client
-                .cancel_turn(session_id)
+                .cancel_turn_with_command_id(session_id, command_id)
                 .await
                 .map_err(|error| format!("Could not cancel turn: {error:#}"))
         });
@@ -2513,6 +2699,7 @@ impl DesktopShell {
         }
 
         if let Some(error) = self.conversation_errors.get(&session_id) {
+            let retry_session_id = session_id;
             return conversation
                 .items_center()
                 .justify_center()
@@ -2525,8 +2712,46 @@ impl DesktopShell {
                         .text_xs()
                         .text_color(rgb(0x8b93a1))
                         .child(truncate(error, 180)),
+                )
+                .child(
+                    div()
+                        .id("retry-conversation")
+                        .mt_2()
+                        .h(px(36.))
+                        .px_4()
+                        .flex()
+                        .items_center()
+                        .rounded_lg()
+                        .cursor_pointer()
+                        .bg(rgb(0x2d333e))
+                        .text_color(rgb(0xe7eaf0))
+                        .hover(|style| style.bg(rgb(0x383f4c)))
+                        .child("Retry")
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.retry_conversation(retry_session_id, cx);
+                        })),
                 );
         }
+
+        let conversation = conversation.when_some(
+            self.conversation_warnings.get(&session_id).cloned(),
+            |conversation, warning| {
+                conversation.child(
+                    div()
+                        .mb_4()
+                        .px_3()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(rgb(0x2c2820))
+                        .text_xs()
+                        .text_color(rgb(0xd8b879))
+                        .child(format!(
+                            "Some images are unavailable. {}",
+                            truncate(&warning, 180)
+                        )),
+                )
+            },
+        );
 
         let messages = self
             .conversations
@@ -3300,6 +3525,31 @@ fn render_workspace_folder_drawing(openness: f32) -> gpui::AnyElement {
 
 fn short_id(id: SessionId) -> String {
     short_uuid(&id.to_string())
+}
+
+fn session_follow_reconnect_delay(attempt: u32) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(4);
+    SESSION_FOLLOW_RECONNECT_INITIAL_DELAY * (1_u32 << exponent)
+}
+
+fn session_response_matches_request(
+    current_state: SessionRequestState,
+    command_id: Option<&str>,
+    expected_state: SessionRequestState,
+    response_id: Option<&str>,
+) -> bool {
+    current_state == expected_state && command_id.is_some() && command_id == response_id
+}
+
+fn summarize_attachment_warnings(warnings: &[String]) -> String {
+    match warnings {
+        [] => String::new(),
+        [warning] => warning.clone(),
+        [first, ..] => format!(
+            "{first} {} additional attachments could not be loaded.",
+            warnings.len() - 1
+        ),
+    }
 }
 
 fn session_workspace_ids(session: &SessionDescriptor) -> (WorkspaceId, DirectoryId) {
@@ -4530,6 +4780,48 @@ mod tests {
 
         assert!(state.transition(SessionRequestState::Steering, SessionRequestState::Idle));
         assert_eq!(state, SessionRequestState::Idle);
+    }
+
+    #[test]
+    fn only_the_correlated_response_matches_a_local_request() {
+        assert!(session_response_matches_request(
+            SessionRequestState::Steering,
+            Some("steer-2"),
+            SessionRequestState::Steering,
+            Some("steer-2"),
+        ));
+        assert!(!session_response_matches_request(
+            SessionRequestState::Steering,
+            Some("steer-2"),
+            SessionRequestState::Steering,
+            Some("steer-1"),
+        ));
+        assert!(!session_response_matches_request(
+            SessionRequestState::Steering,
+            Some("steer-2"),
+            SessionRequestState::Steering,
+            None,
+        ));
+    }
+
+    #[test]
+    fn follower_reconnect_delay_is_bounded_exponential_backoff() {
+        assert_eq!(
+            session_follow_reconnect_delay(1),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            session_follow_reconnect_delay(2),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            session_follow_reconnect_delay(5),
+            Duration::from_millis(1_600)
+        );
+        assert_eq!(
+            session_follow_reconnect_delay(20),
+            Duration::from_millis(1_600)
+        );
     }
 
     #[test]

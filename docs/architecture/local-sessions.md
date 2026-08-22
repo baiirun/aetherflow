@@ -64,6 +64,9 @@ It does not currently provide:
 
 - Session commands MUST pass through the Session actor so one actor owns command
   ordering for one Pi process.
+- Every dispatched Session command MUST have a unique command ID. Desktop
+  request state MUST be resolved only by a response carrying that exact ID;
+  another client's acknowledgement or error cannot complete the local request.
 - Every Pi stdout record and terminal Session failure MUST become a Session
   Event.
 - A Session Event MUST be persisted before it is published live.
@@ -73,6 +76,10 @@ It does not currently provide:
   1,000 events per page.
 - Replay-to-live following MUST subscribe before replay and suppress any live
   event whose sequence was already replayed.
+- After a live follower interruption, the desktop MUST reconnect with bounded
+  backoff from the last event it successfully delivered. Recovered replay
+  records MUST append through the normal event path rather than replacing the
+  transcript. Exhausted retries MUST leave an explicit manual retry action.
 - A prompt-scoped stream MUST finish on Pi `agent_end` or a terminal Session
   failure. Durable following remains a separate, open-ended observation mode.
 - The desktop MUST use one durable follower for the selected Session and for
@@ -129,6 +136,9 @@ It does not currently provide:
   externalized again before a Pi record is persisted or published.
 - An Attachment reference MUST include a SHA-256 identity, media type, and byte
   length. Reads MUST validate both digest and length.
+- Transcript hydration is presentation-only. A missing or invalid Attachment
+  MUST surface a scoped warning and unavailable-image placeholder without
+  suppressing the event's text, lifecycle data, or later live events.
 - The local attachment transport MUST currently accept only PNG, JPEG, GIF, and
   WebP images up to 25 MiB each.
 
@@ -307,6 +317,8 @@ The following tests are the contract anchors:
 | Event pages are bounded | `event_page_limit_is_bounded` |
 | Replay uses persisted sequence | `persisted_event_rows_recover_their_sequence` |
 | Replay plus live suppresses overlap | `client_creates_lists_prompts_and_resumes_a_session` |
+| Session command correlation | `session_command_ids_are_unique_and_describe_the_command` and `only_the_correlated_response_matches_a_local_request` |
+| Follower retry backoff | `follower_reconnect_delay_is_bounded_exponential_backoff` |
 | Agent end remains active until settled | `agent_end_does_not_settle_the_turn` |
 | Current-turn replay reconciles submitting state | `replay_reconciles_submitting_only_after_observing_a_turn_lifecycle`, `replay_ignores_lifecycle_events_at_the_submission_baseline`, `inconclusive_replay_preserves_an_optimistic_submission`, and `pending_prompt_survives_until_a_newer_matching_durable_message` |
 | Durable steering replaces pending presentation | `durable_steering_message_replaces_pending_presentation_after_tools`, `replay_reconciles_pending_steering_with_durable_messages`, and `replay_does_not_match_steering_before_its_dispatch_baseline` |
@@ -314,6 +326,7 @@ The following tests are the contract anchors:
 | Pi records remain typed and forward-compatible | `unknown_event_round_trips_without_losing_fields` |
 | Actor messages exclude attachment bytes | `large_prompt_attachments_stay_outside_the_actor_message` |
 | Persisted events externalize attachment bytes | `externalized_events_carry_references_instead_of_base64` |
+| Missing display attachments degrade visibly | `missing_attachment_data_keeps_image_only_messages_visible` |
 | Desktop rejects stale daemon health | `rejects_the_legacy_protocol_one_health_response` and `rejects_an_incompatible_daemon_protocol` |
 
 The Rivet lifecycle tests are ignored by default because they require a local

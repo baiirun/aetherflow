@@ -393,11 +393,16 @@ fn completed_conversation_message(message: &Value) -> Option<ConversationMessage
         _ => return None,
     };
     let content = message.get("content")?.as_array()?;
-    let text = content
+    let mut text = content
         .iter()
         .filter(|content| content.get("type").and_then(Value::as_str) == Some("text"))
         .filter_map(|content| content.get("text").and_then(Value::as_str))
         .collect::<String>();
+    let unavailable_images = content
+        .iter()
+        .filter(|content| content.get("type").and_then(Value::as_str) == Some("image"))
+        .filter(|content| content.get("data").and_then(Value::as_str).is_none())
+        .count();
     let images = content
         .iter()
         .filter(|content| content.get("type").and_then(Value::as_str) == Some("image"))
@@ -410,6 +415,16 @@ fn completed_conversation_message(message: &Value) -> Option<ConversationMessage
             ConversationImage::new(mime_type, data)
         })
         .collect::<Vec<_>>();
+    if unavailable_images > 0 {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        if unavailable_images == 1 {
+            text.push_str("[Image unavailable]");
+        } else {
+            text.push_str(&format!("[{unavailable_images} images unavailable]"));
+        }
+    }
     if text.is_empty() && images.is_empty() {
         return None;
     }
@@ -613,6 +628,32 @@ mod tests {
             message.images,
             vec![ConversationImage::new("image/png", vec![1, 2, 3]).expect("supported image")]
         );
+    }
+
+    #[test]
+    fn missing_attachment_data_keeps_image_only_messages_visible() {
+        let events = [session_event(
+            1,
+            json!({
+                "type": "message_end",
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "image",
+                        "mimeType": "image/png",
+                        "attachmentId": "missing",
+                        "byteLength": 42
+                    }]
+                }
+            }),
+        )];
+
+        let items = conversation_from_events(&events);
+        let ConversationItem::Message(message) = &items[0] else {
+            panic!("message expected");
+        };
+        assert_eq!(message.text, "[Image unavailable]");
+        assert!(message.images.is_empty());
     }
 
     #[test]
